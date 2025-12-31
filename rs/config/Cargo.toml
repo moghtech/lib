@@ -1,0 +1,15 @@
+[package]
+name = "mogh_config"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde_yaml_ng.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+indexmap.workspace = true
+wildcard.workspace = true
+colored.workspace = true
+regex.workspace = true
+serde.workspace = true
+toml.workspace = true

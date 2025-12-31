@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = ["rs/*"]
+
+[workspace.package]
+edition = "2024"
+authors = ["moghtech <contact@mogh.tech>"]
+license = "MIT"
+repository = "https://github.com/moghtech/lib"
+homepage = "https://mogh.tech/lib"
+
+[workspace.dependencies]
+# SER/DE
+indexmap = { version = "2.12.1", features = ["serde"] }
+serde = { version = "1.0.227", features = ["derive"] }
+serde_yaml_ng = "0.10.0"
+serde_json = "1.0.148"
+serde_qs = "0.15.0"
+toml = "0.9.8"
+
+# ERROR
+anyhow = "1.0.100"
+thiserror = "2.0.17"
+
+# LOGGING
+opentelemetry-otlp = { version = "0.31.0", features = ["tls-roots", "reqwest-rustls"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
+tracing-subscriber = { version = "0.3.22", features = ["json"] }
+opentelemetry-semantic-conventions = "0.31.0"
+tracing-opentelemetry = "0.32.0"
+opentelemetry = "0.31.0"
+tracing = "0.1.44"
+
+# MISC
+typeshare = "1.0.4"
+wildcard = "0.3.0"
+colored = "3.0.0"
+regex = "1.12.2"

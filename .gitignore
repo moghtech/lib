@@ -1,0 +1,9 @@
+target
+node_modules
+dist
+deno.lock
+.env
+.env.development
+.DS_Store
+.idea
+.dev
