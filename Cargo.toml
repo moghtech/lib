@@ -7,9 +7,19 @@ edition = "2024"
 authors = ["moghtech <contact@mogh.tech>"]
 license = "MIT"
 repository = "https://github.com/moghtech/lib"
-homepage = "https://mogh.tech/lib"
+# homepage = "https://mogh.tech/lib"
 
 [workspace.dependencies]
+# LOCAL
+mogh_cache = { path = "rs/cache" }
+serror = { path = "rs/serror" }
+
+# ASYNC
+tokio = { version = "1.48.0", features = ["full"] }
+
+# SERVER
+axum = { version = "0.8", features = ["macros"] }
+
 # SER/DE
 indexmap = { version = "2.12.1", features = ["serde"] }
 serde = { version = "1.0.227", features = ["derive"] }
@@ -35,4 +45,5 @@ tracing = "0.1.44"
 typeshare = "1.0.4"
 wildcard = "0.3.0"
 colored = "3.0.0"
+utoipa = "5.4.0"
 regex = "1.12.2"

@@ -1,7 +1,10 @@
 [package]
 name = "mogh_logger"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 opentelemetry-semantic-conventions.workspace = true
