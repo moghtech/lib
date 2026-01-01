@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["rs/*"]
+members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
@@ -11,8 +11,8 @@ repository = "https://github.com/moghtech/lib"
 
 [workspace.dependencies]
 # LOCAL
-mogh_cache = { path = "rs/cache" }
-serror = { path = "rs/serror" }
+mogh_cache = { path = "crates/cache" }
+serror = { path = "crates/serror" }
 
 # ASYNC
 tokio = { version = "1.48.0", features = ["full"] }

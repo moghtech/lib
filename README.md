@@ -1,13 +1,21 @@
 # moghtech/lib
 
-Collection of Rust and Typescript app building tools used in Mogh apps.
+Collection of Rust and React (Typescript) libraries used across Mogh apps.
+These libraries handle common web app utilities, ensuring consistency across the Mogh ecosystem.
 
 ### Rust crates
 
+- cache
 - config
-- environment_file
 - logger
+- rate_limit
+- secret_file
+- serror
 
 ### Typescript packages
 
-- ui
+- @moghtech/react-base
+- @moghtech/data-table
+- @moghtech/monaco-editor
+- @moghtech/omni-search
+- @moghtech/xterm
