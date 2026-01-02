@@ -2,6 +2,6 @@
 
 Collection of web app UI essentials
 
-- Shadcn / tailwind setup
+- Solid / tailwind setup
 - Basic components
 - Light / Dark theming
