@@ -8,21 +8,22 @@ authors = ["moghtech <contact@mogh.tech>"]
 license = "MIT"
 repository = "https://github.com/moghtech/lib"
 # homepage = "https://mogh.tech/lib"
+publish = ["mogh"]
 
 [workspace.dependencies]
 # LOCAL
 mogh_cache = { path = "crates/cache" }
-serror = { path = "crates/serror" }
+mogh_error = { path = "crates/error" }
 
 # ASYNC
-tokio = { version = "1.48.0", features = ["full"] }
+tokio = { version = "1.49.0", features = ["full"] }
 
 # SERVER
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8.8", features = ["macros"] }
 
 # SER/DE
 indexmap = { version = "2.12.1", features = ["serde"] }
-serde = { version = "1.0.227", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml_ng = "0.10.0"
 serde_json = "1.0.148"
 serde_qs = "0.15.0"
@@ -42,7 +43,7 @@ opentelemetry = "0.31.0"
 tracing = "0.1.44"
 
 # MISC
-typeshare = "1.0.4"
+typeshare = "1.0.5"
 wildcard = "0.3.0"
 colored = "3.0.0"
 utoipa = "5.4.0"

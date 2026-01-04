@@ -1,2 +1,5 @@
 [build]
 rustflags = ["-Wunused-crate-dependencies"]
+
+[registries]
+mogh = { index = "sparse+https://forge.mogh.tech/api/packages/lib/cargo/" }

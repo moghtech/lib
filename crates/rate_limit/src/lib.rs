@@ -7,14 +7,14 @@ use std::{
 use anyhow::anyhow;
 use axum::http::{HeaderMap, StatusCode};
 use mogh_cache::CloneCache;
-use serror::{AddStatusCode, AddStatusCodeError};
+use mogh_error::{AddStatusCode, AddStatusCodeError};
 use tokio::sync::RwLock;
 
 /// Trait to extend fallible futures with stateful
 /// rate limiting.
 pub trait WithFailureRateLimit<R>
 where
-  Self: Future<Output = serror::Result<R>> + Sized,
+  Self: Future<Output = mogh_error::Result<R>> + Sized,
 {
   /// Ensure the given IP 'ip' is
   /// not violating the givin 'limiter' rate limit rules
@@ -33,7 +33,7 @@ where
     self,
     limiter: &RateLimiter,
     ip: &IpAddr,
-  ) -> impl Future<Output = serror::Result<R>> {
+  ) -> impl Future<Output = mogh_error::Result<R>> {
     async {
       if limiter.disabled {
         return self.await;
@@ -102,7 +102,7 @@ where
     limiter: &RateLimiter,
     headers: &HeaderMap,
     fallback: Option<IpAddr>,
-  ) -> impl Future<Output = serror::Result<R>> {
+  ) -> impl Future<Output = mogh_error::Result<R>> {
     async move {
       // Can skip header ip extraction if disabled
       if limiter.disabled {
@@ -115,7 +115,7 @@ where
 }
 
 impl<F, R> WithFailureRateLimit<R> for F where
-  F: Future<Output = serror::Result<R>> + Sized
+  F: Future<Output = mogh_error::Result<R>> + Sized
 {
 }
 
@@ -188,7 +188,7 @@ fn spawn_cleanup_task(limiter: Arc<RateLimiter>) {
 pub fn get_ip_from_headers(
   headers: &HeaderMap,
   fallback: Option<IpAddr>,
-) -> serror::Result<IpAddr> {
+) -> mogh_error::Result<IpAddr> {
   // Check X-Forwarded-For header (first IP in chain)
   if let Some(forwarded) = headers.get("x-forwarded-for")
     && let Ok(forwarded_str) = forwarded.to_str()

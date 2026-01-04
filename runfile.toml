@@ -1,9 +1,0 @@
-[build-solid-base]
-alias = "bsb"
-path = "solid/base"
-cmd = "yarn && yarn build"
-
-[build-react-base]
-alias = "brb"
-path = "react/base"
-cmd = "yarn && yarn build"

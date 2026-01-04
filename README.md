@@ -5,15 +5,14 @@ These libraries handle common web app utilities, ensuring consistency across the
 
 ### Rust crates
 
-- cache
-- config
-- logger
-- rate_limit
-- secret_file
-- serror
+- mogh_cache
+- mogh_config
+- mogh_logger
+- mogh_rate_limit
+- mogh_secret_file
+- mogh_error
 
 ### Typescript packages
 
 - @moghtech/monaco-editor
-- @moghtech/omni-search
 - @moghtech/xterm
