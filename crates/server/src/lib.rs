@@ -20,10 +20,10 @@ pub trait ServerConfig {
     false
   }
   fn ssl_key_file(&self) -> &str {
-    ""
+    "/config/ssl/key.pem"
   }
   fn ssl_cert_file(&self) -> &str {
-    ""
+    "/config/ssl/cert.pem"
   }
 }
 
