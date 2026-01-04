@@ -3,7 +3,7 @@ use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
 pub trait CorsConfig {
-  fn env_field(&self) -> &'static str {
+  fn allowed_origins_env_field(&self) -> &'static str {
     "CORS_ALLOWED_ORIGINS"
   }
   fn allow_credentials(&self) -> bool {
@@ -29,7 +29,7 @@ pub fn layer(config: impl CorsConfig) -> CorsLayer {
   if allowed_origins.is_empty() {
     warn!(
       "CORS using allowed origin 'Any' (*). Use {} to configure specific origins.",
-      config.env_field()
+      config.allowed_origins_env_field()
     );
     cors = cors.allow_origin(tower_http::cors::Any)
   } else {
