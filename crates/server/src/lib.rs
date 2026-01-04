@@ -11,6 +11,7 @@ use tracing::info;
 
 pub mod cors;
 pub mod session;
+pub mod ui;
 
 pub trait ServerConfig {
   fn bind_ip(&self) -> &str {
@@ -29,7 +30,7 @@ pub trait ServerConfig {
 }
 
 /// Serves the app with socket connect info
-pub async fn serve(
+pub async fn serve_app(
   app: Router,
   server: impl ServerConfig,
 ) -> anyhow::Result<()> {

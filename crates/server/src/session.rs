@@ -20,7 +20,7 @@ pub trait SessionConfig {
 ///
 /// Use [Session] to extract
 /// the client session in axum request handlers.
-pub fn layer(
+pub fn memory_session_layer(
   config: impl SessionConfig,
 ) -> SessionManagerLayer<MemoryStore> {
   let host = config.host();

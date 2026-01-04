@@ -20,7 +20,7 @@ pub trait CorsConfig {
 /// - If `cors_allowed_origins` is set: Only allows the specified origins
 /// - Methods and headers are always allowed (Any)
 /// - Credentials are only allowed if `cors_allow_credentials` is true
-pub fn layer(config: impl CorsConfig) -> CorsLayer {
+pub fn cors_layer(config: impl CorsConfig) -> CorsLayer {
   let mut cors = CorsLayer::new()
     .allow_methods(tower_http::cors::AllowMethods::mirror_request())
     .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
