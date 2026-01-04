@@ -32,7 +32,7 @@ pub trait ServerConfig {
 /// Serves the app with socket connect info
 pub async fn serve_app(
   app: Router,
-  server: impl ServerConfig,
+  config: impl ServerConfig,
 ) -> anyhow::Result<()> {
   // Add app standard security layers
   let app = app
@@ -55,18 +55,18 @@ pub async fn serve_app(
     .into_make_service_with_connect_info::<SocketAddr>();
 
   // Construct the bind socket addr
-  let addr = format!("{}:{}", server.bind_ip(), server.port());
+  let addr = format!("{}:{}", config.bind_ip(), config.port());
   let socket_addr = SocketAddr::from_str(&addr)
     .context("Failed to parse listen address")?;
 
   // Run the server
-  if server.ssl_enabled() {
+  if config.ssl_enabled() {
     // Run the server with TLS (https)
     info!("🔒 Server SSL Enabled");
     info!("Server starting on https://{socket_addr}");
     let ssl_config = RustlsConfig::from_pem_file(
-      server.ssl_cert_file(),
-      server.ssl_key_file(),
+      config.ssl_cert_file(),
+      config.ssl_key_file(),
     )
     .await
     .context("Invalid ssl cert / key")?;
