@@ -7,6 +7,7 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use tower_http::set_header::SetResponseHeaderLayer;
+use tracing::info;
 
 pub mod cors;
 pub mod session;
@@ -60,6 +61,8 @@ pub async fn serve(
   // Run the server
   if server.ssl_enabled() {
     // Run the server with TLS (https)
+    info!("🔒 Server SSL Enabled");
+    info!("Server starting on https://{socket_addr}");
     let ssl_config = RustlsConfig::from_pem_file(
       server.ssl_cert_file(),
       server.ssl_key_file(),
@@ -72,6 +75,8 @@ pub async fn serve(
       .context("Failed to start https server")
   } else {
     // Run the server without TLS (http)
+    info!("🔓 Server SSL Disabled");
+    info!("Server starting on http://{socket_addr}");
     axum_server::bind(socket_addr)
       .serve(app)
       .await
