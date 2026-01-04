@@ -31,7 +31,11 @@ mogh_secret_file = { version = "0.1.0", registry = "mogh" }
 tokio = { version = "1.49.0", features = ["full"] }
 
 # SERVER
+tower-http = { version = "0.6.8", features = ["fs", "cors", "set-header"] }
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 axum = { version = "0.8.8", features = ["macros"] }
+tower-sessions = "0.14.0"
+url = "2.5.7"
 
 # SER/DE
 indexmap = { version = "2.12.1", features = ["serde"] }

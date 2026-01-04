@@ -7,10 +7,11 @@ These libraries handle common web app utilities, ensuring consistency across the
 
 - mogh_cache
 - mogh_config
+- mogh_error
 - mogh_logger
 - mogh_rate_limit
 - mogh_secret_file
-- mogh_error
+- mogh_server
 
 ### Typescript packages
 
