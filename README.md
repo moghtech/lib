@@ -14,8 +14,6 @@ These libraries handle common web app utilities, ensuring consistency across the
 
 ### Typescript packages
 
-- @moghtech/react-base
-- @moghtech/data-table
 - @moghtech/monaco-editor
 - @moghtech/omni-search
 - @moghtech/xterm
