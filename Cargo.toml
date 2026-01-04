@@ -12,12 +12,20 @@ publish = ["mogh"]
 
 [patch.mogh]
 mogh_cache = { path = "crates/cache" }
+mogh_config = { path = "crates/config" }
 mogh_error = { path = "crates/error" }
+mogh_logger = { path = "crates/logger" }
+mogh_rate_limit = { path = "crates/rate_limit" }
+mogh_secret_file = { path = "crates/secret_file" }
 
 [workspace.dependencies]
 # MOGH
 mogh_cache = { version = "0.1.0", registry = "mogh" }
+mogh_config = { version = "0.1.0", registry = "mogh" }
 mogh_error = { version = "0.5.5", registry = "mogh" }
+mogh_logger = { version = "0.1.0", registry = "mogh" }
+mogh_rate_limit = { version = "0.1.0", registry = "mogh" }
+mogh_secret_file = { version = "0.1.0", registry = "mogh" }
 
 # ASYNC
 tokio = { version = "1.49.0", features = ["full"] }
