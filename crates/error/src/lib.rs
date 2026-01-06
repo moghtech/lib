@@ -67,7 +67,7 @@ pub fn deserialize_error_bytes(json: &[u8]) -> anyhow::Error {
 }
 
 pub fn deserialize_serror_bytes(json: &[u8]) -> Serror {
-  try_deserialize_serror_bytes(&json).unwrap_or_else(|_| Serror {
+  try_deserialize_serror_bytes(json).unwrap_or_else(|_| Serror {
     error: match String::from_utf8(json.to_vec()) {
       Ok(res) => res,
       Err(e) => format!("Bytes are not valid utf8 | {e:?}"),
