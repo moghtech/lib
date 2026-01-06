@@ -2,11 +2,13 @@ use std::net::{IpAddr, SocketAddr};
 
 use anyhow::Context;
 use axum::{
-  extract::{ConnectInfo, FromRequestParts},
-  http::StatusCode,
+  extract::{ConnectInfo, FromRequestParts, Request},
+  http::{HeaderMap, StatusCode},
 };
 use mogh_error::AddStatusCode as _;
 use tower_sessions::Session;
+
+use crate::ip::get_ip_from_headers;
 
 pub struct RequestClientArgs {
   /// Prefers extraction from headers 'x-forwarded-for', then 'x-real-ip'.
@@ -18,7 +20,7 @@ pub struct RequestClientArgs {
 
 impl<S: Send + Sync> FromRequestParts<S> for RequestClientArgs {
   type Rejection = mogh_error::Error;
-  
+
   async fn from_request_parts(
     parts: &mut axum::http::request::Parts,
     state: &S,
@@ -34,19 +36,8 @@ async fn get_ip_from_request_parts<S: Send + Sync>(
   parts: &mut axum::http::request::Parts,
   state: &S,
 ) -> mogh_error::Result<IpAddr> {
-  // Check X-Forwarded-For header (first IP in chain)
-  if let Some(forwarded) = parts.headers.get("x-forwarded-for")
-    && let Ok(forwarded_str) = forwarded.to_str()
-    && let Some(ip) = forwarded_str.split(',').next()
-  {
-    return ip.trim().parse().status_code(StatusCode::UNAUTHORIZED);
-  }
-
-  // Check X-Real-IP header
-  if let Some(real_ip) = parts.headers.get("x-real-ip")
-    && let Ok(ip) = real_ip.to_str()
-  {
-    return ip.trim().parse().status_code(StatusCode::UNAUTHORIZED);
+  if let Some(ip) = get_ip_from_headers(&parts.headers)? {
+    return Ok(ip);
   }
 
   let info = ConnectInfo::<SocketAddr>::from_request_parts(parts, state)

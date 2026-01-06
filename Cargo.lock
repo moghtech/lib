@@ -1337,6 +1337,7 @@ dependencies = [
  "tower-sessions",
  "tracing",
  "typeshare",
+ "utoipa",
  "uuid",
  "webauthn-rs",
 ]
@@ -1398,6 +1399,15 @@ dependencies = [
  "mogh_cache",
  "mogh_error",
  "tokio",
+]
+
+[[package]]
+name = "mogh_request_ip"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "mogh_error",
 ]
 
 [[package]]

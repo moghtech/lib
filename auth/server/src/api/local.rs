@@ -1,7 +1,7 @@
 use anyhow::{Context, anyhow};
 use axum::http::StatusCode;
 use mogh_auth_client::{
-  JwtOrTwoFactor,
+  JwtOrTwoFactor, JwtResponse,
   api::{LoginLocalUser, SignUpLocalUser},
   passkey::RequestChallengeResponse,
 };
@@ -13,6 +13,19 @@ use crate::{
   BoxAuthArgs,
   session::{SessionPasskeyLogin, SessionTotpLogin},
 };
+
+#[utoipa::path(
+  post,
+  path = "/auth/SignUpLocalUser",
+  description = "Sign up a local user",
+  request_body(content = LoginLocalUser),
+  responses(
+    (status = 200, description = "Authentication JWT", body = JwtResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn sign_up_local_user() {}
 
 impl Resolve<BoxAuthArgs> for SignUpLocalUser {
   async fn resolve(
@@ -61,6 +74,19 @@ impl Resolve<BoxAuthArgs> for SignUpLocalUser {
     .await
   }
 }
+
+#[utoipa::path(
+  post,
+  path = "/auth/LoginLocalUser",
+  description = "Login as a local user",
+  request_body(content = LoginLocalUser),
+  responses(
+    (status = 200, description = "JWT auth token or 2 factor login continuation", body = JwtOrTwoFactor),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn login_local_user() {}
 
 impl Resolve<BoxAuthArgs> for LoginLocalUser {
   async fn resolve(

@@ -11,6 +11,7 @@ repository = "https://github.com/moghtech/lib"
 publish = ["mogh"]
 
 [patch.mogh]
+mogh_auth_client = { path = "auth/client/rs" }
 mogh_cache = { path = "crates/cache" }
 mogh_config = { path = "crates/config" }
 mogh_error = { path = "crates/error" }
@@ -22,7 +23,7 @@ mogh_validations = { path = "crates/validations" }
 
 [workspace.dependencies]
 # MOGH
-mogh_auth_client = { path = "auth/client/rs" }
+mogh_auth_client = { version = "0.1.0", registry = "mogh" }
 mogh_cache = { version = "0.1.0", registry = "mogh" }
 mogh_config = { version = "0.1.0", registry = "mogh" }
 mogh_error = { version = "0.5.5", registry = "mogh" }

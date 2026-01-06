@@ -1,26 +1,20 @@
+import { AuthResponses } from "./responses.js";
+import { AuthRequest } from "./types.js";
+
 export * as Types from "./types.js";
 
 export function MoghAuthClient(url: string) {
   const request = <Params, Res>(
+    path: "/auth",
     type: string,
     params: Params
   ): Promise<Res> =>
     new Promise(async (res, rej) => {
       try {
-        let response = await fetch(`${url}/${type}`, {
+        let response = await fetch(`${url}${path}/${type}`, {
           method: "POST",
           body: JSON.stringify(params),
           headers: {
-            // ...(state.jwt
-            //   ? {
-            //       authorization: state.jwt,
-            //     }
-            //   : state.key && state.secret
-            //   ? {
-            //       "x-api-key": state.key,
-            //       "x-api-secret": state.secret,
-            //     }
-            //   : {}),
             "content-type": "application/json",
           },
           credentials: "include",
@@ -54,4 +48,21 @@ export function MoghAuthClient(url: string) {
         });
       }
     });
+
+  const auth = async <
+    T extends AuthRequest["type"],
+    Req extends Extract<AuthRequest, { type: T }>
+  >(
+    type: T,
+    params: Req["params"]
+  ) =>
+    await request<Req["params"], AuthResponses[Req["type"]]>(
+      "/auth",
+      type,
+      params
+    );
+
+  return {
+    auth,
+  };
 }

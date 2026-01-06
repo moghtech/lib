@@ -1,11 +1,24 @@
 use anyhow::Context as _;
 use axum::http::StatusCode;
-use mogh_auth_client::api::CompletePasskeyLogin;
+use mogh_auth_client::{JwtResponse, api::CompletePasskeyLogin};
 use mogh_error::AddStatusCode;
 use mogh_rate_limit::WithFailureRateLimit;
 use resolver_api::Resolve;
 
 use crate::{BoxAuthArgs, session::SessionPasskeyLogin};
+
+#[utoipa::path(
+  post,
+  path = "/auth/CompletePasskeyLogin",
+  description = "Complete login using passkey as second factor",
+  request_body(content = CompletePasskeyLogin),
+  responses(
+    (status = 200, description = "Authentication JWT", body = JwtResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn complete_passkey_login() {}
 
 impl Resolve<BoxAuthArgs> for CompletePasskeyLogin {
   async fn resolve(

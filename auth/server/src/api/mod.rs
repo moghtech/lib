@@ -3,7 +3,7 @@ use std::time::Instant;
 use anyhow::Context;
 use axum::{Router, extract::Path, routing::post};
 use derive_variants::{EnumVariants, ExtractVariant as _};
-use mogh_auth_client::api::*;
+use mogh_auth_client::{JwtResponse, api::*};
 use mogh_error::Json;
 use mogh_rate_limit::WithFailureRateLimit;
 use resolver_api::Resolve;
@@ -17,9 +17,9 @@ use crate::{
   AuthExtractor, AuthImpl, BoxAuthArgs, session::SessionUserId,
 };
 
-mod local;
-mod passkey;
-mod totp;
+pub mod local;
+pub mod passkey;
+pub mod totp;
 
 #[typeshare]
 #[derive(
@@ -33,9 +33,9 @@ mod totp;
 #[allow(clippy::enum_variant_names, clippy::large_enum_variant)]
 pub enum AuthRequest {
   GetLoginOptions(GetLoginOptions),
+  ExchangeForJwt(ExchangeForJwt),
   SignUpLocalUser(SignUpLocalUser),
   LoginLocalUser(LoginLocalUser),
-  ExchangeForJwt(ExchangeForJwt),
   CompletePasskeyLogin(CompletePasskeyLogin),
   CompleteTotpLogin(CompleteTotpLogin),
 }
@@ -83,6 +83,17 @@ async fn handler<I: AuthImpl>(
   res.map(|res| res.0)
 }
 
+#[utoipa::path(
+  post,
+  path = "/auth/GetLoginOptions",
+  description = "Get the available login options",
+  request_body(content = GetLoginOptions),
+  responses(
+    (status = 200, description = "The available login options", body = GetLoginOptionsResponse)
+  ),
+)]
+pub fn get_login_options() {}
+
 impl Resolve<BoxAuthArgs> for GetLoginOptions {
   async fn resolve(
     self,
@@ -94,6 +105,19 @@ impl Resolve<BoxAuthArgs> for GetLoginOptions {
     })
   }
 }
+
+#[utoipa::path(
+  post,
+  path = "/auth/ExchangeForJwt",
+  description = "Follow up call after successful third party login to retrieve an authentication JWT.",
+  request_body(content = ExchangeForJwt),
+  responses(
+    (status = 200, description = "Authentication JWT", body = JwtResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn exchange_for_jwt() {}
 
 impl Resolve<BoxAuthArgs> for ExchangeForJwt {
   async fn resolve(

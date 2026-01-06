@@ -1,12 +1,25 @@
 use anyhow::{Context as _, anyhow};
 use axum::http::StatusCode;
 use data_encoding::BASE32_NOPAD;
-use mogh_auth_client::api::CompleteTotpLogin;
+use mogh_auth_client::{JwtResponse, api::CompleteTotpLogin};
 use mogh_error::AddStatusCodeError as _;
 use mogh_rate_limit::WithFailureRateLimit;
 use resolver_api::Resolve;
 
 use crate::{BoxAuthArgs, session::SessionTotpLogin};
+
+#[utoipa::path(
+  post,
+  path = "/auth/CompleteTotpLogin",
+  description = "Complete login using TOTP code as second factor",
+  request_body(content = CompleteTotpLogin),
+  responses(
+    (status = 200, description = "Authentication JWT", body = JwtResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn complete_totp_login() {}
 
 impl Resolve<BoxAuthArgs> for CompleteTotpLogin {
   async fn resolve(

@@ -9,12 +9,12 @@ publish.workspace = true
 
 [dependencies]
 # LOCAL
-mogh_auth_client.workspace = true
+mogh_auth_client = { workspace = true, features = ["utoipa"] }
+mogh_error = { workspace = true, features = ["utoipa"] }
 mogh_validations.workspace = true
 derive_variants.workspace = true
 mogh_rate_limit.workspace = true
 resolver_api.workspace = true
-mogh_error.workspace = true
 # EXTERNAL
 tower-sessions.workspace = true
 data-encoding.workspace = true
@@ -26,6 +26,7 @@ tracing.workspace = true
 totp-rs.workspace = true
 anyhow.workspace = true
 bcrypt.workspace = true
+utoipa.workspace = true
 serde.workspace = true
 axum.workspace = true
 uuid.workspace = true
