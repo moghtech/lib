@@ -1,7 +1,11 @@
 # moghtech/lib
 
-Collection of Rust and React (Typescript) libraries used across Mogh apps.
+Collection of Rust and Typescript libraries used across Mogh apps.
 These libraries handle common web app utilities, ensuring consistency across the Mogh ecosystem.
+
+### APIs
+
+- mogh_auth_client + mogh_auth_server
 
 ### Rust crates
 

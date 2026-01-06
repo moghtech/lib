@@ -1,0 +1,7 @@
+[gen-auth-client]
+alias = "gac"
+description = "Generates auth typescript types and build the auth ts client"
+after = "yarn-install"
+cmd = """
+node ./auth/client/ts/generate_types.mjs && \
+cd ./auth/client/ts && yarn build"""

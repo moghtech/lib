@@ -1,0 +1,23 @@
+[package]
+name = "mogh_auth_client"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+utoipa = ["dep:utoipa", "dep:serde_json"]
+
+[dependencies]
+# LOCAL
+mogh_error.workspace = true
+# EXTERNAL
+serde_json = { workspace = true, optional = true }
+utoipa = { workspace = true, optional = true }
+derive_empty_traits.workspace = true
+webauthn-rs.workspace = true
+resolver_api.workspace = true
+typeshare.workspace = true
+serde.workspace = true

@@ -1,0 +1,18 @@
+{
+  "name": "mogh_auth_client",
+  "version": "0.1.0",
+  "description": "Mogh auth client package",
+  "homepage": "https://mogh.tech/lib",
+  "main": "dist/lib.js",
+  "type": "module",
+  "license": "GPL-3.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
