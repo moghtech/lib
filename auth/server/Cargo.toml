@@ -12,8 +12,9 @@ publish.workspace = true
 mogh_auth_client = { workspace = true, features = ["utoipa"] }
 mogh_error = { workspace = true, features = ["utoipa"] }
 mogh_validations.workspace = true
-derive_variants.workspace = true
+mogh_request_ip.workspace = true
 mogh_rate_limit.workspace = true
+derive_variants.workspace = true
 resolver_api.workspace = true
 # EXTERNAL
 tower-sessions.workspace = true

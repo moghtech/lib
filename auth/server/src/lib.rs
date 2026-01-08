@@ -1,31 +1,32 @@
 use std::sync::{Arc, LazyLock};
 
 use axum::{extract::FromRequestParts, http::StatusCode};
+use mogh_auth_client::passkey::Passkey;
 use mogh_error::AddStatusCode;
 use mogh_rate_limit::RateLimiter;
 
 pub mod api;
 pub mod args;
-pub mod ip;
-pub mod jwt;
 pub mod middleware;
+pub mod provider;
 pub mod session;
 pub mod user;
 pub mod validations;
 
 use crate::{
   args::RequestClientArgs,
-  jwt::JwtProvider,
-  user::AuthUserImpl,
+  provider::{jwt::JwtProvider, passkey::PasskeyProvider},
+  user::BoxAuthUser,
   validations::{validate_password, validate_username},
 };
 
-pub type BoxAuthArgs = Box<dyn AuthImpl>;
+pub mod request_ip {
+  pub use mogh_request_ip::*;
+}
+
+pub type BoxAuthImpl = Box<dyn AuthImpl>;
 pub type DynFuture<O> =
   std::pin::Pin<Box<dyn Future<Output = O> + Send>>;
-
-static DISABLED_RATE_LIMITER: LazyLock<Arc<RateLimiter>> =
-  LazyLock::new(|| RateLimiter::new(true, 0, 0));
 
 /// This trait is implemented at the app level
 /// to support custom schemas, storage providers, and business logic.
@@ -58,7 +59,7 @@ pub trait AuthImpl: Send + Sync + 'static {
   fn get_user(
     &self,
     user_id: &str,
-  ) -> DynFuture<mogh_error::Result<Box<dyn AuthUserImpl>>>;
+  ) -> DynFuture<mogh_error::Result<BoxAuthUser>>;
 
   // =========
   // = STATE =
@@ -68,13 +69,15 @@ pub trait AuthImpl: Send + Sync + 'static {
   fn jwt_provider(&self) -> &JwtProvider;
 
   /// Get the webauthn passkey provider
-  fn passkey_provider(&self) -> Option<&webauthn_rs::Webauthn> {
+  fn passkey_provider(&self) -> Option<&PasskeyProvider> {
     None
   }
 
   /// Provide a rate limiter for
   /// general authenticated requests.
   fn general_rate_limiter(&self) -> &RateLimiter {
+    static DISABLED_RATE_LIMITER: LazyLock<Arc<RateLimiter>> =
+      LazyLock::new(|| RateLimiter::new(true, 0, 0));
     &DISABLED_RATE_LIMITER
   }
 
@@ -128,7 +131,7 @@ pub trait AuthImpl: Send + Sync + 'static {
   fn find_user_with_username(
     &self,
     username: &str,
-  ) -> DynFuture<mogh_error::Result<Box<dyn AuthUserImpl>>>;
+  ) -> DynFuture<mogh_error::Result<BoxAuthUser>>;
 
   // ===============
   // = PASSKEY 2FA =
@@ -136,7 +139,7 @@ pub trait AuthImpl: Send + Sync + 'static {
   fn update_user_stored_passkey(
     &self,
     user_id: &str,
-    passkey: webauthn_rs::prelude::Passkey,
+    passkey: Passkey,
   ) -> DynFuture<mogh_error::Result<()>>;
 }
 

@@ -1,3 +1,5 @@
+use mogh_auth_client::passkey::Passkey;
+
 /// Implemented for app specific User struct.
 pub trait AuthUserImpl: Send + Sync + 'static {
   fn id(&self) -> &str;
@@ -6,7 +8,7 @@ pub trait AuthUserImpl: Send + Sync + 'static {
     None
   }
 
-  fn passkey(&self) -> Option<webauthn_rs::prelude::Passkey> {
+  fn passkey(&self) -> Option<Passkey> {
     None
   }
 
@@ -14,3 +16,5 @@ pub trait AuthUserImpl: Send + Sync + 'static {
     None
   }
 }
+
+pub type BoxAuthUser = Box<dyn AuthUserImpl>;

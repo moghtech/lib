@@ -3,17 +3,20 @@ use std::{
   time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Context as _;
+use anyhow::{Context as _, anyhow};
 use jsonwebtoken::{
   DecodingKey, EncodingKey, Header, Validation, decode, encode,
 };
-use mogh_auth_client::JwtResponse;
+use mogh_auth_client::api::login::JwtResponse;
 use serde::{Deserialize, Serialize};
 
 static DEFAULT_HEADER: LazyLock<Header> =
   LazyLock::new(Default::default);
 static DEFAULT_VALIDATION: LazyLock<Validation> =
   LazyLock::new(Default::default);
+
+/// JWT Clock skew tolerance in milliseconds (10 seconds for JWTs)
+const JWT_CLOCK_SKEW_TOLERANCE_MS: u128 = 10 * 1000;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct JwtClaims {
@@ -72,7 +75,7 @@ impl JwtProvider {
     self.validation.as_ref().unwrap_or(&DEFAULT_VALIDATION)
   }
 
-  pub fn encode(&self, sub: &str) -> anyhow::Result<JwtResponse> {
+  pub fn encode_sub(&self, sub: &str) -> anyhow::Result<JwtResponse> {
     let iat =
       SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     let exp = iat + self.ttl_ms;
@@ -82,9 +85,20 @@ impl JwtProvider {
     Ok(JwtResponse { jwt })
   }
 
-  pub fn decode(&self, jwt: &str) -> anyhow::Result<JwtClaims> {
-    decode(jwt, &self.decoding_key, self.validation())
-      .map(|res| res.claims)
-      .context("Failed to decode token claims")
+  /// Decodes JWT, checks not expired, returns the claims 'sub', ie the User ID
+  pub fn decode_sub(&self, jwt: &str) -> anyhow::Result<String> {
+    let claims =
+      decode::<JwtClaims>(jwt, &self.decoding_key, self.validation())
+        .map(|res| res.claims)
+        .map_err(|_| anyhow!("Invalid user credentials"))?;
+
+    let now =
+      SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+
+    if claims.exp > now.saturating_sub(JWT_CLOCK_SKEW_TOLERANCE_MS) {
+      Ok(claims.sub)
+    } else {
+      Err(anyhow!("Invalid user credentials"))
+    }
   }
 }

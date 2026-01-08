@@ -1,10 +1,20 @@
 import * as Types from "./types.js";
 
-export type AuthResponses = {
+export type LoginResponses = {
   GetLoginOptions: Types.GetLoginOptionsResponse;
   SignUpLocalUser: Types.SignUpLocalUserResponse;
   LoginLocalUser: Types.LoginLocalUserResponse;
   ExchangeForJwt: Types.ExchangeForJwtResponse;
   CompleteTotpLogin: Types.CompleteTotpLoginResponse;
   CompletePasskeyLogin: Types.CompletePasskeyLoginResponse;
+};
+
+export type ManageResponses = {
+  // Local
+  UpdateUsername: Types.UpdateUsernameResponse;
+  UpdatePassword: Types.UpdatePasswordResponse;
+  // Passkey
+  BeginPasskeyEnrollment: Types.BeginPasskeyEnrollmentResponse;
+  ConfirmPasskeyEnrollment: Types.ConfirmPasskeyEnrollmentResponse;
+  UnenrollPasskey: Types.UnenrollPasskeyResponse;
 };

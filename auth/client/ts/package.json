@@ -14,5 +14,8 @@
   },
   "devDependencies": {
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "jwt-decode": "^4.0.0"
   }
 }

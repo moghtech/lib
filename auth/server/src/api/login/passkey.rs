@@ -1,15 +1,17 @@
 use anyhow::Context as _;
 use axum::http::StatusCode;
-use mogh_auth_client::{JwtResponse, api::CompletePasskeyLogin};
+use mogh_auth_client::api::login::{
+  CompletePasskeyLogin, JwtResponse,
+};
 use mogh_error::AddStatusCode;
 use mogh_rate_limit::WithFailureRateLimit;
 use resolver_api::Resolve;
 
-use crate::{BoxAuthArgs, session::SessionPasskeyLogin};
+use crate::{BoxAuthImpl, session::SessionPasskeyLogin};
 
 #[utoipa::path(
   post,
-  path = "/auth/CompletePasskeyLogin",
+  path = "/login/CompletePasskeyLogin",
   description = "Complete login using passkey as second factor",
   request_body(content = CompletePasskeyLogin),
   responses(
@@ -20,16 +22,16 @@ use crate::{BoxAuthArgs, session::SessionPasskeyLogin};
 )]
 pub fn complete_passkey_login() {}
 
-impl Resolve<BoxAuthArgs> for CompletePasskeyLogin {
+impl Resolve<BoxAuthImpl> for CompletePasskeyLogin {
   async fn resolve(
     self,
-    args: &BoxAuthArgs,
+    args: &BoxAuthImpl,
   ) -> Result<Self::Response, Self::Error> {
     async {
       let provider = args.passkey_provider().context(
         "No passkey provider available, possibly invalid 'host' config.",
       )?;
-      
+
       let session = args.client().session.as_ref().context(
         "Method called in invalid context. This should not happen",
       )?;
@@ -46,7 +48,7 @@ impl Resolve<BoxAuthArgs> for CompletePasskeyLogin {
       // The result of this call must be used to
       // update the stored passkey info on database.
       let update = provider
-        .finish_passkey_authentication(&self.credential.0, &state)
+        .finish_passkey_authentication(&self.credential, &state)
         .context("Failed to validate passkey")
         .status_code(StatusCode::UNAUTHORIZED)?;
 
@@ -56,12 +58,12 @@ impl Resolve<BoxAuthArgs> for CompletePasskeyLogin {
         .passkey()
         .context("User is not enrolled in Passkey 2FA")?;
 
-      passkey.update_credential(&update);
+      passkey.0.update_credential(&update);
 
       // Update the stored passkey on the database
       args.update_user_stored_passkey(&user_id, passkey).await?;
 
-      args.jwt_provider().encode(&user_id).map_err(Into::into)
+      args.jwt_provider().encode_sub(&user_id).map_err(Into::into)
     }
     .with_failure_rate_limit_using_ip(
       args.general_rate_limiter(),

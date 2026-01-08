@@ -49,3 +49,37 @@ impl utoipa::PartialSchema for Passkey {
 
 #[cfg(feature = "utoipa")]
 impl utoipa::ToSchema for Passkey {}
+
+#[typeshare(serialized_as = "any")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreationChallengeResponse(
+  pub webauthn_rs::prelude::CreationChallengeResponse,
+);
+
+#[cfg(feature = "utoipa")]
+impl utoipa::PartialSchema for CreationChallengeResponse {
+  fn schema()
+  -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+    utoipa::schema!(#[inline] std::collections::HashMap<String, serde_json::Value>).into()
+  }
+}
+
+#[cfg(feature = "utoipa")]
+impl utoipa::ToSchema for CreationChallengeResponse {}
+
+#[typeshare(serialized_as = "any")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterPublicKeyCredential(
+  pub webauthn_rs::prelude::RegisterPublicKeyCredential,
+);
+
+#[cfg(feature = "utoipa")]
+impl utoipa::PartialSchema for RegisterPublicKeyCredential {
+  fn schema()
+  -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+    utoipa::schema!(#[inline] std::collections::HashMap<String, serde_json::Value>).into()
+  }
+}
+
+#[cfg(feature = "utoipa")]
+impl utoipa::ToSchema for RegisterPublicKeyCredential {}

@@ -1,14 +1,8 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 
-use anyhow::Context;
-use axum::{
-  extract::{ConnectInfo, FromRequestParts, Request},
-  http::{HeaderMap, StatusCode},
-};
-use mogh_error::AddStatusCode as _;
+use axum::extract::FromRequestParts;
+use mogh_request_ip::get_ip_from_headers_and_extensions;
 use tower_sessions::Session;
-
-use crate::ip::get_ip_from_headers;
 
 pub struct RequestClientArgs {
   /// Prefers extraction from headers 'x-forwarded-for', then 'x-real-ip'.
@@ -23,27 +17,14 @@ impl<S: Send + Sync> FromRequestParts<S> for RequestClientArgs {
 
   async fn from_request_parts(
     parts: &mut axum::http::request::Parts,
-    state: &S,
+    _: &S,
   ) -> Result<Self, Self::Rejection> {
     Ok(RequestClientArgs {
-      ip: get_ip_from_request_parts(parts, state).await?,
+      ip: get_ip_from_headers_and_extensions(
+        &parts.headers,
+        &parts.extensions,
+      )?,
       session: parts.extensions.get::<Session>().cloned(),
     })
   }
-}
-
-async fn get_ip_from_request_parts<S: Send + Sync>(
-  parts: &mut axum::http::request::Parts,
-  state: &S,
-) -> mogh_error::Result<IpAddr> {
-  if let Some(ip) = get_ip_from_headers(&parts.headers)? {
-    return Ok(ip);
-  }
-
-  let info = ConnectInfo::<SocketAddr>::from_request_parts(parts, state)
-    .await
-    .context("'x-forwarded-for' and 'x-real-ip' headers are both missing, and no fallback ip could be extracted from the request.")
-    .status_code(StatusCode::UNAUTHORIZED)?;
-
-  Ok(info.0.ip())
 }

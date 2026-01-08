@@ -1,16 +1,16 @@
 use anyhow::{Context as _, anyhow};
 use axum::http::StatusCode;
 use data_encoding::BASE32_NOPAD;
-use mogh_auth_client::{JwtResponse, api::CompleteTotpLogin};
+use mogh_auth_client::api::login::{CompleteTotpLogin, JwtResponse};
 use mogh_error::AddStatusCodeError as _;
 use mogh_rate_limit::WithFailureRateLimit;
 use resolver_api::Resolve;
 
-use crate::{BoxAuthArgs, session::SessionTotpLogin};
+use crate::{BoxAuthImpl, session::SessionTotpLogin};
 
 #[utoipa::path(
   post,
-  path = "/auth/CompleteTotpLogin",
+  path = "/login/CompleteTotpLogin",
   description = "Complete login using TOTP code as second factor",
   request_body(content = CompleteTotpLogin),
   responses(
@@ -21,10 +21,10 @@ use crate::{BoxAuthArgs, session::SessionTotpLogin};
 )]
 pub fn complete_totp_login() {}
 
-impl Resolve<BoxAuthArgs> for CompleteTotpLogin {
+impl Resolve<BoxAuthImpl> for CompleteTotpLogin {
   async fn resolve(
     self,
-    args: &BoxAuthArgs,
+    args: &BoxAuthImpl,
   ) -> Result<Self::Response, Self::Error> {
     async {
       let session = args.client().session.as_ref().context(
@@ -60,7 +60,7 @@ impl Resolve<BoxAuthArgs> for CompleteTotpLogin {
         );
       }
 
-      args.jwt_provider().encode(&user_id).map_err(Into::into)
+      args.jwt_provider().encode_sub(&user_id).map_err(Into::into)
     }
     .with_failure_rate_limit_using_ip(
       args.general_rate_limiter(),
@@ -71,7 +71,7 @@ impl Resolve<BoxAuthArgs> for CompleteTotpLogin {
 }
 
 pub fn make_totp(
-  args: &BoxAuthArgs,
+  args: &BoxAuthImpl,
   secret_bytes: Vec<u8>,
   account_name: impl Into<Option<String>>,
 ) -> anyhow::Result<totp_rs::TOTP> {

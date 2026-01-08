@@ -1,22 +1,20 @@
 use anyhow::{Context, anyhow};
 use axum::http::StatusCode;
-use mogh_auth_client::{
-  JwtOrTwoFactor, JwtResponse,
-  api::{LoginLocalUser, SignUpLocalUser},
-  passkey::RequestChallengeResponse,
+use mogh_auth_client::api::login::{
+  JwtOrTwoFactor, JwtResponse, LoginLocalUser, SignUpLocalUser,
 };
 use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::WithFailureRateLimit;
 use resolver_api::Resolve;
 
 use crate::{
-  BoxAuthArgs,
+  BoxAuthImpl,
   session::{SessionPasskeyLogin, SessionTotpLogin},
 };
 
 #[utoipa::path(
   post,
-  path = "/auth/SignUpLocalUser",
+  path = "/login/SignUpLocalUser",
   description = "Sign up a local user",
   request_body(content = LoginLocalUser),
   responses(
@@ -27,10 +25,10 @@ use crate::{
 )]
 pub fn sign_up_local_user() {}
 
-impl Resolve<BoxAuthArgs> for SignUpLocalUser {
+impl Resolve<BoxAuthImpl> for SignUpLocalUser {
   async fn resolve(
     self,
-    args: &BoxAuthArgs,
+    args: &BoxAuthImpl,
   ) -> Result<Self::Response, Self::Error> {
     async {
       if !args.local_auth_enabled() {
@@ -65,7 +63,7 @@ impl Resolve<BoxAuthArgs> for SignUpLocalUser {
         )
         .await?;
 
-      args.jwt_provider().encode(&user_id).map_err(Into::into)
+      args.jwt_provider().encode_sub(&user_id).map_err(Into::into)
     }
     .with_failure_rate_limit_using_ip(
       args.general_rate_limiter(),
@@ -77,7 +75,7 @@ impl Resolve<BoxAuthArgs> for SignUpLocalUser {
 
 #[utoipa::path(
   post,
-  path = "/auth/LoginLocalUser",
+  path = "/login/LoginLocalUser",
   description = "Login as a local user",
   request_body(content = LoginLocalUser),
   responses(
@@ -88,10 +86,10 @@ impl Resolve<BoxAuthArgs> for SignUpLocalUser {
 )]
 pub fn login_local_user() {}
 
-impl Resolve<BoxAuthArgs> for LoginLocalUser {
+impl Resolve<BoxAuthImpl> for LoginLocalUser {
   async fn resolve(
     self,
-    args: &BoxAuthArgs,
+    args: &BoxAuthImpl,
   ) -> Result<Self::Response, Self::Error> {
     async {
       if !args.local_auth_enabled() {
@@ -127,7 +125,7 @@ impl Resolve<BoxAuthArgs> for LoginLocalUser {
             "No passkey provider available, possibly invalid 'host' config.",
           )?;
           let (response, state) = provider
-            .start_passkey_authentication(&[passkey])
+            .start_passkey_authentication(passkey)
             .context("Failed to start passkey authentication flow")?;
           args
             .client()
@@ -142,7 +140,7 @@ impl Resolve<BoxAuthArgs> for LoginLocalUser {
               },
             )
             .await?;
-          JwtOrTwoFactor::Passkey(RequestChallengeResponse(response))
+          JwtOrTwoFactor::Passkey(response)
         }
         // TOTP 2FA
         (None, Some(_)) => {
@@ -161,7 +159,7 @@ impl Resolve<BoxAuthArgs> for LoginLocalUser {
           JwtOrTwoFactor::Totp {}
         }
         (None, None) => {
-          JwtOrTwoFactor::Jwt(args.jwt_provider().encode(user.id())?)
+          JwtOrTwoFactor::Jwt(args.jwt_provider().encode_sub(user.id())?)
         }
       };
 

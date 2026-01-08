@@ -1,17 +1,43 @@
+//! # Mogh Auth Login API
+//!
+//! This module includes *unauthenticated* API methods
+//! used in order to gain a temporary access token (JWT)
+//! to use with other authenticated API methods.
+
 use derive_empty_traits::EmptyTraits;
 use resolver_api::{HasResponse, Resolve};
 use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
 
-use crate::{
-  JwtOrTwoFactor, JwtResponse, passkey::PublicKeyCredential,
-};
+use crate::passkey::{PublicKeyCredential, RequestChallengeResponse};
 
-pub trait MoghAuthRequest: HasResponse {}
+/// JSON containing a jwt authentication token.
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct JwtResponse {
+  /// A token the user can use to authenticate their requests.
+  pub jwt: String,
+}
+
+/// JSON containing either an authentication token or the required 2fa auth check.
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(tag = "type", content = "data")]
+pub enum JwtOrTwoFactor {
+  Jwt(JwtResponse),
+  Passkey(RequestChallengeResponse),
+  Totp {},
+}
 
 //
 
-/// Non authenticated route to see the available options
+pub trait MoghAuthLoginRequest: HasResponse {}
+
+//
+
+/// See the available options
 /// users have to login, eg. local and external providers.
 /// Response: [GetLoginOptionsResponse].
 #[typeshare]
@@ -19,7 +45,7 @@ pub trait MoghAuthRequest: HasResponse {}
   Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
 )]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[empty_traits(MoghAuthRequest)]
+#[empty_traits(MoghAuthLoginRequest)]
 #[response(GetLoginOptionsResponse)]
 #[error(mogh_error::Error)]
 pub struct GetLoginOptions {}
@@ -37,15 +63,14 @@ pub struct GetLoginOptionsResponse {
 
 //
 
-/// Sign up a new local user account. Will fail if a user with the
-/// given username already exists.
+/// Sign up a new local user account.
 /// Response: [SignUpLocalUserResponse].
 #[typeshare]
 #[derive(
   Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
 )]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[empty_traits(MoghAuthRequest)]
+#[empty_traits(MoghAuthLoginRequest)]
 #[response(SignUpLocalUserResponse)]
 #[error(mogh_error::Error)]
 pub struct SignUpLocalUser {
@@ -69,7 +94,7 @@ pub type SignUpLocalUserResponse = JwtResponse;
   Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
 )]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[empty_traits(MoghAuthRequest)]
+#[empty_traits(MoghAuthLoginRequest)]
 #[response(LoginLocalUserResponse)]
 #[error(mogh_error::Error)]
 pub struct LoginLocalUser {
@@ -92,7 +117,7 @@ pub type LoginLocalUserResponse = JwtOrTwoFactor;
   Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
 )]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[empty_traits(MoghAuthRequest)]
+#[empty_traits(MoghAuthLoginRequest)]
 #[response(ExchangeForJwtResponse)]
 #[error(mogh_error::Error)]
 pub struct ExchangeForJwt {}
@@ -110,7 +135,7 @@ pub type ExchangeForJwtResponse = JwtResponse;
   Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
 )]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[empty_traits(MoghAuthRequest)]
+#[empty_traits(MoghAuthLoginRequest)]
 #[response(CompletePasskeyLoginResponse)]
 #[error(mogh_error::Error)]
 pub struct CompletePasskeyLogin {
@@ -130,7 +155,7 @@ pub type CompletePasskeyLoginResponse = JwtResponse;
   Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
 )]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[empty_traits(MoghAuthRequest)]
+#[empty_traits(MoghAuthLoginRequest)]
 #[response(CompleteTotpLoginResponse)]
 #[error(mogh_error::Error)]
 pub struct CompleteTotpLogin {

@@ -1,11 +1,14 @@
-import { AuthResponses } from "./responses.js";
-import { AuthRequest } from "./types.js";
+import { LoginResponses, ManageResponses } from "./responses.js";
+import { LoginRequest, ManageRequest } from "./types.js";
 
 export * as Types from "./types.js";
+export * as Passkey from "./passkey.js";
+export { LOGIN_TOKENS, extractUserIdFromJwt } from "./tokens.js";
+export type { LoginResponses, ManageResponses };
 
-export function MoghAuthClient(url: string) {
+export function MoghAuthClient(url: string, jwt?: string) {
   const request = <Params, Res>(
-    path: "/auth",
+    path: "/login" | "/manage",
     type: string,
     params: Params
   ): Promise<Res> =>
@@ -16,6 +19,7 @@ export function MoghAuthClient(url: string) {
           body: JSON.stringify(params),
           headers: {
             "content-type": "application/json",
+            ...(jwt ? { authorization: jwt } : {}),
           },
           credentials: "include",
         });
@@ -49,20 +53,34 @@ export function MoghAuthClient(url: string) {
       }
     });
 
-  const auth = async <
-    T extends AuthRequest["type"],
-    Req extends Extract<AuthRequest, { type: T }>
+  const login = async <
+    T extends LoginRequest["type"],
+    Req extends Extract<LoginRequest, { type: T }>
   >(
     type: T,
     params: Req["params"]
   ) =>
-    await request<Req["params"], AuthResponses[Req["type"]]>(
-      "/auth",
+    await request<Req["params"], LoginResponses[Req["type"]]>(
+      "/login",
+      type,
+      params
+    );
+
+  const manage = async <
+    T extends ManageRequest["type"],
+    Req extends Extract<ManageRequest, { type: T }>
+  >(
+    type: T,
+    params: Req["params"]
+  ) =>
+    await request<Req["params"], ManageResponses[Req["type"]]>(
+      "/manage",
       type,
       params
     );
 
   return {
-    auth,
+    login,
+    manage,
   };
 }
