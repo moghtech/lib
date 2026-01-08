@@ -1,14 +1,14 @@
-use mogh_auth_client::api::{
-  NoData,
-  manage::{
-    BeginPasskeyEnrollment, BeginPasskeyEnrollmentResponse,
-    ConfirmPasskeyEnrollment, ConfirmPasskeyEnrollmentResponse,
-    UnenrollPasskey, UnenrollPasskeyResponse,
-  },
+use anyhow::Context as _;
+use mogh_auth_client::api::manage::{
+  BeginPasskeyEnrollment, BeginPasskeyEnrollmentResponse,
+  ConfirmPasskeyEnrollment, ConfirmPasskeyEnrollmentResponse,
+  UnenrollPasskey, UnenrollPasskeyResponse,
 };
 use resolver_api::Resolve;
 
-use crate::api::manage::ManageArgs;
+use crate::{
+  api::manage::ManageArgs, session::SessionPasskeyEnrollment,
+};
 
 //
 
@@ -28,9 +28,38 @@ pub fn begin_passkey_enrollment() {}
 impl Resolve<ManageArgs> for BeginPasskeyEnrollment {
   async fn resolve(
     self,
-    ManageArgs { auth, user_id }: &ManageArgs,
+    ManageArgs { auth, user }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
-    todo!()
+    let username = user.username();
+
+    auth.check_username_locked(username)?;
+
+    let session = auth.client().session.as_ref().context(
+      "Method called in invalid context. This should not happen.",
+    )?;
+
+    let provider = auth.passkey_provider().context(
+      "No passkey provider available, invalid 'host' config",
+    )?;
+
+    // Get two parts from this, the first is returned to the client.
+    // The second must stay server side and is used in confirmation flow.
+    let (challenge, state) =
+      provider.start_passkey_registration(username)?;
+
+    session
+      .insert(
+        SessionPasskeyEnrollment::KEY,
+        SessionPasskeyEnrollment {
+          state
+        },
+      )
+      .await
+      .context(
+        "Failed to store passkey enrollment state in server side client session",
+      )?;
+
+    Ok(challenge)
   }
 }
 
@@ -52,9 +81,35 @@ pub fn confirm_passkey_enrollment() {}
 impl Resolve<ManageArgs> for ConfirmPasskeyEnrollment {
   async fn resolve(
     self,
-    ManageArgs { auth, user_id }: &ManageArgs,
+    ManageArgs { auth, user }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
-    todo!()
+    let session = auth.client().session.as_ref().context(
+      "Method called in invalid context. This should not happen.",
+    )?;
+
+    let provider = auth.passkey_provider().context(
+      "No passkey provider available, invalid 'host' config",
+    )?;
+
+    let SessionPasskeyEnrollment { state } = session
+      .remove(SessionPasskeyEnrollment::KEY)
+      .await
+      .context("Passkey enrollment was not initiated correctly")?
+      .context(
+        "Passkey enrollment was not initiated correctly or timed out",
+      )?;
+
+    let passkey = provider
+      .finish_passkey_registration(&self.credential, &state)?;
+
+    auth
+      .update_user_stored_passkey(
+        user.id().to_string(),
+        Some(passkey),
+      )
+      .await?;
+
+    Ok(ConfirmPasskeyEnrollmentResponse {})
   }
 }
 
@@ -76,8 +131,12 @@ pub fn unenroll_passkey() {}
 impl Resolve<ManageArgs> for UnenrollPasskey {
   async fn resolve(
     self,
-    ManageArgs { auth, user_id }: &ManageArgs,
+    ManageArgs { auth, user }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
-    todo!()
+    auth.check_username_locked(user.username())?;
+    auth
+      .update_user_stored_passkey(user.id().to_string(), None)
+      .await?;
+    Ok(UnenrollPasskeyResponse {})
   }
 }

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use axum::{Router, extract::Path, routing::post};
 use derive_variants::{EnumVariants, ExtractVariant as _};
@@ -12,18 +12,21 @@ use typeshare::typeshare;
 use uuid::Uuid;
 
 use crate::{
-  AuthExtractor, AuthImpl, BoxAuthImpl,
-  api::Variant,
-  middleware::{UserId, attach_user_id},
+  AuthExtractor, AuthImpl, BoxAuthImpl, api::Variant,
+  user::BoxAuthUser,
 };
 
 pub mod local;
 pub mod passkey;
 pub mod totp;
 
+mod middleware;
+
+use middleware::*;
+
 pub struct ManageArgs {
   auth: BoxAuthImpl,
-  user_id: String,
+  user: Arc<BoxAuthUser>,
 }
 
 #[typeshare]
@@ -50,12 +53,12 @@ pub fn router<I: AuthImpl>() -> Router {
   Router::new()
     .route("/", post(handler::<I>))
     .route("/{variant}", post(variant_handler::<I>))
-    .layer(axum::middleware::from_fn(attach_user_id::<I>))
+    .layer(axum::middleware::from_fn(attach_user::<I>))
 }
 
 async fn variant_handler<I: AuthImpl>(
   auth: AuthExtractor<I>,
-  user_id: UserId,
+  user: UserExtractor,
   Path(Variant { variant }): Path<Variant>,
   Json(params): Json<serde_json::Value>,
 ) -> mogh_error::Result<axum::response::Response> {
@@ -63,12 +66,12 @@ async fn variant_handler<I: AuthImpl>(
     "type": variant,
     "params": params,
   }))?;
-  handler::<I>(auth, user_id, Json(req)).await
+  handler::<I>(auth, user, Json(req)).await
 }
 
 async fn handler<I: AuthImpl>(
   AuthExtractor(auth): AuthExtractor<I>,
-  UserId(user_id): UserId,
+  UserExtractor(user): UserExtractor,
   Json(request): Json<ManageRequest>,
 ) -> mogh_error::Result<axum::response::Response> {
   let timer = Instant::now();
@@ -79,7 +82,7 @@ async fn handler<I: AuthImpl>(
   );
   let args = ManageArgs {
     auth: Box::new(auth),
-    user_id,
+    user,
   };
   let res = request.resolve(&args).await;
   if let Err(e) = &res {

@@ -25,14 +25,14 @@ pub fn complete_passkey_login() {}
 impl Resolve<BoxAuthImpl> for CompletePasskeyLogin {
   async fn resolve(
     self,
-    args: &BoxAuthImpl,
+    auth: &BoxAuthImpl,
   ) -> Result<Self::Response, Self::Error> {
     async {
-      let provider = args.passkey_provider().context(
+      let provider = auth.passkey_provider().context(
         "No passkey provider available, possibly invalid 'host' config.",
       )?;
 
-      let session = args.client().session.as_ref().context(
+      let session = auth.client().session.as_ref().context(
         "Method called in invalid context. This should not happen",
       )?;
 
@@ -52,22 +52,24 @@ impl Resolve<BoxAuthImpl> for CompletePasskeyLogin {
         .context("Failed to validate passkey")
         .status_code(StatusCode::UNAUTHORIZED)?;
 
-      let mut passkey = args
-        .get_user(&user_id)
+      let mut passkey = auth
+        .get_user(user_id.clone())
         .await?
         .passkey()
         .context("User is not enrolled in Passkey 2FA")?;
 
       passkey.0.update_credential(&update);
 
-      // Update the stored passkey on the database
-      args.update_user_stored_passkey(&user_id, passkey).await?;
+      let response =  auth.jwt_provider().encode_sub(&user_id)?;
 
-      args.jwt_provider().encode_sub(&user_id).map_err(Into::into)
+      // Update the stored passkey on the database
+      auth.update_user_stored_passkey(user_id, Some(passkey)).await?;
+
+      Ok(response)
     }
     .with_failure_rate_limit_using_ip(
-      args.general_rate_limiter(),
-      &args.client().ip,
+      auth.general_rate_limiter(),
+      &auth.client().ip,
     )
     .await
   }

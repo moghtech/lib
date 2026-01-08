@@ -24,10 +24,10 @@ pub fn complete_totp_login() {}
 impl Resolve<BoxAuthImpl> for CompleteTotpLogin {
   async fn resolve(
     self,
-    args: &BoxAuthImpl,
+    auth: &BoxAuthImpl,
   ) -> Result<Self::Response, Self::Error> {
     async {
-      let session = args.client().session.as_ref().context(
+      let session = auth.client().session.as_ref().context(
         "Method called in invalid context. This should not happen",
       )?;
 
@@ -39,7 +39,7 @@ impl Resolve<BoxAuthImpl> for CompleteTotpLogin {
           "Totp login has not been initiated for this session",
         )?;
 
-      let user = args.get_user(&user_id).await?;
+      let user = auth.get_user(user_id.clone()).await?;
       let totp_secret = user
         .totp_secret()
         .context("User is not enrolled in TOTP 2FA")?;
@@ -47,7 +47,7 @@ impl Resolve<BoxAuthImpl> for CompleteTotpLogin {
         .decode(totp_secret.as_bytes())
         .context("Failed to decode TOTP secret to bytes")?;
 
-      let totp = make_totp(args, secret_bytes, None)?;
+      let totp = auth.make_totp(secret_bytes, None)?;
 
       let valid = totp
         .check_current(&self.code)
@@ -60,29 +60,12 @@ impl Resolve<BoxAuthImpl> for CompleteTotpLogin {
         );
       }
 
-      args.jwt_provider().encode_sub(&user_id).map_err(Into::into)
+      auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
     }
     .with_failure_rate_limit_using_ip(
-      args.general_rate_limiter(),
-      &args.client().ip,
+      auth.general_rate_limiter(),
+      &auth.client().ip,
     )
     .await
   }
-}
-
-pub fn make_totp(
-  args: &BoxAuthImpl,
-  secret_bytes: Vec<u8>,
-  account_name: impl Into<Option<String>>,
-) -> anyhow::Result<totp_rs::TOTP> {
-  totp_rs::TOTP::new(
-    totp_rs::Algorithm::SHA1,
-    6,
-    1,
-    30,
-    secret_bytes,
-    Some(String::from(args.app_name())),
-    account_name.into().unwrap_or_default(),
-  )
-  .context("Failed to construct TOTP")
 }

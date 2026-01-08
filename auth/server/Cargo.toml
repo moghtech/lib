@@ -29,5 +29,6 @@ anyhow.workspace = true
 bcrypt.workspace = true
 utoipa.workspace = true
 serde.workspace = true
+rand.workspace = true
 axum.workspace = true
 uuid.workspace = true

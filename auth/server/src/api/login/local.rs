@@ -28,34 +28,34 @@ pub fn sign_up_local_user() {}
 impl Resolve<BoxAuthImpl> for SignUpLocalUser {
   async fn resolve(
     self,
-    args: &BoxAuthImpl,
+    auth: &BoxAuthImpl,
   ) -> Result<Self::Response, Self::Error> {
     async {
-      if !args.local_auth_enabled() {
+      if !auth.local_auth_enabled() {
         return Err(
           anyhow!("Local auth is not enabled")
             .status_code(StatusCode::UNAUTHORIZED),
         );
       }
 
-      let no_users_exist = args.no_users_exist().await?;
+      let no_users_exist = auth.no_users_exist().await?;
 
-      if args.registration_disabled() && !no_users_exist {
+      if auth.registration_disabled() && !no_users_exist {
         return Err(
           anyhow!("User registration is disabled")
             .status_code(StatusCode::UNAUTHORIZED),
         );
       }
 
-      args.validate_username(&self.username)?;
-      args.validate_password(&self.password)?;
+      auth.validate_username(&self.username)?;
+      auth.validate_password(&self.password)?;
 
       let hashed_password = bcrypt::hash(
         self.password.as_bytes(),
-        args.local_auth_bcrypt_cost(),
+        auth.local_auth_bcrypt_cost(),
       )?;
 
-      let user_id = args
+      let user_id = auth
         .sign_up_local_user(
           self.username,
           hashed_password,
@@ -63,11 +63,11 @@ impl Resolve<BoxAuthImpl> for SignUpLocalUser {
         )
         .await?;
 
-      args.jwt_provider().encode_sub(&user_id).map_err(Into::into)
+      auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
     }
     .with_failure_rate_limit_using_ip(
-      args.general_rate_limiter(),
-      &args.client().ip,
+      auth.general_rate_limiter(),
+      &auth.client().ip,
     )
     .await
   }
@@ -89,19 +89,19 @@ pub fn login_local_user() {}
 impl Resolve<BoxAuthImpl> for LoginLocalUser {
   async fn resolve(
     self,
-    args: &BoxAuthImpl,
+    auth: &BoxAuthImpl,
   ) -> Result<Self::Response, Self::Error> {
     async {
-      if !args.local_auth_enabled() {
+      if !auth.local_auth_enabled() {
         return Err(
           anyhow!("Local auth is not enabled")
             .status_code(StatusCode::UNAUTHORIZED),
         );
       }
 
-      args.validate_username(&self.username)?;
+      auth.validate_username(&self.username)?;
 
-      let user = args.find_user_with_username(&self.username).await?;
+      let user = auth.find_user_with_username(self.username).await?;
       let hashed_password = user
         .hashed_password()
         .context("Invalid login credentials")
@@ -121,13 +121,13 @@ impl Resolve<BoxAuthImpl> for LoginLocalUser {
       let res = match (user.passkey(), user.totp_secret()) {
         // Passkey 2FA
         (Some(passkey), _) => {
-          let provider = args.passkey_provider().context(
+          let provider = auth.passkey_provider().context(
             "No passkey provider available, possibly invalid 'host' config.",
           )?;
           let (response, state) = provider
             .start_passkey_authentication(passkey)
             .context("Failed to start passkey authentication flow")?;
-          args
+          auth
             .client()
             .session
             .clone()
@@ -144,7 +144,7 @@ impl Resolve<BoxAuthImpl> for LoginLocalUser {
         }
         // TOTP 2FA
         (None, Some(_)) => {
-          args
+          auth
             .client()
             .session
             .as_ref()
@@ -159,15 +159,15 @@ impl Resolve<BoxAuthImpl> for LoginLocalUser {
           JwtOrTwoFactor::Totp {}
         }
         (None, None) => {
-          JwtOrTwoFactor::Jwt(args.jwt_provider().encode_sub(user.id())?)
+          JwtOrTwoFactor::Jwt(auth.jwt_provider().encode_sub(user.id())?)
         }
       };
 
       Ok(res)
     }
       .with_failure_rate_limit_using_ip(
-        args.local_login_rate_limiter(),
-        &args.client().ip,
+        auth.local_login_rate_limiter(),
+        &auth.client().ip,
       )
       .await
   }

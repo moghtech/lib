@@ -1,17 +1,19 @@
 use std::sync::{Arc, LazyLock};
 
+use anyhow::{Context as _, anyhow};
 use axum::{extract::FromRequestParts, http::StatusCode};
 use mogh_auth_client::passkey::Passkey;
-use mogh_error::AddStatusCode;
+use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::RateLimiter;
 
 pub mod api;
 pub mod args;
-pub mod middleware;
 pub mod provider;
-pub mod session;
+pub mod rand;
 pub mod user;
 pub mod validations;
+
+mod session;
 
 use crate::{
   args::RequestClientArgs,
@@ -48,6 +50,30 @@ pub trait AuthImpl: Send + Sync + 'static {
     false
   }
 
+  /// Provide usernames to lock credential updates for,
+  /// such as demo users.
+  fn locked_usernames(&self) -> &'static [String] {
+    &[]
+  }
+
+  fn check_username_locked(
+    &self,
+    username: &str,
+  ) -> mogh_error::Result<()> {
+    if self
+      .locked_usernames()
+      .iter()
+      .any(|locked| locked == username)
+    {
+      Err(
+        anyhow!("Login credentials are locked for this user")
+          .status_code(StatusCode::UNAUTHORIZED),
+      )
+    } else {
+      Ok(())
+    }
+  }
+
   /// Allow user to register even when registration is disabled
   /// when no users exist. If not implemented, this always evaluates
   /// to false and does not change any behavior.
@@ -58,7 +84,7 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// Get's the user using the user id, returning UNAUTHORIZED if none exists.
   fn get_user(
     &self,
-    user_id: &str,
+    user_id: String,
   ) -> DynFuture<mogh_error::Result<BoxAuthUser>>;
 
   // =========
@@ -130,17 +156,68 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// Finds user using the username, returning UNAUTHORIZED if none exists.
   fn find_user_with_username(
     &self,
-    username: &str,
+    username: String,
   ) -> DynFuture<mogh_error::Result<BoxAuthUser>>;
+
+  fn update_user_username(
+    &self,
+    user_id: String,
+    username: String,
+  ) -> DynFuture<mogh_error::Result<()>>;
+
+  fn update_user_password(
+    &self,
+    user_id: String,
+    hashed_password: String,
+  ) -> DynFuture<mogh_error::Result<()>>;
 
   // ===============
   // = PASSKEY 2FA =
   // ===============
+
+  /// If Some(Passkey) is passed, it should be stored,
+  /// overriding any passkey which was on the User.
+  ///
+  /// If None is passed, the user passkey should be removed,
+  /// unenrolling the user from passkey 2fa.
   fn update_user_stored_passkey(
     &self,
-    user_id: &str,
-    passkey: Passkey,
+    user_id: String,
+    passkey: Option<Passkey>,
   ) -> DynFuture<mogh_error::Result<()>>;
+
+  // ============
+  // = TOTP 2FA =
+  // ============
+
+  fn update_user_stored_totp(
+    &self,
+    user_id: String,
+    encoded_secret: String,
+    hashed_recovery_codes: Vec<String>,
+  ) -> DynFuture<mogh_error::Result<()>>;
+
+  fn remove_user_stored_totp(
+    &self,
+    user_id: String,
+  ) -> DynFuture<mogh_error::Result<()>>;
+
+  fn make_totp(
+    &self,
+    secret_bytes: Vec<u8>,
+    account_name: Option<String>,
+  ) -> anyhow::Result<totp_rs::TOTP> {
+    totp_rs::TOTP::new(
+      totp_rs::Algorithm::SHA1,
+      6,
+      1,
+      30,
+      secret_bytes,
+      Some(String::from(self.app_name())),
+      account_name.unwrap_or_default(),
+    )
+    .context("Failed to construct TOTP")
+  }
 }
 
 /// Extract an implementer of AuthImpl from the request body.

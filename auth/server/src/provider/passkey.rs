@@ -1,11 +1,16 @@
 use anyhow::Context;
 use mogh_auth_client::passkey::{
-  Passkey, PublicKeyCredential, RequestChallengeResponse,
+  CreationChallengeResponse, Passkey, PublicKeyCredential,
+  RegisterPublicKeyCredential, RequestChallengeResponse,
 };
 use tracing::info;
+use uuid::Uuid;
 use webauthn_rs::{
   Webauthn, WebauthnBuilder,
-  prelude::{AuthenticationResult, PasskeyAuthentication, Url},
+  prelude::{
+    AuthenticationResult, PasskeyAuthentication, PasskeyRegistration,
+    Url,
+  },
 };
 
 pub struct PasskeyProvider(Webauthn);
@@ -47,5 +52,36 @@ impl PasskeyProvider {
       .0
       .finish_passkey_authentication(credential, state)
       .context("Failed to validate passkey")
+  }
+
+  pub fn start_passkey_registration(
+    &self,
+    username: &str,
+  ) -> anyhow::Result<(CreationChallengeResponse, PasskeyRegistration)>
+  {
+    self
+      .0
+      .start_passkey_registration(
+        Uuid::new_v4(),
+        username,
+        username,
+        None,
+      )
+      .context("Failed to start passkey registration flow")
+      .map(|(response, state)| {
+        (CreationChallengeResponse(response), state)
+      })
+  }
+
+  pub fn finish_passkey_registration(
+    &self,
+    RegisterPublicKeyCredential(credential): &RegisterPublicKeyCredential,
+    state: &PasskeyRegistration,
+  ) -> anyhow::Result<Passkey> {
+    self
+      .0
+      .finish_passkey_registration(credential, state)
+      .context("Failed to finish passkey registration")
+      .map(Passkey)
   }
 }

@@ -4,6 +4,8 @@ use mogh_auth_client::passkey::Passkey;
 pub trait AuthUserImpl: Send + Sync + 'static {
   fn id(&self) -> &str;
 
+  fn username(&self) -> &str;
+
   fn hashed_password(&self) -> Option<&str> {
     None
   }

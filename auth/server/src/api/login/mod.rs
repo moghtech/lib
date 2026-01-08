@@ -93,11 +93,11 @@ pub fn get_login_options() {}
 impl Resolve<BoxAuthImpl> for GetLoginOptions {
   async fn resolve(
     self,
-    args: &BoxAuthImpl,
+    auth: &BoxAuthImpl,
   ) -> Result<Self::Response, Self::Error> {
     Ok(GetLoginOptionsResponse {
-      local: args.local_auth_enabled(),
-      registration_disabled: args.registration_disabled(),
+      local: auth.local_auth_enabled(),
+      registration_disabled: auth.registration_disabled(),
     })
   }
 }
@@ -118,10 +118,10 @@ pub fn exchange_for_jwt() {}
 impl Resolve<BoxAuthImpl> for ExchangeForJwt {
   async fn resolve(
     self,
-    args: &BoxAuthImpl,
+    auth: &BoxAuthImpl,
   ) -> Result<Self::Response, Self::Error> {
     async {
-      let session = args
+      let session = auth
         .client()
         .session
         .as_ref()
@@ -133,11 +133,11 @@ impl Resolve<BoxAuthImpl> for ExchangeForJwt {
         .context("Internal session type error")?
         .context("Authentication steps must be completed before JWT can be retrieved")?;
 
-      args.jwt_provider().encode_sub(&user_id).map_err(Into::into)
+      auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
     }
     .with_failure_rate_limit_using_ip(
-      args.general_rate_limiter(),
-      &args.client().ip
+      auth.general_rate_limiter(),
+      &auth.client().ip
     )
     .await
   }

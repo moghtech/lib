@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context, anyhow};
 use axum::{
   extract::{FromRequestParts, Request},
@@ -7,13 +9,12 @@ use axum::{
 };
 use mogh_error::AddStatusCode;
 
-use crate::{AuthExtractor, AuthImpl};
+use crate::{AuthExtractor, AuthImpl, user::BoxAuthUser};
 
-/// Must layer the
-#[derive(Debug, Clone)]
-pub struct UserId(pub String);
+#[derive(Clone)]
+pub struct UserExtractor(pub Arc<BoxAuthUser>);
 
-impl<S: Send + Sync> FromRequestParts<S> for UserId {
+impl<S: Send + Sync> FromRequestParts<S> for UserExtractor {
   type Rejection = mogh_error::Error;
 
   async fn from_request_parts(
@@ -30,7 +31,7 @@ impl<S: Send + Sync> FromRequestParts<S> for UserId {
 }
 
 /// Requires 'Authorization' header including jwt
-pub async fn attach_user_id<I: AuthImpl>(
+pub async fn attach_user<I: AuthImpl>(
   AuthExtractor(auth): AuthExtractor<I>,
   mut req: Request,
   next: Next,
@@ -48,6 +49,7 @@ pub async fn attach_user_id<I: AuthImpl>(
     .decode_sub(jwt)
     .map_err(|_| anyhow!("Invalid authorization token"))
     .status_code(StatusCode::UNAUTHORIZED)?;
-  req.extensions_mut().insert(UserId(user_id));
+  let user = auth.get_user(user_id).await?;
+  req.extensions_mut().insert(UserExtractor(Arc::new(user)));
   Ok(next.run(req).await)
 }

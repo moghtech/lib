@@ -61,9 +61,10 @@ toml = "0.9.8"
 # AUTH
 webauthn-rs = { version = "0.5.4", features = ["danger-allow-state-serialisation"] }
 jsonwebtoken = { version = "10.2.0", features = ["aws_lc_rs"] }
-totp-rs = { version = "5.7.0", features = ["qr"] }
+totp-rs = { version = "5.7.0", features = ["qr", "serde_support"] }
 data-encoding = "2.9.0"
 bcrypt = "0.17.1"
+rand = "0.9.2"
 
 # ERROR
 anyhow = "1.0.100"
