@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
 
 use crate::{
-  api::NoData,
+  api::{NoData, login::LoginProvider},
   passkey::{CreationChallengeResponse, RegisterPublicKeyCredential},
 };
 
@@ -185,3 +185,46 @@ pub struct UnenrollTotp {}
 /// Response for [UnenrollTotp].
 #[typeshare]
 pub type UnenrollTotpResponse = NoData;
+
+//
+
+/// Begin linking flow for an external login. Response: [NoData].
+///
+/// First call this method when authenticated, then
+/// redirect user to /auth/{provider}/link.
+///
+/// 'provider' can be:
+/// - oidc
+#[typeshare]
+#[derive(
+  Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
+)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[empty_traits(MoghAuthManageRequest)]
+#[response(BeginExternalLoginLinkResponse)]
+#[error(mogh_error::Error)]
+pub struct BeginExternalLoginLink {}
+
+#[typeshare]
+pub type BeginExternalLoginLinkResponse = NoData;
+
+//
+
+/// Unlink a login. Response: [NoData].
+#[typeshare]
+#[derive(
+  Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
+)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[empty_traits(MoghAuthManageRequest)]
+#[response(UnlinkLoginResponse)]
+#[error(mogh_error::Error)]
+pub struct UnlinkLogin {
+  /// 'provider' can be:
+  /// - Local
+  /// - Oidc
+  pub provider: LoginProvider,
+}
+
+#[typeshare]
+pub type UnlinkLoginResponse = NoData;

@@ -16,6 +16,7 @@ use crate::{
   user::BoxAuthUser,
 };
 
+pub mod external;
 pub mod local;
 pub mod passkey;
 pub mod totp;
@@ -43,6 +44,9 @@ pub enum ManageRequest {
   // Local
   UpdateUsername(UpdateUsername),
   UpdatePassword(UpdatePassword),
+  // External
+  BeginExternalLoginLink(BeginExternalLoginLink),
+  UnlinkLogin(UnlinkLogin),
   // Passkey
   BeginPasskeyEnrollment(BeginPasskeyEnrollment),
   ConfirmPasskeyEnrollment(ConfirmPasskeyEnrollment),

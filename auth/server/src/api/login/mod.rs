@@ -97,6 +97,7 @@ impl Resolve<BoxAuthImpl> for GetLoginOptions {
   ) -> Result<Self::Response, Self::Error> {
     Ok(GetLoginOptionsResponse {
       local: auth.local_auth_enabled(),
+      oidc: auth.oidc_config().enabled(),
       registration_disabled: auth.registration_disabled(),
     })
   }

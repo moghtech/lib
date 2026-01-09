@@ -18,7 +18,7 @@ pub trait AuthUserImpl: Send + Sync + 'static {
     None
   }
 
-  fn third_party_skip_2fa(&self) -> bool {
+  fn external_skip_2fa(&self) -> bool {
     true
   }
 }

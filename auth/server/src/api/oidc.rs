@@ -16,9 +16,9 @@ use crate::{
   provider::oidc::{OidcProvider, load_oidc_provider},
   rand::random_string,
   session::{
-    SessionOidcLinkInfo, SessionOidcVerificationInfo,
-    SessionPasskeyLogin, SessionThirdPartyLinkInfo, SessionTotpLogin,
-    SessionUserId,
+    SessionExternalLinkInfo, SessionOidcLinkInfo,
+    SessionOidcVerificationInfo, SessionPasskeyLogin,
+    SessionTotpLogin, SessionUserId,
   },
 };
 
@@ -113,11 +113,14 @@ pub async fn oidc_link<I: AuthImpl>(
     "Method called in invalid context. This should not happen",
   )?;
 
-  let SessionThirdPartyLinkInfo { user_id } = session
-    .remove(SessionThirdPartyLinkInfo::KEY)
+  let SessionExternalLinkInfo { user_id } = session
+    .remove(SessionExternalLinkInfo::KEY)
     .await
     .context("Invalid session third party link info.")?
     .context("Missing session third party link info")?;
+
+  let user = auth.get_user(user_id.clone()).await?;
+  auth.check_username_locked(user.username())?;
 
   let provider = load_oidc_provider(
     auth.app_name(),
@@ -270,7 +273,7 @@ pub async fn oidc_callback<I: AuthImpl>(
       // Log in existing user
       Some(user) => {
         match (
-          user.third_party_skip_2fa(),
+          user.external_skip_2fa(),
           user.passkey(),
           user.totp_secret(),
         ) {
@@ -364,7 +367,7 @@ pub async fn oidc_callback<I: AuthImpl>(
           });
 
         // Modify username if it already exists
-        if auth.find_user_with_username(username.clone()).await.is_ok() {
+        if auth.find_user_with_username(username.clone()).await?.is_some() {
           username += "-";
           username += &random_string(5);
         }
@@ -376,6 +379,16 @@ pub async fn oidc_callback<I: AuthImpl>(
             no_users_exist
           )
           .await?;
+
+        session
+          .insert(
+            SessionUserId::KEY,
+            SessionUserId(user_id.clone()),
+          )
+          .await
+          .context(
+            "Failed to store user id for client session",
+          )?;
 
         UserIdOrTwoFactor::UserId(user_id)
       }

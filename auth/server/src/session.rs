@@ -91,10 +91,10 @@ impl SessionOidcLinkInfo {
 //
 
 #[derive(Serialize, Deserialize)]
-pub struct SessionThirdPartyLinkInfo {
+pub struct SessionExternalLinkInfo {
   pub user_id: String,
 }
 
-impl SessionThirdPartyLinkInfo {
-  pub const KEY: &str = "third-party-link-info";
+impl SessionExternalLinkInfo {
+  pub const KEY: &str = "external-link-info";
 }

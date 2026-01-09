@@ -2,7 +2,9 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context as _, anyhow};
 use axum::{extract::FromRequestParts, http::StatusCode};
-use mogh_auth_client::passkey::Passkey;
+use mogh_auth_client::{
+  api::login::LoginProvider, config::OidcConfig, passkey::Passkey,
+};
 use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::RateLimiter;
 use openidconnect::SubjectIdentifier;
@@ -18,9 +20,7 @@ mod session;
 
 use crate::{
   args::RequestClientArgs,
-  provider::{
-    jwt::JwtProvider, oidc::OidcConfig, passkey::PasskeyProvider,
-  },
+  provider::{jwt::JwtProvider, passkey::PasskeyProvider},
   user::BoxAuthUser,
   validations::{validate_password, validate_username},
 };
@@ -62,6 +62,8 @@ pub trait AuthImpl: Send + Sync + 'static {
     &[]
   }
 
+  /// If the locked usernames includes '__ALL__',
+  /// this will always error.
   fn check_username_locked(
     &self,
     username: &str,
@@ -69,7 +71,7 @@ pub trait AuthImpl: Send + Sync + 'static {
     if self
       .locked_usernames()
       .iter()
-      .any(|locked| locked == username)
+      .any(|locked| locked == username || locked == "__ALL__")
     {
       Err(
         anyhow!("Login credentials are locked for this user")
@@ -200,6 +202,16 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
     user_id: String,
     subject: SubjectIdentifier,
+  ) -> DynFuture<mogh_error::Result<()>>;
+
+  // ==========
+  // = UNLINK =
+  // ==========
+
+  fn unlink_login(
+    &self,
+    user_id: String,
+    provider: LoginProvider,
   ) -> DynFuture<mogh_error::Result<()>>;
 
   // ===============

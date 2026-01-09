@@ -7,6 +7,7 @@
 use derive_empty_traits::EmptyTraits;
 use resolver_api::{HasResponse, Resolve};
 use serde::{Deserialize, Serialize};
+use strum::{Display, EnumString};
 use typeshare::typeshare;
 
 use crate::passkey::{PublicKeyCredential, RequestChallengeResponse};
@@ -42,6 +43,27 @@ pub enum UserIdOrTwoFactor {
   Totp {},
 }
 
+/// The available login providers
+#[typeshare]
+#[derive(
+  Debug, Clone, Serialize, Deserialize, Display, EnumString,
+)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum LoginProvider {
+  Local,
+  Oidc,
+}
+
+/// The available external login providers
+#[typeshare]
+#[derive(
+  Debug, Clone, Serialize, Deserialize, Display, EnumString,
+)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum ExternalLoginProvider {
+  Oidc,
+}
+
 //
 
 pub trait MoghAuthLoginRequest: HasResponse {}
@@ -68,6 +90,8 @@ pub struct GetLoginOptions {}
 pub struct GetLoginOptionsResponse {
   /// Whether local auth is enabled.
   pub local: bool,
+  /// Whether OIDC auth is enabled.
+  pub oidc: bool,
   /// Whether user registration (Sign Up) has been disabled
   pub registration_disabled: bool,
 }

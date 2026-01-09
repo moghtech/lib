@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use arc_swap::ArcSwapOption;
+use mogh_auth_client::config::OidcConfig;
 use openidconnect::{
   AccessToken, AccessTokenHash, AuthorizationCode, Client, ClientId,
   ClientSecret, CsrfToken, EmptyAdditionalClaims, EndpointMaybeSet,
@@ -14,58 +15,9 @@ use openidconnect::{
   core::*,
   reqwest::{self, Url},
 };
-use serde::{Deserialize, Serialize};
 use tracing::error;
 
 pub use openidconnect::SubjectIdentifier;
-
-/// Configuration for OIDC provider
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OidcConfig {
-  /// Enable login with configured OIDC provider.
-  #[serde(default)]
-  pub enabled: bool,
-  /// Configure OIDC provider address for
-  /// communcation directly with the app server.
-  ///
-  /// Note. Needs to be reachable from the app server.
-  ///
-  /// `https://accounts.example.internal/application/o/appname`
-  #[serde(default)]
-  pub provider: String,
-  /// Configure OIDC user redirect host.
-  ///
-  /// This is the host address users are redirected to in their browser,
-  /// and may be different from the `provider` host.
-  /// DO NOT include the `path` part, this must be inferred from the above provider path.
-  /// If not provided, the host will be the same as `oidc_provider`.
-  /// Eg. `https://accounts.example.external`
-  #[serde(default)]
-  pub redirect_host: String,
-  /// Set OIDC client id
-  #[serde(default)]
-  pub client_id: String,
-  /// Set OIDC client secret
-  #[serde(default)]
-  pub client_secret: String,
-  /// Use the full email for usernames.
-  /// Otherwise, the @address will be stripped,
-  /// making usernames more concise.
-  #[serde(default)]
-  pub use_full_email: bool,
-  /// Your OIDC provider may set additional audiences other than `client_id`,
-  /// they must be added here to make claims verification work.
-  #[serde(default)]
-  pub additional_audiences: Vec<String>,
-}
-
-impl OidcConfig {
-  pub fn enabled(&self) -> bool {
-    self.enabled
-      && !self.provider.is_empty()
-      && !self.client_id.is_empty()
-  }
-}
 
 fn reqwest(app_user_agent: &str) -> &'static reqwest::Client {
   static REQWEST: OnceLock<reqwest::Client> = OnceLock::new();

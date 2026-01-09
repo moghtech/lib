@@ -1,5 +1,9 @@
 import { LoginResponses, ManageResponses } from "./responses.js";
-import { LoginRequest, ManageRequest } from "./types.js";
+import type {
+  ExternalLoginProvider,
+  LoginRequest,
+  ManageRequest,
+} from "./types.js";
 
 export * as Types from "./types.js";
 export * as Passkey from "./passkey.js";
@@ -79,8 +83,20 @@ export function MoghAuthClient(url: string, jwt?: string) {
       params
     );
 
+  const externalLogin = (provider: ExternalLoginProvider) => {
+    const _redirect = location.pathname.startsWith("/login")
+      ? location.origin +
+        (new URLSearchParams(location.search).get("backto") ?? "")
+      : location.href;
+    const redirect = encodeURIComponent(_redirect);
+    location.replace(
+      `${url}/${provider.toLowerCase()}/login?redirect=${redirect}`
+    );
+  };
+
   return {
     login,
     manage,
+    externalLogin,
   };
 }
