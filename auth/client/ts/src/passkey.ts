@@ -1,13 +1,54 @@
-export const preparePasskeyCredential = (data: any) => {
+import { Types } from "./lib";
+
+/**
+ ## USAGE:
+ ```
+ navigator.credentials
+  .get(prepareRequestChallengeResponse(requestChallengeResponse))
+  .then((credential) => completePasskeyLogin({ credential }))
+ ```
+ */
+export const prepareRequestChallengeResponse = (
+  challenge: Types.RequestChallengeResponse
+) => {
   return {
-    ...data,
+    ...challenge,
     publicKey: {
-      ...data.publicKey,
-      challenge: base64urlToArrayBuffer(data.publicKey.challenge),
-      allowCredentials: data.publicKey.allowCredentials?.map((cred: any) => ({
-        ...cred,
-        id: base64urlToArrayBuffer(cred.id),
-      })),
+      ...challenge.publicKey,
+      challenge: base64urlToArrayBuffer(challenge.publicKey.challenge),
+      allowCredentials: challenge.publicKey.allowCredentials?.map(
+        (cred: any) => ({
+          ...cred,
+          id: base64urlToArrayBuffer(cred.id),
+        })
+      ),
+    },
+  };
+};
+
+/**
+ ## USAGE:
+ ```
+ navigator.credentials
+  .create(prepareCreationChallengeResponse(creationChallengeResponse))
+  .then((credential) => confirmPasskeyEnrollment({ credential }))
+ ```
+ */
+export const prepareCreationChallengeResponse = (
+  challenge: Types.CreationChallengeResponse
+) => {
+  return {
+    ...challenge,
+    publicKey: {
+      ...challenge.publicKey,
+      challenge: base64urlToArrayBuffer(challenge.publicKey.challenge),
+      user: {
+        ...challenge.publicKey.user,
+        id: base64urlToArrayBuffer(challenge.publicKey.user.id),
+      },
+      excludeCredentials: challenge.publicKey.excludeCredentials?.map(
+        (cred: any) => ({ ...cred, id: base64urlToArrayBuffer(cred.id) })
+      ),
     },
   };
 };

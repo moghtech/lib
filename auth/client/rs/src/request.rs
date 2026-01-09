@@ -3,9 +3,9 @@ use mogh_error::deserialize_error;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
-use crate::api::login::MoghAuthLoginRequest;
-#[cfg(not(feature = "blocking"))]
-use crate::api::manage::MoghAuthManageRequest;
+use crate::api::{
+  login::MoghAuthLoginRequest, manage::MoghAuthManageRequest,
+};
 
 #[cfg(not(feature = "blocking"))]
 pub async fn login<T>(
