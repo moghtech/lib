@@ -47,6 +47,10 @@ pub enum ManageRequest {
   BeginPasskeyEnrollment(BeginPasskeyEnrollment),
   ConfirmPasskeyEnrollment(ConfirmPasskeyEnrollment),
   UnenrollPasskey(UnenrollPasskey),
+  // TOTP
+  BeginTotpEnrollment(BeginTotpEnrollment),
+  ConfirmTotpEnrollment(ConfirmTotpEnrollment),
+  UnenrollTotp(UnenrollTotp),
 }
 
 pub fn router<I: AuthImpl>() -> Router {

@@ -214,5 +214,8 @@ export type ManageRequest =
 	| { type: "UpdatePassword", params: UpdatePassword }
 	| { type: "BeginPasskeyEnrollment", params: BeginPasskeyEnrollment }
 	| { type: "ConfirmPasskeyEnrollment", params: ConfirmPasskeyEnrollment }
-	| { type: "UnenrollPasskey", params: UnenrollPasskey };
+	| { type: "UnenrollPasskey", params: UnenrollPasskey }
+	| { type: "BeginTotpEnrollment", params: BeginTotpEnrollment }
+	| { type: "ConfirmTotpEnrollment", params: ConfirmTotpEnrollment }
+	| { type: "UnenrollTotp", params: UnenrollTotp };
 

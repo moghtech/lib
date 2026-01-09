@@ -17,4 +17,8 @@ export type ManageResponses = {
   BeginPasskeyEnrollment: Types.BeginPasskeyEnrollmentResponse;
   ConfirmPasskeyEnrollment: Types.ConfirmPasskeyEnrollmentResponse;
   UnenrollPasskey: Types.UnenrollPasskeyResponse;
+  // Totp
+  BeginTotpEnrollment: Types.BeginTotpEnrollmentResponse;
+  ConfirmTotpEnrollment: Types.ConfirmTotpEnrollmentResponse;
+  UnenrollTotp: Types.UnenrollTotpResponse;
 };
