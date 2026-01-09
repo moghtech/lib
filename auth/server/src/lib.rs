@@ -5,6 +5,7 @@ use axum::{extract::FromRequestParts, http::StatusCode};
 use mogh_auth_client::passkey::Passkey;
 use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::RateLimiter;
+use openidconnect::SubjectIdentifier;
 
 pub mod api;
 pub mod args;
@@ -17,7 +18,9 @@ mod session;
 
 use crate::{
   args::RequestClientArgs,
-  provider::{jwt::JwtProvider, passkey::PasskeyProvider},
+  provider::{
+    jwt::JwtProvider, oidc::OidcConfig, passkey::PasskeyProvider,
+  },
   user::BoxAuthUser,
   validations::{validate_password, validate_username},
 };
@@ -43,7 +46,10 @@ pub trait AuthImpl: Send + Sync + 'static {
   fn client(&self) -> &RequestClientArgs;
 
   /// Provide a static app name for passkeys.
-  fn app_name(&self) -> &str;
+  fn app_name(&self) -> &'static str;
+
+  /// Provide the app 'host' config
+  fn host(&self) -> &str;
 
   /// Disable new user registration.
   fn registration_disabled(&self) -> bool {
@@ -157,7 +163,7 @@ pub trait AuthImpl: Send + Sync + 'static {
   fn find_user_with_username(
     &self,
     username: String,
-  ) -> DynFuture<mogh_error::Result<BoxAuthUser>>;
+  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>>;
 
   fn update_user_username(
     &self,
@@ -169,6 +175,31 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
     user_id: String,
     hashed_password: String,
+  ) -> DynFuture<mogh_error::Result<()>>;
+
+  // =============
+  // = OIDC AUTH =
+  // =============
+
+  fn oidc_config(&self) -> &OidcConfig;
+
+  fn find_user_with_oidc_subject(
+    &self,
+    subject: SubjectIdentifier,
+  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>>;
+
+  /// Returns created user id, or error.
+  fn sign_up_oidc_user(
+    &self,
+    username: String,
+    subject: SubjectIdentifier,
+    no_users_exist: bool,
+  ) -> DynFuture<mogh_error::Result<String>>;
+
+  fn link_oidc_login(
+    &self,
+    user_id: String,
+    subject: SubjectIdentifier,
   ) -> DynFuture<mogh_error::Result<()>>;
 
   // ===============

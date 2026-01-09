@@ -101,7 +101,12 @@ impl Resolve<BoxAuthImpl> for LoginLocalUser {
 
       auth.validate_username(&self.username)?;
 
-      let user = auth.find_user_with_username(self.username).await?;
+      let user = auth
+        .find_user_with_username(self.username)
+        .await?
+        .context("Invalid login credentials")
+        .status_code(StatusCode::UNAUTHORIZED)?;
+
       let hashed_password = user
         .hashed_password()
         .context("Invalid login credentials")

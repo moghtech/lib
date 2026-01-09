@@ -31,6 +31,17 @@ pub enum JwtOrTwoFactor {
   Totp {},
 }
 
+/// JSON containing either an authentication token or the required 2fa auth check.
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(tag = "type", content = "data")]
+pub enum UserIdOrTwoFactor {
+  UserId(String),
+  Passkey(RequestChallengeResponse),
+  Totp {},
+}
+
 //
 
 pub trait MoghAuthLoginRequest: HasResponse {}

@@ -59,3 +59,42 @@ pub struct SessionTotpEnrollment {
 impl SessionTotpEnrollment {
   pub const KEY: &str = "totp-enrollment";
 }
+
+//
+
+#[derive(Serialize, Deserialize)]
+pub struct SessionOidcVerificationInfo {
+  pub csrf_token: String,
+  pub pkce_verifier: openidconnect::PkceCodeVerifier,
+  pub nonce: openidconnect::Nonce,
+  pub redirect: Option<String>,
+}
+
+impl SessionOidcVerificationInfo {
+  pub const KEY: &str = "oidc-verification-info";
+}
+
+//
+
+#[derive(Serialize, Deserialize)]
+pub struct SessionOidcLinkInfo {
+  pub user_id: String,
+  pub csrf_token: String,
+  pub pkce_verifier: openidconnect::PkceCodeVerifier,
+  pub nonce: openidconnect::Nonce,
+}
+
+impl SessionOidcLinkInfo {
+  pub const KEY: &str = "oidc-link-info";
+}
+
+//
+
+#[derive(Serialize, Deserialize)]
+pub struct SessionThirdPartyLinkInfo {
+  pub user_id: String,
+}
+
+impl SessionThirdPartyLinkInfo {
+  pub const KEY: &str = "third-party-link-info";
+}

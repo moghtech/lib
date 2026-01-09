@@ -5,7 +5,6 @@ Provides trait-driven server and client implementations for robust application a
 - Local login with usernames and passwords
 - OIDC / social login
 - Two factor authentication with webauthn passkey or TOTP code
-- JWT token generation and validation
-- Request user identification via axum extractor
+- JWT token generation and validation utilities
 - Request rate limiting by IP for brute force mitigation
 - Typescript types / client to layer with app-specific typescript client.

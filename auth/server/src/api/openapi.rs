@@ -2,14 +2,11 @@ use serde::Serialize;
 use utoipa::OpenApi;
 
 mod auth {
-  pub mod login {
-    //! Unauthenticated methods to retrieve temporary access tokens.
-    pub use crate::api::login::{local::*, passkey::*, totp::*, *};
-  }
-  pub mod manage {
-    //! Authenticated methods to manage user login options.
-    pub use crate::api::manage::{local::*, passkey::*, totp::*};
-  }
+  pub use crate::api::{
+    login::{local::*, passkey::*, totp::*, *},
+    manage::{local::*, passkey::*, totp::*},
+    oidc::*,
+  };
 }
 
 #[derive(OpenApi)]
@@ -18,30 +15,36 @@ mod auth {
     // =========
     // = LOGIN =
     // =========
-    auth::login::get_login_options,
+    auth::get_login_options,
     // External
-    auth::login::exchange_for_jwt,
+    auth::exchange_for_jwt,
     // Local
-    auth::login::sign_up_local_user,
-    auth::login::login_local_user,
+    auth::sign_up_local_user,
+    auth::login_local_user,
     // Passkey 2FA
-    auth::login::complete_passkey_login,
+    auth::complete_passkey_login,
     // Totp 2FA
-    auth::login::complete_totp_login,
-    // =========
-    // = LOGIN =
-    // =========
+    auth::complete_totp_login,
+    // ==========
+    // = MANAGE =
+    // ==========
     // Local
-    auth::manage::update_username,
-    auth::manage::update_password,
+    auth::update_username,
+    auth::update_password,
     // Passkey 2FA
-    auth::manage::begin_passkey_enrollment,
-    auth::manage::confirm_passkey_enrollment,
-    auth::manage::unenroll_passkey,
+    auth::begin_passkey_enrollment,
+    auth::confirm_passkey_enrollment,
+    auth::unenroll_passkey,
     // Totp 2FA
-    auth::manage::begin_totp_enrollment,
-    auth::manage::confirm_totp_enrollment,
-    auth::manage::unenroll_totp,
+    auth::begin_totp_enrollment,
+    auth::confirm_totp_enrollment,
+    auth::unenroll_totp,
+    // ========
+    // = OIDC =
+    // ========
+    auth::oidc_login,
+    auth::oidc_link,
+    auth::oidc_callback,
   ),
   modifiers(&AddSecurityHeaders),
   security(

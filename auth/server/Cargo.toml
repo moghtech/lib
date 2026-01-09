@@ -19,10 +19,13 @@ resolver_api.workspace = true
 # EXTERNAL
 tower-sessions.workspace = true
 data-encoding.workspace = true
+openidconnect.workspace = true
 jsonwebtoken.workspace = true
+urlencoding.workspace = true
 webauthn-rs.workspace = true
 serde_json.workspace = true
 typeshare.workspace = true
+arc-swap.workspace = true
 tracing.workspace = true
 totp-rs.workspace = true
 anyhow.workspace = true

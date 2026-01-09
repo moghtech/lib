@@ -39,7 +39,7 @@ impl Resolve<ManageArgs> for BeginTotpEnrollment {
     ManageArgs { auth, user }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
     auth.check_username_locked(user.username())?;
-    
+
     let session = auth.client().session.as_ref().context(
       "Method called in invalid context. This should not happen.",
     )?;

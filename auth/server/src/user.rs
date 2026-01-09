@@ -17,6 +17,10 @@ pub trait AuthUserImpl: Send + Sync + 'static {
   fn totp_secret(&self) -> Option<&str> {
     None
   }
+
+  fn third_party_skip_2fa(&self) -> bool {
+    true
+  }
 }
 
 pub type BoxAuthUser = Box<dyn AuthUserImpl>;
