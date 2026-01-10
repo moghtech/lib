@@ -52,6 +52,8 @@ pub enum UserIdOrTwoFactor {
 pub enum LoginProvider {
   Local,
   Oidc,
+  Github,
+  Google,
 }
 
 /// The available external login providers
@@ -62,6 +64,8 @@ pub enum LoginProvider {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum ExternalLoginProvider {
   Oidc,
+  Github,
+  Google,
 }
 
 //

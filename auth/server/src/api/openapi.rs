@@ -4,7 +4,8 @@ use utoipa::OpenApi;
 mod auth {
   pub use crate::api::{
     login::{local::*, passkey::*, totp::*, *},
-    manage::{local::*, passkey::*, totp::*},
+    manage::{external::*, local::*, passkey::*, totp::*},
+    named::{github::*, google::*},
     oidc::*,
   };
 }
@@ -13,17 +14,11 @@ mod auth {
 #[openapi(
   paths(
     // =========
-    // = LOGIN =
+    // = BASIC =
     // =========
     auth::get_login_options,
-    // External
     auth::exchange_for_jwt,
-    // Local
-    auth::sign_up_local_user,
-    auth::login_local_user,
-    // Passkey 2FA
     auth::complete_passkey_login,
-    // Totp 2FA
     auth::complete_totp_login,
     // ==========
     // = MANAGE =
@@ -31,6 +26,9 @@ mod auth {
     // Local
     auth::update_username,
     auth::update_password,
+    // External
+    auth::begin_external_login_link,
+    auth::unlink_login,
     // Passkey 2FA
     auth::begin_passkey_enrollment,
     auth::confirm_passkey_enrollment,
@@ -39,12 +37,24 @@ mod auth {
     auth::begin_totp_enrollment,
     auth::confirm_totp_enrollment,
     auth::unenroll_totp,
-    // ========
-    // = OIDC =
-    // ========
+    // =============
+    // = PROVIDERS =
+    // =============
+    // Local
+    auth::sign_up_local_user,
+    auth::login_local_user,
+    // Oidc
     auth::oidc_login,
     auth::oidc_link,
     auth::oidc_callback,
+    // Github
+    auth::github_login,
+    auth::github_link,
+    auth::github_callback,
+    // Google
+    auth::google_login,
+    auth::google_link,
+    auth::google_callback,
   ),
   modifiers(&AddSecurityHeaders),
   security(

@@ -207,6 +207,8 @@ export interface UnenrollTotp {
 export enum LoginProvider {
 	Local = "Local",
 	Oidc = "Oidc",
+	Github = "Github",
+	Google = "Google",
 }
 
 /** Unlink a login. Response: [NoData]. */
@@ -238,6 +240,8 @@ export interface UpdateUsername {
 /** The available external login providers */
 export enum ExternalLoginProvider {
 	Oidc = "Oidc",
+	Github = "Github",
+	Google = "Google",
 }
 
 export type LoginRequest = 

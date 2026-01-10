@@ -183,12 +183,12 @@ fn auth_redirect<I: AuthImpl>(
   path = "/oidc/callback",
   description = "Callback to finish OIDC login",
   params(
-    ("state", description = "OIDC callback state."),
-    ("code", description = "OIDC callback code."),
-    ("error", description = "OIDC callback error.")
+    ("state", description = "Callback state."),
+    ("code", description = "Callback code."),
+    ("error", description = "Callback error.")
   ),
   responses(
-    (status = 303, description = "Redirect to app to continue login steps."),
+    (status = 303, description = "Redirect back to app to continue login steps."),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
