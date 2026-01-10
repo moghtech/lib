@@ -4,21 +4,21 @@ use axum::{
   routing::get,
 };
 use mogh_auth_client::api::login::UserIdOrTwoFactor;
-use mogh_error::AddStatusCodeError;
+use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::WithFailureRateLimit;
 use openidconnect::{CsrfToken, PkceCodeChallenge};
-use serde::Deserialize;
-use utoipa::ToSchema;
 
 use crate::{
   AuthExtractor, AuthImpl,
-  api::{RedirectQuery, format_redirect},
+  api::{
+    RedirectQuery, StandardCallbackQuery, get_user_id_or_two_factor,
+    user_id_or_two_factor_redirect,
+  },
   provider::oidc::{OidcProvider, load_oidc_provider},
   rand::random_string,
   session::{
     SessionExternalLinkInfo, SessionOidcLinkInfo,
-    SessionOidcVerificationInfo, SessionPasskeyLogin,
-    SessionTotpLogin, SessionUserId,
+    SessionOidcVerificationInfo, SessionUserId,
   },
 };
 
@@ -116,8 +116,8 @@ pub async fn oidc_link<I: AuthImpl>(
   let SessionExternalLinkInfo { user_id } = session
     .remove(SessionExternalLinkInfo::KEY)
     .await
-    .context("Invalid session third party link info.")?
-    .context("Missing session third party link info")?;
+    .context("Invalid session external link info.")?
+    .context("Missing session external link info")?;
 
   let user = auth.get_user(user_id.clone()).await?;
   auth.check_username_locked(user.username())?;
@@ -128,7 +128,8 @@ pub async fn oidc_link<I: AuthImpl>(
     auth.oidc_config(),
   )
   .await
-  .context("OIDC Provider not available")?;
+  .context("OIDC provider not available")
+  .status_code(StatusCode::UNAUTHORIZED)?;
 
   let (pkce_challenge, pkce_verifier) =
     PkceCodeChallenge::new_random_sha256();
@@ -177,13 +178,6 @@ fn auth_redirect<I: AuthImpl>(
   Ok(redirect)
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct OidcCallbackQuery {
-  state: Option<String>,
-  code: Option<String>,
-  error: Option<String>,
-}
-
 #[utoipa::path(
   get,
   path = "/oidc/callback",
@@ -201,12 +195,19 @@ pub struct OidcCallbackQuery {
 )]
 pub async fn oidc_callback<I: AuthImpl>(
   AuthExtractor(auth): AuthExtractor<I>,
-  Query(query): Query<OidcCallbackQuery>,
+  Query(query): Query<StandardCallbackQuery>,
 ) -> mogh_error::Result<Redirect> {
   async {
     if !auth.oidc_config().enabled() {
       return Err(
         anyhow!("OIDC login is not enabled")
+          .status_code(StatusCode::UNAUTHORIZED),
+      );
+    }
+
+    if let Some(e) = query.error {
+      return Err(
+        anyhow!("Provider returned error: {e}")
           .status_code(StatusCode::UNAUTHORIZED),
       );
     }
@@ -222,13 +223,6 @@ pub async fn oidc_callback<I: AuthImpl>(
     )
     .await
     .context("OIDC Provider not available")?;
-
-    if let Some(e) = query.error {
-      return Err(
-        anyhow!("Provider returned error: {e}")
-          .status_code(StatusCode::UNAUTHORIZED),
-      );
-    }
 
     let code = query.code.context("Provider did not return code")?;
     let state = CsrfToken::new(
@@ -267,69 +261,13 @@ pub async fn oidc_callback<I: AuthImpl>(
       )
       .await?;
 
-    let user = auth.find_user_with_oidc_subject(subject.clone()).await?;
+    let user =
+      auth.find_user_with_oidc_subject(subject.clone()).await?;
 
     let user_id_or_two_factor = match user {
       // Log in existing user
       Some(user) => {
-        match (
-          user.external_skip_2fa(),
-          user.passkey(),
-          user.totp_secret(),
-        ) {
-          // Skip / No 2FA
-          (true, _, _) | (false, None, None) => {
-            session
-              .insert(
-                SessionUserId::KEY,
-                SessionUserId(user.id().to_string()),
-              )
-              .await
-              .context(
-                "Failed to store user id for client session",
-              )?;
-            UserIdOrTwoFactor::UserId(user.id().to_string())
-          }
-          // WebAuthn Passkey 2FA
-          (false, Some(passkey), _) => {
-            let provider = auth.passkey_provider().context(
-              "No passkey provider available, possibly invalid 'host' config.",
-            )?;
-            let (response, state) = provider
-              .start_passkey_authentication(passkey)
-              .context("Failed to start passkey authentication flow")?;
-            auth
-              .client()
-              .session
-              .clone()
-              .context("Method called in context without session")?
-              .insert(
-                SessionPasskeyLogin::KEY,
-                SessionPasskeyLogin {
-                  user_id: user.id().to_string(),
-                  state,
-                },
-              )
-              .await?;
-            UserIdOrTwoFactor::Passkey(response)
-          }
-          // TOTP 2FA
-          (false, None, Some(_)) => {
-            auth
-              .client()
-              .session
-              .as_ref()
-              .context("Method called in context without session")?
-              .insert(
-                SessionTotpLogin::KEY,
-                SessionTotpLogin {
-                  user_id: user.id().to_string(),
-                },
-              )
-              .await?;
-            UserIdOrTwoFactor::Totp {}
-          }
-        }
+        get_user_id_or_two_factor(&auth, &user, &session).await?
       }
       // Sign up user
       None => {
@@ -367,55 +305,33 @@ pub async fn oidc_callback<I: AuthImpl>(
           });
 
         // Modify username if it already exists
-        if auth.find_user_with_username(username.clone()).await?.is_some() {
+        if auth
+          .find_user_with_username(username.clone())
+          .await?
+          .is_some()
+        {
           username += "-";
           username += &random_string(5);
         }
 
         let user_id = auth
-          .sign_up_oidc_user(
-            username,
-            subject,
-            no_users_exist
-          )
+          .sign_up_oidc_user(username, subject, no_users_exist)
           .await?;
 
         session
-          .insert(
-            SessionUserId::KEY,
-            SessionUserId(user_id.clone()),
-          )
+          .insert(SessionUserId::KEY, SessionUserId(user_id.clone()))
           .await
-          .context(
-            "Failed to store user id for client session",
-          )?;
+          .context("Failed to store user id for client session")?;
 
         UserIdOrTwoFactor::UserId(user_id)
       }
     };
 
-    match user_id_or_two_factor {
-      UserIdOrTwoFactor::UserId(_) => Ok(format_redirect(
-        auth.host(),
-        redirect.as_deref(),
-        "redeem_ready=true",
-      )),
-      UserIdOrTwoFactor::Totp {} => Ok(format_redirect(
-        auth.host(),
-        redirect.as_deref(),
-        "totp=true",
-      )),
-      UserIdOrTwoFactor::Passkey(passkey) => {
-        let passkey = serde_json::to_string(&passkey)
-          .context("Failed to serialize passkey response")?;
-        let passkey = urlencoding::encode(&passkey);
-        Ok(format_redirect(
-          auth.host(),
-          redirect.as_deref(),
-          &format!("passkey={passkey}"),
-        ))
-      }
-    }
+    user_id_or_two_factor_redirect(
+      &auth,
+      user_id_or_two_factor,
+      redirect.as_deref(),
+    )
   }
   .with_failure_rate_limit_using_ip(
     auth.general_rate_limiter(),

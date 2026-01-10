@@ -3,7 +3,9 @@ use std::sync::{Arc, LazyLock};
 use anyhow::{Context as _, anyhow};
 use axum::{extract::FromRequestParts, http::StatusCode};
 use mogh_auth_client::{
-  api::login::LoginProvider, config::OidcConfig, passkey::Passkey,
+  api::login::LoginProvider,
+  config::{NamedOauthConfig, OidcConfig},
+  passkey::Passkey,
 };
 use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::RateLimiter;
@@ -202,6 +204,56 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
     user_id: String,
     subject: SubjectIdentifier,
+  ) -> DynFuture<mogh_error::Result<()>>;
+
+  // ==============
+  // = NAMED AUTH =
+  // ==============
+
+  // = GITHUB =
+
+  fn github_config(&self) -> &NamedOauthConfig;
+
+  fn find_user_with_github_id(
+    &self,
+    github_id: String,
+  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>>;
+
+  /// Returns created user id, or error.
+  fn sign_up_github_user(
+    &self,
+    username: String,
+    github_id: String,
+    no_users_exist: bool,
+  ) -> DynFuture<mogh_error::Result<String>>;
+
+  fn link_github_login(
+    &self,
+    user_id: String,
+    github_id: String,
+  ) -> DynFuture<mogh_error::Result<()>>;
+
+  // = GOOGLE =
+
+  fn google_config(&self) -> &NamedOauthConfig;
+
+  fn find_user_with_google_id(
+    &self,
+    google_id: String,
+  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>>;
+
+  /// Returns created user id, or error.
+  fn sign_up_google_user(
+    &self,
+    username: String,
+    google_id: String,
+    no_users_exist: bool,
+  ) -> DynFuture<mogh_error::Result<String>>;
+
+  fn link_google_login(
+    &self,
+    user_id: String,
+    google_id: String,
   ) -> DynFuture<mogh_error::Result<()>>;
 
   // ==========

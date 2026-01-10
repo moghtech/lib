@@ -63,6 +63,17 @@ impl SessionTotpEnrollment {
 //
 
 #[derive(Serialize, Deserialize)]
+pub struct SessionExternalLinkInfo {
+  pub user_id: String,
+}
+
+impl SessionExternalLinkInfo {
+  pub const KEY: &str = "external-link-info";
+}
+
+//
+
+#[derive(Serialize, Deserialize)]
 pub struct SessionOidcVerificationInfo {
   pub csrf_token: String,
   pub pkce_verifier: openidconnect::PkceCodeVerifier,
@@ -91,10 +102,45 @@ impl SessionOidcLinkInfo {
 //
 
 #[derive(Serialize, Deserialize)]
-pub struct SessionExternalLinkInfo {
-  pub user_id: String,
+pub struct SessionGithubVerificationInfo {
+  pub state: String,
 }
 
-impl SessionExternalLinkInfo {
-  pub const KEY: &str = "external-link-info";
+impl SessionGithubVerificationInfo {
+  pub const KEY: &str = "github-verification-info";
+}
+
+//
+
+#[derive(Serialize, Deserialize)]
+pub struct SessionGithubLinkInfo {
+  pub user_id: String,
+  pub state: String,
+}
+
+impl SessionGithubLinkInfo {
+  pub const KEY: &str = "github-link-info";
+}
+
+//
+
+#[derive(Serialize, Deserialize)]
+pub struct SessionGoogleVerificationInfo {
+  pub state: String,
+}
+
+impl SessionGoogleVerificationInfo {
+  pub const KEY: &str = "google-verification-info";
+}
+
+//
+
+#[derive(Serialize, Deserialize)]
+pub struct SessionGoogleLinkInfo {
+  pub user_id: String,
+  pub state: String,
+}
+
+impl SessionGoogleLinkInfo {
+  pub const KEY: &str = "google-link-info";
 }

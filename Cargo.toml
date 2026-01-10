@@ -39,7 +39,7 @@ derive_variants = "1.0.0"
 resolver_api = "3.0.0"
 
 # ASYNC
-reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["json", "query", "form", "rustls"] }
 tokio = { version = "1.49.0", features = ["full"] }
 arc-swap = "1.8.0"
 

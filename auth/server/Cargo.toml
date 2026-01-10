@@ -26,6 +26,7 @@ webauthn-rs.workspace = true
 serde_json.workspace = true
 typeshare.workspace = true
 arc-swap.workspace = true
+reqwest.workspace = true
 tracing.workspace = true
 totp-rs.workspace = true
 anyhow.workspace = true

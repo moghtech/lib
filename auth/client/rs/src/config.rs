@@ -32,10 +32,16 @@ pub struct OidcConfig {
   #[serde(default)]
   pub redirect_host: String,
   /// Set OIDC client id
+  ///
+  /// Alias: 'id'
   #[serde(default)]
+  #[serde(alias = "id")]
   pub client_id: String,
   /// Set OIDC client secret
+  ///
+  /// Alias: 'secret'
   #[serde(default)]
+  #[serde(alias = "secret")]
   pub client_secret: String,
   /// Use the full email for usernames.
   /// Otherwise, the @address will be stripped,
@@ -53,6 +59,38 @@ impl OidcConfig {
     self.enabled
       && !self.provider.is_empty()
       && !self.client_id.is_empty()
+  }
+
+  pub fn sanitize(&mut self) {
+    self.client_id = empty_or_redacted(&self.client_id);
+    self.client_secret = empty_or_redacted(&self.client_secret);
+  }
+}
+
+/// Configuration for a named Oauth2 provider,
+/// like Github or Google.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NamedOauthConfig {
+  /// Whether this login provider is enabled.
+  #[serde(default)]
+  pub enabled: bool,
+  /// The Oauth client id.
+  ///
+  /// Alias: 'id'
+  #[serde(default)]
+  #[serde(alias = "id")]
+  pub client_id: String,
+  /// The Oauth client secret.
+  ///
+  /// Alias: 'secret'
+  #[serde(default)]
+  #[serde(alias = "secret")]
+  pub client_secret: String,
+}
+
+impl NamedOauthConfig {
+  pub fn enabled(&self) -> bool {
+    self.enabled && !self.client_id.is_empty()
   }
 
   pub fn sanitize(&mut self) {
