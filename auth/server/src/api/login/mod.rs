@@ -98,6 +98,8 @@ impl Resolve<BoxAuthImpl> for GetLoginOptions {
     Ok(GetLoginOptionsResponse {
       local: auth.local_auth_enabled(),
       oidc: auth.oidc_config().enabled(),
+      github: auth.github_config().enabled(),
+      google: auth.google_config().enabled(),
       registration_disabled: auth.registration_disabled(),
     })
   }

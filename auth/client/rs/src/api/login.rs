@@ -92,10 +92,14 @@ pub struct GetLoginOptions {}
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct GetLoginOptionsResponse {
-  /// Whether local auth is enabled.
+  /// Whether Local login is enabled.
   pub local: bool,
-  /// Whether OIDC auth is enabled.
+  /// Whether OIDC login is enabled.
   pub oidc: bool,
+  /// Whether Github login is enabled.
+  pub github: bool,
+  /// Whether Google login is enabled.
+  pub google: bool,
   /// Whether user registration (Sign Up) has been disabled
   pub registration_disabled: bool,
 }

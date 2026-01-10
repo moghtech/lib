@@ -156,10 +156,14 @@ export interface GetLoginOptions {
 
 /** The response for [GetLoginOptions]. */
 export interface GetLoginOptionsResponse {
-	/** Whether local auth is enabled. */
+	/** Whether Local login is enabled. */
 	local: boolean;
-	/** Whether OIDC auth is enabled. */
+	/** Whether OIDC login is enabled. */
 	oidc: boolean;
+	/** Whether Github login is enabled. */
+	github: boolean;
+	/** Whether Google login is enabled. */
+	google: boolean;
 	/** Whether user registration (Sign Up) has been disabled */
 	registration_disabled: boolean;
 }
