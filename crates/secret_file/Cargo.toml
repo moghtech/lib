@@ -7,5 +7,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = ["read"]
+read = []
+write = []
+tokio = ["dep:tokio"]
+
 [dependencies]
+tokio = { workspace = true, optional = true }
 thiserror.workspace = true

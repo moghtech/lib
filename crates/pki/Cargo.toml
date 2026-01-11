@@ -1,0 +1,22 @@
+[package]
+name = "mogh_pki"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# MOGH
+mogh_secret_file = { workspace = true, features = ["write", "tokio"] }
+# EXTERNAL
+data-encoding.workspace = true
+pem-rfc7468.workspace = true
+arc-swap.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+pkcs8.workspace = true
+snow.workspace = true
+spki.workspace = true
+der.workspace = true
