@@ -18,10 +18,6 @@ use crate::{
     google::{GoogleProvider, google_provider},
   },
   rand::random_string,
-  session::{
-    SessionExternalLinkInfo, SessionGoogleLinkInfo,
-    SessionGoogleVerificationInfo, SessionUserId,
-  },
 };
 
 pub fn router<I: AuthImpl>() -> Router {
@@ -55,10 +51,6 @@ pub async fn google_login<I: AuthImpl>(
     );
   }
 
-  let session = auth.client().session.as_ref().context(
-    "Method called in invalid context. This should not happen",
-  )?;
-
   let provider = google_provider(auth.host(), auth.google_config())
     .context("Google provider not available")
     .status_code(StatusCode::UNAUTHORIZED)?;
@@ -66,13 +58,7 @@ pub async fn google_login<I: AuthImpl>(
   let (state, uri) =
     provider.get_state_and_login_redirect_url(redirect).await;
 
-  session
-    .insert(
-      SessionGoogleVerificationInfo::KEY,
-      SessionGoogleVerificationInfo { state },
-    )
-    .await
-    .context("Failed to insert google oauth session state")?;
+  auth.client().session.insert_google_login(&state).await?;
 
   Ok(Redirect::to(&uri))
 }
@@ -97,15 +83,9 @@ pub async fn google_link<I: AuthImpl>(
     );
   }
 
-  let session = auth.client().session.as_ref().context(
-    "Method called in invalid context. This should not happen",
-  )?;
+  let session = &auth.client().session;
 
-  let SessionExternalLinkInfo { user_id } = session
-    .remove(SessionExternalLinkInfo::KEY)
-    .await
-    .context("Invalid session external link info.")?
-    .context("Missing session external link info")?;
+  let user_id = session.retrieve_external_link_user_id().await?;
 
   let user = auth.get_user(user_id.clone()).await?;
   auth.check_username_locked(user.username())?;
@@ -117,13 +97,7 @@ pub async fn google_link<I: AuthImpl>(
   let (state, uri) =
     provider.get_state_and_login_redirect_url(None).await;
 
-  session
-    .insert(
-      SessionGoogleLinkInfo::KEY,
-      SessionGoogleLinkInfo { user_id, state },
-    )
-    .await
-    .context("Failed to insert session link info")?;
+  session.insert_google_link(&user_id, &state).await?;
 
   Ok(Redirect::to(&uri))
 }
@@ -157,19 +131,15 @@ pub async fn google_callback<I: AuthImpl>(
 
     let (client_state, code) = query.open()?;
 
-    let session = auth.client().session.as_ref().context(
-      "Method called in invalid context. This should not happen",
-    )?;
-
     let provider = google_provider(auth.host(), auth.google_config())
       .context("Google provider not available")
       .status_code(StatusCode::UNAUTHORIZED)?;
 
+    let session = &auth.client().session;
+
     // Check first if this is a link callback
     // and use the linking handler if so.
-    if let Ok(Some(info)) =
-      session.remove(SessionGoogleLinkInfo::KEY).await
-    {
+    if let Ok(Some(info)) = session.retrieve_google_link().await {
       return link_google_callback(
         &auth,
         provider,
@@ -180,13 +150,7 @@ pub async fn google_callback<I: AuthImpl>(
       .await;
     }
 
-    let SessionGoogleVerificationInfo { state } = session
-      .remove(SessionGoogleVerificationInfo::KEY)
-      .await
-      .context("Invalid session verification info.")?
-      .context(
-        "Missing session verification info for CSRF protection.",
-      )?;
+    let state = session.retrieve_google_login().await?;
 
     if client_state != state {
       return Err(
@@ -204,9 +168,7 @@ pub async fn google_callback<I: AuthImpl>(
 
     let user_id_or_two_factor = match user {
       // Log in existing user
-      Some(user) => {
-        get_user_id_or_two_factor(&auth, &user, &session).await?
-      }
+      Some(user) => get_user_id_or_two_factor(&auth, &user).await?,
       // Sign up user
       None => {
         let no_users_exist = auth.no_users_exist().await?;
@@ -240,10 +202,7 @@ pub async fn google_callback<I: AuthImpl>(
           .sign_up_google_user(username, google_id, no_users_exist)
           .await?;
 
-        session
-          .insert(SessionUserId::KEY, SessionUserId(user_id.clone()))
-          .await
-          .context("Failed to store user id for client session")?;
+        session.insert_authenticated_user_id(&user_id).await?;
 
         UserIdOrTwoFactor::UserId(user_id)
       }
@@ -267,7 +226,7 @@ pub async fn google_callback<I: AuthImpl>(
 async fn link_google_callback<I: AuthImpl>(
   auth: &I,
   provider: &GoogleProvider,
-  SessionGoogleLinkInfo { user_id, state }: SessionGoogleLinkInfo,
+  (user_id, state): (String, String),
   client_state: String,
   code: String,
 ) -> mogh_error::Result<Redirect> {

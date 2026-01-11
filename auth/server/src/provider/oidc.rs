@@ -15,9 +15,28 @@ use openidconnect::{
   core::*,
   reqwest::{self, Url},
 };
+use serde::{Deserialize, Serialize};
 use tracing::error;
 
 pub use openidconnect::SubjectIdentifier;
+
+#[derive(Serialize, Deserialize)]
+pub struct SessionOidcLogin {
+  pub csrf_token: String,
+  pub pkce_verifier: openidconnect::PkceCodeVerifier,
+  pub nonce: openidconnect::Nonce,
+  pub redirect: Option<String>,
+}
+
+//
+
+#[derive(Serialize, Deserialize)]
+pub struct SessionOidcLink {
+  pub user_id: String,
+  pub csrf_token: String,
+  pub pkce_verifier: openidconnect::PkceCodeVerifier,
+  pub nonce: openidconnect::Nonce,
+}
 
 fn reqwest(app_user_agent: &str) -> &'static reqwest::Client {
   static REQWEST: OnceLock<reqwest::Client> = OnceLock::new();

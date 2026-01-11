@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-use anyhow::Context;
 use axum::{Router, extract::Path, routing::post};
 use derive_variants::{EnumVariants, ExtractVariant as _};
 use mogh_auth_client::api::login::*;
@@ -13,10 +12,7 @@ use tracing::debug;
 use typeshare::typeshare;
 use uuid::Uuid;
 
-use crate::{
-  AuthExtractor, AuthImpl, BoxAuthImpl, api::Variant,
-  session::SessionUserId,
-};
+use crate::{AuthExtractor, AuthImpl, BoxAuthImpl, api::Variant};
 
 pub mod local;
 pub mod passkey;
@@ -124,23 +120,16 @@ impl Resolve<BoxAuthImpl> for ExchangeForJwt {
     auth: &BoxAuthImpl,
   ) -> Result<Self::Response, Self::Error> {
     async {
-      let session = auth
+      let user_id = auth
         .client()
         .session
-        .as_ref()
-        .context("Method called in context without session")?;
-
-      let SessionUserId(user_id) = session
-        .remove(SessionUserId::KEY)
-        .await
-        .context("Internal session type error")?
-        .context("Authentication steps must be completed before JWT can be retrieved")?;
-
+        .retrieve_authenticated_user_id()
+        .await?;
       auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
     }
     .with_failure_rate_limit_using_ip(
       auth.general_rate_limiter(),
-      &auth.client().ip
+      &auth.client().ip,
     )
     .await
   }

@@ -4,14 +4,9 @@ use mogh_auth_client::api::login::UserIdOrTwoFactor;
 use mogh_error::{AddStatusCode as _, AddStatusCodeError as _};
 use reqwest::StatusCode;
 use serde::Deserialize;
-use tower_sessions::Session;
 use utoipa::ToSchema;
 
-use crate::{
-  AuthImpl,
-  session::{SessionPasskeyLogin, SessionTotpLogin, SessionUserId},
-  user::BoxAuthUser,
-};
+use crate::{AuthImpl, user::BoxAuthUser};
 
 pub mod login;
 pub mod manage;
@@ -87,8 +82,7 @@ fn format_redirect(
 async fn get_user_id_or_two_factor<I: AuthImpl>(
   auth: &I,
   user: &BoxAuthUser,
-  session: &Session,
-) -> anyhow::Result<UserIdOrTwoFactor> {
+) -> mogh_error::Result<UserIdOrTwoFactor> {
   let res = match (
     user.external_skip_2fa(),
     user.passkey(),
@@ -96,35 +90,25 @@ async fn get_user_id_or_two_factor<I: AuthImpl>(
   ) {
     // Skip / No 2FA
     (true, _, _) | (false, None, None) => {
-      session
-        .insert(
-          SessionUserId::KEY,
-          SessionUserId(user.id().to_string()),
-        )
-        .await
-        .context("Failed to store user id for client session")?;
+      auth
+        .client()
+        .session
+        .insert_authenticated_user_id(user.id())
+        .await?;
       UserIdOrTwoFactor::UserId(user.id().to_string())
     }
     // WebAuthn Passkey 2FA
     (false, Some(passkey), _) => {
       let provider = auth.passkey_provider().context(
-              "No passkey provider available, possibly invalid 'host' config.",
-            )?;
+        "No passkey provider available, possibly invalid 'host' config.",
+      )?;
       let (response, state) = provider
         .start_passkey_authentication(passkey)
         .context("Failed to start passkey authentication flow")?;
       auth
         .client()
         .session
-        .clone()
-        .context("Method called in context without session")?
-        .insert(
-          SessionPasskeyLogin::KEY,
-          SessionPasskeyLogin {
-            user_id: user.id().to_string(),
-            state,
-          },
-        )
+        .insert_passkey_login(user.id(), &state)
         .await?;
       UserIdOrTwoFactor::Passkey(response)
     }
@@ -133,14 +117,7 @@ async fn get_user_id_or_two_factor<I: AuthImpl>(
       auth
         .client()
         .session
-        .as_ref()
-        .context("Method called in context without session")?
-        .insert(
-          SessionTotpLogin::KEY,
-          SessionTotpLogin {
-            user_id: user.id().to_string(),
-          },
-        )
+        .insert_totp_login_user_id(user.id())
         .await?;
       UserIdOrTwoFactor::Totp {}
     }

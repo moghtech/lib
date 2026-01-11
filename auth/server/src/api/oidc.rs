@@ -14,12 +14,11 @@ use crate::{
     RedirectQuery, StandardCallbackQuery, get_user_id_or_two_factor,
     user_id_or_two_factor_redirect,
   },
-  provider::oidc::{OidcProvider, load_oidc_provider},
-  rand::random_string,
-  session::{
-    SessionExternalLinkInfo, SessionOidcLinkInfo,
-    SessionOidcVerificationInfo, SessionUserId,
+  provider::oidc::{
+    OidcProvider, SessionOidcLink, SessionOidcLogin,
+    load_oidc_provider,
   },
+  rand::random_string,
 };
 
 pub fn router<I: AuthImpl>() -> Router {
@@ -53,10 +52,6 @@ pub async fn oidc_login<I: AuthImpl>(
     );
   }
 
-  let session = auth.client().session.as_ref().context(
-    "Method called in invalid context. This should not happen",
-  )?;
-
   let provider = load_oidc_provider(
     auth.app_name(),
     auth.host(),
@@ -73,18 +68,16 @@ pub async fn oidc_login<I: AuthImpl>(
     provider.authorize_url(pkce_challenge);
 
   // Data inserted here will be matched on callback side for csrf protection.
-  session
-    .insert(
-      SessionOidcVerificationInfo::KEY,
-      SessionOidcVerificationInfo {
-        csrf_token: csrf_token.secret().clone(),
-        pkce_verifier,
-        nonce,
-        redirect,
-      },
-    )
-    .await
-    .context("Failed to insert session verification info")?;
+  auth
+    .client()
+    .session
+    .insert_oidc_login(&SessionOidcLogin {
+      csrf_token: csrf_token.secret().clone(),
+      pkce_verifier,
+      nonce,
+      redirect,
+    })
+    .await?;
 
   auth_redirect(auth, auth_url.as_str())
 }
@@ -109,15 +102,11 @@ pub async fn oidc_link<I: AuthImpl>(
     );
   }
 
-  let session = auth.client().session.as_ref().context(
-    "Method called in invalid context. This should not happen",
-  )?;
-
-  let SessionExternalLinkInfo { user_id } = session
-    .remove(SessionExternalLinkInfo::KEY)
-    .await
-    .context("Invalid session external link info.")?
-    .context("Missing session external link info")?;
+  let user_id = auth
+    .client()
+    .session
+    .retrieve_external_link_user_id()
+    .await?;
 
   let user = auth.get_user(user_id.clone()).await?;
   auth.check_username_locked(user.username())?;
@@ -138,18 +127,16 @@ pub async fn oidc_link<I: AuthImpl>(
   let (auth_url, csrf_token, nonce) =
     provider.authorize_url(pkce_challenge);
 
-  session
-    .insert(
-      SessionOidcLinkInfo::KEY,
-      SessionOidcLinkInfo {
-        user_id,
-        csrf_token: csrf_token.secret().clone(),
-        pkce_verifier,
-        nonce,
-      },
-    )
-    .await
-    .context("Failed to insert session link info")?;
+  auth
+    .client()
+    .session
+    .insert_oidc_link(&SessionOidcLink {
+      user_id,
+      csrf_token: csrf_token.secret().clone(),
+      pkce_verifier,
+      nonce,
+    })
+    .await?;
 
   auth_redirect(auth, auth_url.as_str())
 }
@@ -212,10 +199,6 @@ pub async fn oidc_callback<I: AuthImpl>(
       );
     }
 
-    let session = auth.client().session.as_ref().context(
-      "Method called in invalid context. This should not happen",
-    )?;
-
     let provider = load_oidc_provider(
       auth.app_name(),
       auth.host(),
@@ -229,27 +212,21 @@ pub async fn oidc_callback<I: AuthImpl>(
       query.state.context("Provider did not return state")?,
     );
 
+    let session = &auth.client().session;
+
     // Check first if this is a link callback
     // and use the linking handler if so.
-    if let Ok(Some(info)) =
-      session.remove(SessionOidcLinkInfo::KEY).await
-    {
+    if let Ok(Some(info)) = session.retrieve_oidc_link().await {
       return link_oidc_callback(&auth, &provider, info, state, code)
         .await;
     }
 
-    let SessionOidcVerificationInfo {
+    let SessionOidcLogin {
       csrf_token,
       pkce_verifier,
       nonce,
       redirect,
-    } = session
-      .remove(SessionOidcVerificationInfo::KEY)
-      .await
-      .context("Invalid session verification info.")?
-      .context(
-        "Missing session verification info for CSRF protection.",
-      )?;
+    } = session.retrieve_oidc_login().await?;
 
     let (subject, token) = provider
       .validate_extract_subject_and_token(
@@ -266,9 +243,7 @@ pub async fn oidc_callback<I: AuthImpl>(
 
     let user_id_or_two_factor = match user {
       // Log in existing user
-      Some(user) => {
-        get_user_id_or_two_factor(&auth, &user, &session).await?
-      }
+      Some(user) => get_user_id_or_two_factor(&auth, &user).await?,
       // Sign up user
       None => {
         let no_users_exist = auth.no_users_exist().await?;
@@ -318,10 +293,7 @@ pub async fn oidc_callback<I: AuthImpl>(
           .sign_up_oidc_user(username, subject, no_users_exist)
           .await?;
 
-        session
-          .insert(SessionUserId::KEY, SessionUserId(user_id.clone()))
-          .await
-          .context("Failed to store user id for client session")?;
+        session.insert_authenticated_user_id(&user_id).await?;
 
         UserIdOrTwoFactor::UserId(user_id)
       }
@@ -345,12 +317,12 @@ pub async fn oidc_callback<I: AuthImpl>(
 async fn link_oidc_callback<I: AuthImpl>(
   auth: &I,
   provider: &OidcProvider,
-  SessionOidcLinkInfo {
+  SessionOidcLink {
     user_id,
     csrf_token,
     pkce_verifier,
     nonce,
-  }: SessionOidcLinkInfo,
+  }: SessionOidcLink,
   state: CsrfToken,
   code: String,
 ) -> mogh_error::Result<Redirect> {

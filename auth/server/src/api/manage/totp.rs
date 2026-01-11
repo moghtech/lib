@@ -12,7 +12,6 @@ use resolver_api::Resolve;
 use crate::{
   api::manage::ManageArgs,
   rand::{random_bytes, random_string},
-  session::SessionTotpEnrollment,
 };
 
 /// 160 bits
@@ -40,10 +39,6 @@ impl Resolve<ManageArgs> for BeginTotpEnrollment {
   ) -> Result<Self::Response, Self::Error> {
     auth.check_username_locked(user.username())?;
 
-    let session = auth.client().session.as_ref().context(
-      "Method called in invalid context. This should not happen.",
-    )?;
-
     let totp = auth.make_totp(
       random_bytes(TOTP_ENROLLMENT_SECRET_LENGTH),
       Some(user.id().to_string()),
@@ -55,12 +50,7 @@ impl Resolve<ManageArgs> for BeginTotpEnrollment {
       .context("Failed to generate QR code png")?;
     let uri = totp.get_url();
 
-    session
-      .insert(
-        SessionTotpEnrollment::KEY,
-        SessionTotpEnrollment { totp },
-      )
-      .await?;
+    auth.client().session.insert_totp_enrollment(&totp).await?;
 
     Ok(BeginTotpEnrollmentResponse { uri, png })
   }
@@ -86,17 +76,8 @@ impl Resolve<ManageArgs> for ConfirmTotpEnrollment {
     self,
     ManageArgs { auth, user }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
-    let session = auth.client().session.as_ref().context(
-      "Method called in invalid context. This should not happen.",
-    )?;
-
-    let SessionTotpEnrollment { totp } = session
-      .remove(SessionTotpEnrollment::KEY)
-      .await
-      .context("Totp enrollment was not initiated correctly")?
-      .context(
-        "Totp enrollment was not initiated correctly or timed out",
-      )?;
+    let totp =
+      auth.client().session.retrieve_totp_enrollment().await?;
 
     let valid = totp
       .check_current(&self.code)

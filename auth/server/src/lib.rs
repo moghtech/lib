@@ -1,4 +1,7 @@
-use std::sync::{Arc, LazyLock};
+use std::{
+  net::IpAddr,
+  sync::{Arc, LazyLock},
+};
 
 use anyhow::{Context as _, anyhow};
 use axum::{extract::FromRequestParts, http::StatusCode};
@@ -9,10 +12,10 @@ use mogh_auth_client::{
 };
 use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::RateLimiter;
+use mogh_request_ip::get_ip_from_headers_and_extensions;
 use openidconnect::SubjectIdentifier;
 
 pub mod api;
-pub mod args;
 pub mod provider;
 pub mod rand;
 pub mod user;
@@ -21,8 +24,8 @@ pub mod validations;
 mod session;
 
 use crate::{
-  args::RequestClientArgs,
   provider::{jwt::JwtProvider, passkey::PasskeyProvider},
+  session::Session,
   user::BoxAuthUser,
   validations::{validate_password, validate_username},
 };
@@ -34,6 +37,33 @@ pub mod request_ip {
 pub type BoxAuthImpl = Box<dyn AuthImpl>;
 pub type DynFuture<O> =
   std::pin::Pin<Box<dyn Future<Output = O> + Send>>;
+
+pub struct RequestClientArgs {
+  /// Prefers extraction from headers 'x-forwarded-for', then 'x-real-ip'.
+  /// If missing, uses fallback IP extracted directly from request.
+  pub ip: IpAddr,
+  /// Per-client session state
+  pub session: Session,
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for RequestClientArgs {
+  type Rejection = mogh_error::Error;
+
+  async fn from_request_parts(
+    parts: &mut axum::http::request::Parts,
+    _: &S,
+  ) -> Result<Self, Self::Rejection> {
+    let ip = get_ip_from_headers_and_extensions(
+      &parts.headers,
+      &parts.extensions,
+    )?;
+    let session = parts
+      .extensions
+      .remove::<Session>()
+      .context("Request context missing Session extention")?;
+    Ok(RequestClientArgs { ip, session })
+  }
+}
 
 /// This trait is implemented at the app level
 /// to support custom schemas, storage providers, and business logic.

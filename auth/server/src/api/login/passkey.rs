@@ -7,7 +7,7 @@ use mogh_error::AddStatusCode;
 use mogh_rate_limit::WithFailureRateLimit;
 use resolver_api::Resolve;
 
-use crate::{BoxAuthImpl, session::SessionPasskeyLogin};
+use crate::BoxAuthImpl;
 
 #[utoipa::path(
   post,
@@ -32,19 +32,13 @@ impl Resolve<BoxAuthImpl> for CompletePasskeyLogin {
         "No passkey provider available, possibly invalid 'host' config.",
       )?;
 
-      let session = auth.client().session.as_ref().context(
-        "Method called in invalid context. This should not happen",
-      )?;
+      let (user_id, state) = auth
+        .client()
+        .session
+        .retrieve_passkey_login()
+        .await?;
 
-      let SessionPasskeyLogin { user_id, state } = session
-        .get(SessionPasskeyLogin::KEY)
-        .await
-        .context("Internal session type error")?
-        .context(
-          "Passkey login has not been initiated for this session",
-        )?;
-
-      // This error if the incoming passkey is invalid
+      // This will error if the incoming passkey is invalid.
       // The result of this call must be used to
       // update the stored passkey info on database.
       let update = provider

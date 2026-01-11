@@ -7,10 +7,7 @@ use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::WithFailureRateLimit;
 use resolver_api::Resolve;
 
-use crate::{
-  BoxAuthImpl,
-  session::{SessionPasskeyLogin, SessionTotpLogin},
-};
+use crate::BoxAuthImpl;
 
 #[utoipa::path(
   post,
@@ -135,15 +132,7 @@ impl Resolve<BoxAuthImpl> for LoginLocalUser {
           auth
             .client()
             .session
-            .clone()
-            .context("Method called in context without session")?
-            .insert(
-              SessionPasskeyLogin::KEY,
-              SessionPasskeyLogin {
-                user_id: user.id().to_string(),
-                state,
-              },
-            )
+            .insert_passkey_login(user.id(), &state)
             .await?;
           JwtOrTwoFactor::Passkey(response)
         }
@@ -152,14 +141,7 @@ impl Resolve<BoxAuthImpl> for LoginLocalUser {
           auth
             .client()
             .session
-            .as_ref()
-            .context("Method called in context without session")?
-            .insert(
-              SessionTotpLogin::KEY,
-              SessionTotpLogin {
-                user_id: user.id().to_string(),
-              },
-            )
+            .insert_totp_login_user_id(user.id())
             .await?;
           JwtOrTwoFactor::Totp {}
         }

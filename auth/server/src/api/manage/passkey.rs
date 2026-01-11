@@ -6,9 +6,7 @@ use mogh_auth_client::api::manage::{
 };
 use resolver_api::Resolve;
 
-use crate::{
-  api::manage::ManageArgs, session::SessionPasskeyEnrollment,
-};
+use crate::api::manage::ManageArgs;
 
 //
 
@@ -34,10 +32,6 @@ impl Resolve<ManageArgs> for BeginPasskeyEnrollment {
 
     auth.check_username_locked(username)?;
 
-    let session = auth.client().session.as_ref().context(
-      "Method called in invalid context. This should not happen.",
-    )?;
-
     let provider = auth.passkey_provider().context(
       "No passkey provider available, invalid 'host' config",
     )?;
@@ -47,17 +41,11 @@ impl Resolve<ManageArgs> for BeginPasskeyEnrollment {
     let (challenge, state) =
       provider.start_passkey_registration(username)?;
 
-    session
-      .insert(
-        SessionPasskeyEnrollment::KEY,
-        SessionPasskeyEnrollment {
-          state
-        },
-      )
-      .await
-      .context(
-        "Failed to store passkey enrollment state in server side client session",
-      )?;
+    auth
+      .client()
+      .session
+      .insert_passkey_enrollment(&state)
+      .await?;
 
     Ok(challenge)
   }
@@ -83,21 +71,12 @@ impl Resolve<ManageArgs> for ConfirmPasskeyEnrollment {
     self,
     ManageArgs { auth, user }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
-    let session = auth.client().session.as_ref().context(
-      "Method called in invalid context. This should not happen.",
-    )?;
-
     let provider = auth.passkey_provider().context(
       "No passkey provider available, invalid 'host' config",
     )?;
 
-    let SessionPasskeyEnrollment { state } = session
-      .remove(SessionPasskeyEnrollment::KEY)
-      .await
-      .context("Passkey enrollment was not initiated correctly")?
-      .context(
-        "Passkey enrollment was not initiated correctly or timed out",
-      )?;
+    let state =
+      auth.client().session.retrieve_passkey_enrollment().await?;
 
     let passkey = provider
       .finish_passkey_registration(&self.credential, &state)?;

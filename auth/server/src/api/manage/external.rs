@@ -1,13 +1,10 @@
-use anyhow::Context as _;
 use mogh_auth_client::api::manage::{
   BeginExternalLoginLink, BeginExternalLoginLinkResponse,
   UnlinkLogin, UnlinkLoginResponse,
 };
 use resolver_api::Resolve;
 
-use crate::{
-  api::manage::ManageArgs, session::SessionExternalLinkInfo,
-};
+use crate::api::manage::ManageArgs;
 
 //
 
@@ -31,21 +28,11 @@ impl Resolve<ManageArgs> for BeginExternalLoginLink {
   ) -> Result<Self::Response, Self::Error> {
     auth.check_username_locked(user.username())?;
 
-    let session = auth.client().session.as_ref().context(
-      "Method called in invalid context. This should not happen.",
-    )?;
-
-    session
-      .insert(
-        SessionExternalLinkInfo::KEY,
-        SessionExternalLinkInfo {
-          user_id: user.id().to_string(),
-        },
-      )
-      .await
-      .context(
-        "Failed to insert external link info into client session",
-      )?;
+    auth
+      .client()
+      .session
+      .insert_external_link_user_id(user.id())
+      .await?;
 
     Ok(BeginExternalLoginLinkResponse {})
   }
