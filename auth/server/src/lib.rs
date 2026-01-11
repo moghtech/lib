@@ -59,8 +59,9 @@ impl<S: Send + Sync> FromRequestParts<S> for RequestClientArgs {
     )?;
     let session = parts
       .extensions
-      .remove::<tower_sessions::Session>()
-      .context("Request context missing Session extention")?;
+      .get::<tower_sessions::Session>()
+      .cloned()
+      .context("Request context missing Session extension")?;
     Ok(RequestClientArgs {
       ip,
       session: Session(session),
