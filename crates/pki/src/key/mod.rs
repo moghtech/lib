@@ -86,7 +86,7 @@ impl EncodedKeyPair {
     }
 
     let private = Pkcs8PrivateKey::from_file(private_key_path)?;
-    let public = private.compute_public_key(pki_type)?;
+    let public = private.compute_public_key_using_dh(pki_type)?;
 
     Ok(Self { private, public })
   }
@@ -97,7 +97,7 @@ impl EncodedKeyPair {
   ) -> anyhow::Result<Self> {
     let private =
       Pkcs8PrivateKey::from_maybe_raw_bytes(maybe_pkcs8_private_key)?;
-    let public = private.compute_public_key(pki_type)?;
+    let public = private.compute_public_key_using_dh(pki_type)?;
     Ok(Self { private, public })
   }
 

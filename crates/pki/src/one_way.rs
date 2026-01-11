@@ -1,22 +1,25 @@
 use anyhow::Context;
 
-use crate::PkiType;
+use crate::{
+  PkiType,
+  key::{Pkcs8PrivateKey, SpkiPublicKey},
+};
 
 /// Wrapper around [snow::HandshakeState] to streamline this implementation
-pub struct MutualNoiseHandshake(snow::HandshakeState);
+pub struct OneWayNoiseHandshake(snow::HandshakeState);
 
-impl MutualNoiseHandshake {
+impl OneWayNoiseHandshake {
   pub fn new_initiator(
-    maybe_pkcs8_private_key: &str,
+    private_key: &Pkcs8PrivateKey,
+    remote_public_key: &SpkiPublicKey,
     prologue: &[u8],
-  ) -> anyhow::Result<MutualNoiseHandshake> {
-    let private_key = crate::key::Pkcs8PrivateKey::maybe_raw_bytes(
-      maybe_pkcs8_private_key,
-    )?;
-    Ok(MutualNoiseHandshake(
+  ) -> anyhow::Result<OneWayNoiseHandshake> {
+    Ok(OneWayNoiseHandshake(
       snow::Builder::new(PkiType::MUTUAL.parse()?)
-        .local_private_key(&private_key)
+        .local_private_key(private_key.as_bytes())
         .context("Invalid private key")?
+        .remote_public_key(remote_public_key.as_bytes())
+        .context("Invalid remote public key")?
         .prologue(prologue)
         .context("Invalid prologue")?
         .build_initiator()
@@ -24,17 +27,13 @@ impl MutualNoiseHandshake {
     ))
   }
 
-  /// Should pass base64 encoded private key.
   pub fn new_responder(
-    maybe_pkcs8_private_key: &str,
+    private_key: &Pkcs8PrivateKey,
     prologue: &[u8],
-  ) -> anyhow::Result<MutualNoiseHandshake> {
-    let private_key = crate::key::Pkcs8PrivateKey::maybe_raw_bytes(
-      maybe_pkcs8_private_key,
-    )?;
-    Ok(MutualNoiseHandshake(
+  ) -> anyhow::Result<OneWayNoiseHandshake> {
+    Ok(OneWayNoiseHandshake(
       snow::Builder::new(PkiType::MUTUAL.parse()?)
-        .local_private_key(&private_key)
+        .local_private_key(&private_key.as_bytes())
         .context("Invalid private key")?
         .prologue(prologue)
         .context("Invalid prologue")?
@@ -59,8 +58,7 @@ impl MutualNoiseHandshake {
   }
 
   /// Gets the remote public key bytes.
-  /// Note that this should only be called after m2 is read on client side,
-  /// or m3 is read on server side.
+  /// Note that this should only be called after m1 is read on server side.
   pub fn remote_public_key(&self) -> anyhow::Result<&[u8]> {
     self
       .0

@@ -3,9 +3,13 @@ use std::path::Path;
 use anyhow::{Context, anyhow};
 use data_encoding::BASE64;
 use der::{Decode as _, Encode as _, asn1::BitStringRef};
+use snow::{
+  params::NoiseParams,
+  resolvers::{CryptoResolver, DefaultResolver},
+};
 use spki::SubjectPublicKeyInfoRef;
 
-use crate::{PkiType, mutual::MutualNoiseHandshake};
+use crate::PkiType;
 
 #[derive(PartialEq, Clone)]
 pub struct SpkiPublicKey(String);
@@ -129,49 +133,20 @@ impl SpkiPublicKey {
     Ok(Self(BASE64.encode(public_key)))
   }
 
-  pub fn from_private_key(
+  pub fn from_private_key_using_dh(
     pki_type: PkiType,
     maybe_pkcs8_private_key: &str,
   ) -> anyhow::Result<Self> {
-    match pki_type {
-      PkiType::Mutual => {
-        // Create mock client handshake. The private key doesn't matter.
-        // Trying to get the "server" public key.
-        let mut client_handshake =
-          MutualNoiseHandshake::new_initiator("0000", &[])
-            .context("Failed to create client handshake")?;
-        // Create mock server handshake.
-        // Use the target private key with server handshake,
-        // since its public key is the first available in the flow.
-        let mut server_handshake =
-          MutualNoiseHandshake::new_responder(
-            maybe_pkcs8_private_key,
-            &[],
-          )
-          .context("Failed to create server handshake")?;
-        // write message 1
-        let message_1 = client_handshake
-          .next_message()
-          .context("CLIENT: failed to write message 1")?;
-        // read message 1
-        server_handshake
-          .read_message(&message_1)
-          .context("SERVER: failed to read message 1")?;
-        // write message 2
-        let message_2 = server_handshake
-          .next_message()
-          .context("SERVER: failed to write message 2")?;
-        // read message 2
-        client_handshake
-          .read_message(&message_2)
-          .context("CLIENT: failed to read message 2")?;
-        // client now has server public key
-        let raw_public_key = client_handshake
-          .remote_public_key()
-          .map(Vec::from)
-          .context("Failed to get public key")?;
-        Self::from_raw_bytes(&raw_public_key)
-      }
-    }
+    let params: NoiseParams = pki_type.noise_params().parse()?;
+    let resolver = DefaultResolver::default();
+    let mut dh = resolver.resolve_dh(&params.dh).context(
+      "No DH implementation available with these noise params",
+    )?;
+    let private_key = crate::key::Pkcs8PrivateKey::maybe_raw_bytes(
+      maybe_pkcs8_private_key,
+    )?;
+    dh.set(&private_key);
+    let raw_public_key = dh.pubkey().to_vec();
+    Self::from_raw_bytes(&raw_public_key)
   }
 }

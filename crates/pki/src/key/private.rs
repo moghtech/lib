@@ -198,10 +198,12 @@ impl Pkcs8PrivateKey {
     Ok(octet.as_bytes().to_vec())
   }
 
-  pub fn compute_public_key(
+  pub fn compute_public_key_using_dh(
     &self,
     pki_type: PkiType,
   ) -> anyhow::Result<super::public::SpkiPublicKey> {
-    super::public::SpkiPublicKey::from_private_key(pki_type, &self.0)
+    super::public::SpkiPublicKey::from_private_key_using_dh(
+      pki_type, &self.0,
+    )
   }
 }
