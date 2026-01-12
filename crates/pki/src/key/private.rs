@@ -141,7 +141,7 @@ impl Pkcs8PrivateKey {
     Ok(Self(BASE64.encode(private_key)))
   }
 
-  pub fn as_raw_bytes(&self) -> anyhow::Result<Vec<u8>> {
+  pub fn as_raw_bytes(&self) -> anyhow::Result<[u8; 32]> {
     Self::raw_bytes(self.0.as_bytes())
   }
 
@@ -149,7 +149,7 @@ impl Pkcs8PrivateKey {
   /// to raw private key
   pub fn raw_bytes(
     pkcs8_private_key: &[u8],
-  ) -> anyhow::Result<Vec<u8>> {
+  ) -> anyhow::Result<[u8; 32]> {
     let decoded = BASE64
       .decode(pkcs8_private_key)
       .context("Private key is not valid base64 encoding")?;
@@ -161,7 +161,7 @@ impl Pkcs8PrivateKey {
   /// - For pkcs8 base64 pem: unwraps and returns
   pub fn maybe_raw_bytes(
     maybe_pkcs8_private_key: &str,
-  ) -> anyhow::Result<Vec<u8>> {
+  ) -> anyhow::Result<[u8; 32]> {
     // check pem rfc7468 (openssl)
     if maybe_pkcs8_private_key.starts_with("-----BEGIN") {
       let (_label, private_key_der) =
@@ -175,7 +175,9 @@ impl Pkcs8PrivateKey {
       // base64 der
       Self::raw_bytes(maybe_pkcs8_private_key.as_bytes())
     } else if len <= 32 {
-      Ok(maybe_pkcs8_private_key.as_bytes().to_vec())
+      let mut res = [0u8; 32];
+      res.copy_from_slice(maybe_pkcs8_private_key.as_bytes());
+      Ok(res)
     } else {
       Err(anyhow!(
         "Private key must be 32 characters or less, or pkcs8 encoded."
@@ -185,7 +187,7 @@ impl Pkcs8PrivateKey {
 
   fn raw_bytes_after_decode(
     decoded: &[u8],
-  ) -> anyhow::Result<Vec<u8>> {
+  ) -> anyhow::Result<[u8; 32]> {
     let pki = pkcs8::PrivateKeyInfo::from_der(decoded)
       .map_err(anyhow::Error::msg)
       .context("Failed to parse pki from der")?;
@@ -195,7 +197,10 @@ impl Pkcs8PrivateKey {
     let octet = OctetStringRef::from_der(pki.private_key)
       .map_err(anyhow::Error::msg)
       .context("Failed to get octet string ref from private key")?;
-    Ok(octet.as_bytes().to_vec())
+
+    let mut res = [0u8; 32];
+    res.copy_from_slice(octet.as_bytes());
+    Ok(res)
   }
 
   pub fn compute_public_key_using_dh(

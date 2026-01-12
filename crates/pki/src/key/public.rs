@@ -73,6 +73,18 @@ impl SpkiPublicKey {
       })
   }
 
+  /// Supports file or hardcoded spec.
+  ///
+  /// - Direct pass: `public_key = "MCow..."`
+  /// - File path: `public_key = "file:/path/to/key.pub"`
+  pub fn from_spec(spec: &str) -> anyhow::Result<Self> {
+    if let Some(path) = spec.strip_prefix("file:") {
+      SpkiPublicKey::from_file(path)
+    } else {
+      SpkiPublicKey::from_maybe_pem(spec)
+    }
+  }
+
   pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
     let path = path.as_ref();
     let contents =
@@ -86,20 +98,8 @@ impl SpkiPublicKey {
   pub fn from_maybe_pem(
     public_key_maybe_pem: &str,
   ) -> anyhow::Result<Self> {
-    // check pem rfc7468 (openssl)
     let public_key_der =
-      if public_key_maybe_pem.starts_with("-----BEGIN") {
-        let (_label, public_key_der) =
-          pem_rfc7468::decode_vec(public_key_maybe_pem.as_bytes())
-            .map_err(anyhow::Error::msg)
-            .context("Failed to get der from pem")
-            .unwrap();
-        public_key_der
-      } else {
-        BASE64
-          .decode(public_key_maybe_pem.as_bytes())
-          .context("Public key is not base64")?
-      };
+      Self::maybe_pem_to_der(public_key_maybe_pem)?;
     Self::from_der(&public_key_der)
   }
 
@@ -133,13 +133,69 @@ impl SpkiPublicKey {
     Ok(Self(BASE64.encode(public_key)))
   }
 
+  pub fn maybe_pem_to_raw_bytes(
+    public_key_maybe_pem: &str,
+  ) -> anyhow::Result<[u8; 32]> {
+    let der = Self::maybe_pem_to_der(public_key_maybe_pem)?;
+    Self::der_to_raw_bytes(&der)
+  }
+
+  pub fn maybe_pem_to_der(
+    public_key_maybe_pem: &str,
+  ) -> anyhow::Result<Vec<u8>> {
+    if public_key_maybe_pem.starts_with("-----BEGIN") {
+      let (_label, public_key_der) =
+        pem_rfc7468::decode_vec(public_key_maybe_pem.as_bytes())
+          .map_err(anyhow::Error::msg)
+          .context("Failed to get der from pem")?;
+      Ok(public_key_der)
+    } else {
+      BASE64
+        .decode(public_key_maybe_pem.as_bytes())
+        .context("Public key is not base64")
+    }
+  }
+
+  pub fn der_to_raw_bytes(
+    spki_der: &[u8],
+  ) -> anyhow::Result<[u8; 32]> {
+    let Ok(spki) = spki::SubjectPublicKeyInfo::<
+      der::AnyRef<'_>,
+      BitStringRef<'_>,
+    >::try_from(spki_der) else {
+      return Err(anyhow!("Public key is not der"));
+    };
+
+    if spki.algorithm.oid != super::OID_X25519 {
+      return Err(anyhow!("Public key is not X25519"));
+    }
+
+    let bs = spki.subject_public_key;
+
+    // Check byte aligned
+    if bs.unused_bits() != 0 {
+      return Err(anyhow!("Public key spki der is not byte-aligned"));
+    }
+
+    let raw = bs.as_bytes().context("Bitstring has no bytes")?;
+    if raw.len() != 32 {
+      return Err(anyhow!(
+        "Raw public key length should be 32, got {}",
+        raw.len()
+      ));
+    }
+
+    let mut res = [0u8; 32];
+    res.copy_from_slice(raw);
+    Ok(res)
+  }
+
   pub fn from_private_key_using_dh(
     pki_type: PkiType,
     maybe_pkcs8_private_key: &str,
   ) -> anyhow::Result<Self> {
     let params: NoiseParams = pki_type.noise_params().parse()?;
-    let resolver = DefaultResolver::default();
-    let mut dh = resolver.resolve_dh(&params.dh).context(
+    let mut dh = DefaultResolver.resolve_dh(&params.dh).context(
       "No DH implementation available with these noise params",
     )?;
     let private_key = crate::key::Pkcs8PrivateKey::maybe_raw_bytes(
