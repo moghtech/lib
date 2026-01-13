@@ -247,7 +247,7 @@ async fn link_google_callback<I: AuthImpl>(
   {
     if existing_user.id() == user_id {
       // Link is already complete, this is a no-op
-      return Ok(Redirect::to(&format!("{}/settings", auth.host())));
+      return Ok(Redirect::to(auth.post_link_redirect()));
     } else {
       return Err(
         anyhow!("Account already linked to another user.").into(),
@@ -257,5 +257,5 @@ async fn link_google_callback<I: AuthImpl>(
 
   auth.link_google_login(user_id, google_id).await?;
 
-  Ok(Redirect::to(&format!("{}/settings", auth.host())))
+  Ok(Redirect::to(auth.post_link_redirect()))
 }

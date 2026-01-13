@@ -153,6 +153,9 @@ pub trait AuthImpl: Send + Sync + 'static {
     &DISABLED_RATE_LIMITER
   }
 
+  /// Where to default redirect after linking an external login method.
+  fn post_link_redirect(&self) -> &str;
+
   // ==============
   // = LOCAL AUTH =
   // ==============

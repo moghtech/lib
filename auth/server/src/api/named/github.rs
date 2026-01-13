@@ -243,7 +243,7 @@ async fn link_github_callback<I: AuthImpl>(
   {
     if existing_user.id() == user_id {
       // Link is already complete, this is a no-op
-      return Ok(Redirect::to(&format!("{}/settings", auth.host())));
+      return Ok(Redirect::to(auth.post_link_redirect()));
     } else {
       return Err(
         anyhow!("Account already linked to another user.").into(),
@@ -253,5 +253,5 @@ async fn link_github_callback<I: AuthImpl>(
 
   auth.link_github_login(user_id, github_id).await?;
 
-  Ok(Redirect::to(&format!("{}/settings", auth.host())))
+  Ok(Redirect::to(auth.post_link_redirect()))
 }

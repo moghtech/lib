@@ -71,10 +71,19 @@ fn format_redirect(
   let redirect_url = if let Some(redirect) = redirect
     && !redirect.is_empty()
   {
-    let splitter = if redirect.contains('?') { '&' } else { '?' };
+    let splitter = if extra.is_empty() {
+      ""
+    } else if redirect.contains('?') {
+      "&"
+    } else {
+      "?"
+    };
     format!("{redirect}{splitter}{extra}")
   } else {
-    format!("{host}?{extra}")
+    format!(
+      "{host}{}{extra}",
+      if extra.is_empty() { "" } else { "?" }
+    )
   };
   Redirect::to(&redirect_url)
 }

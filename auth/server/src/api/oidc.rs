@@ -86,6 +86,9 @@ pub async fn oidc_login<I: AuthImpl>(
   get,
   path = "/oidc/link",
   description = "Link existing account to OIDC user",
+  params(
+    ("redirect", description = "Optional path to redirect back to after login.")
+  ),
   responses(
     (status = 303, description = "Redirect to OIDC provider for link"),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
@@ -342,7 +345,7 @@ async fn link_oidc_callback<I: AuthImpl>(
   {
     if existing_user.id() == user_id {
       // Link is already complete, this is a no-op
-      return Ok(Redirect::to(&format!("{}/settings", auth.host())));
+      return Ok(Redirect::to(auth.post_link_redirect()));
     } else {
       return Err(
         anyhow!("Account already linked to another user.").into(),
@@ -352,5 +355,5 @@ async fn link_oidc_callback<I: AuthImpl>(
 
   auth.link_oidc_login(user_id, subject).await?;
 
-  Ok(Redirect::to(&format!("{}/settings", auth.host())))
+  Ok(Redirect::to(auth.post_link_redirect()))
 }
