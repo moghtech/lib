@@ -228,3 +228,22 @@ pub struct UnlinkLogin {
 
 #[typeshare]
 pub type UnlinkLoginResponse = NoData;
+
+//
+
+/// Update whether user skips 2fa. Response: [NoData].
+#[typeshare]
+#[derive(
+  Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
+)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[empty_traits(MoghAuthManageRequest)]
+#[response(UpdateExternalSkip2faResponse)]
+#[error(mogh_error::Error)]
+pub struct UpdateExternalSkip2fa {
+  /// Whether user skips 2fa when using external login method.
+  pub external_skip_2fa: bool,
+}
+
+#[typeshare]
+pub type UpdateExternalSkip2faResponse = NoData;

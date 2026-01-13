@@ -4,7 +4,7 @@ use utoipa::OpenApi;
 mod auth {
   pub use crate::api::{
     login::{local::*, passkey::*, totp::*, *},
-    manage::{external::*, local::*, passkey::*, totp::*},
+    manage::{external::*, local::*, passkey::*, totp::*, *},
     named::{github::*, google::*},
     oidc::*,
   };
@@ -37,6 +37,8 @@ mod auth {
     auth::begin_totp_enrollment,
     auth::confirm_totp_enrollment,
     auth::unenroll_totp,
+    // Skip 2FA
+    auth::update_external_skip_2fa,
     // =============
     // = PROVIDERS =
     // =============

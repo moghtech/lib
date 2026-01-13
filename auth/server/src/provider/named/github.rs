@@ -62,7 +62,7 @@ impl GithubProvider {
       http: reqwest::Client::new(),
       client_id: client_id.clone(),
       client_secret: client_secret.clone(),
-      redirect_uri: format!("{host}/auth/github/callback"),
+      redirect_uri: format!("{host}/github/callback"),
       user_agent: Default::default(),
       scopes: Default::default(),
     }
@@ -75,7 +75,7 @@ impl GithubProvider {
   ) -> (String, String) {
     let state_prefix = random_string(STATE_PREFIX_LENGTH);
     let state = match redirect {
-      Some(redirect) => format!("{state_prefix}{redirect}"),
+      Some(redirect) => state_prefix + &redirect,
       None => state_prefix,
     };
     let redirect_url = format!(

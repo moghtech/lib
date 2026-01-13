@@ -157,7 +157,7 @@ impl OidcProvider {
     )
     // Set the URL the user will be redirected to after the authorization process.
     .set_redirect_uri(RedirectUrl::new(format!(
-      "{host}/auth/oidc/callback",
+      "{host}/oidc/callback",
     ))?);
 
     Ok(OidcProvider {

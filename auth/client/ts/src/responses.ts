@@ -24,4 +24,6 @@ export type ManageResponses = {
   BeginTotpEnrollment: Types.BeginTotpEnrollmentResponse;
   ConfirmTotpEnrollment: Types.ConfirmTotpEnrollmentResponse;
   UnenrollTotp: Types.UnenrollTotpResponse;
+  // Skip
+  UpdateExternalSkip2fa: Types.UpdateExternalSkip2faResponse;
 };

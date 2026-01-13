@@ -84,7 +84,9 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// Provide a static app name for passkeys.
   fn app_name(&self) -> &'static str;
 
-  /// Provide the app 'host' config
+  /// Provide the app 'host' config.
+  /// This should include the path to where the auth server is nested,
+  /// Ie if it is nested on /auth, this points to https://example.com/auth
   fn host(&self) -> &str;
 
   /// Disable new user registration.
@@ -347,6 +349,15 @@ pub trait AuthImpl: Send + Sync + 'static {
     )
     .context("Failed to construct TOTP")
   }
+
+  // ============
+  // = SKIP 2FA =
+  // ============
+  fn update_user_external_skip_2fa(
+    &self,
+    user_id: String,
+    external_skip_2fa: bool,
+  ) -> DynFuture<mogh_error::Result<()>>;
 }
 
 /// Extract an implementer of AuthImpl from the request body.

@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use axum::{Router, extract::Path, routing::post};
 use derive_variants::{EnumVariants, ExtractVariant as _};
-use mogh_auth_client::api::manage::*;
+use mogh_auth_client::api::{NoData, manage::*};
 use mogh_error::Json;
 use resolver_api::Resolve;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,8 @@ pub enum ManageRequest {
   BeginTotpEnrollment(BeginTotpEnrollment),
   ConfirmTotpEnrollment(ConfirmTotpEnrollment),
   UnenrollTotp(UnenrollTotp),
+  // SKIP 2FA
+  UpdateExternalSkip2fa(UpdateExternalSkip2fa),
 }
 
 pub fn router<I: AuthImpl>() -> Router {
@@ -99,4 +101,33 @@ async fn handler<I: AuthImpl>(
   let elapsed = timer.elapsed();
   debug!("/auth/login request {req_id} | resolve time: {elapsed:?}");
   res.map(|res| res.0)
+}
+
+#[utoipa::path(
+  post,
+  path = "/manage/UpdateExternalSkip2fa",
+  description = "Update whether the calling user skips 2fa when using external login method.",
+  request_body(content = UpdateExternalSkip2fa),
+  responses(
+    (status = 200, description = "External skip 2fa mode updated", body = NoData),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn update_external_skip_2fa() {}
+
+impl Resolve<ManageArgs> for UpdateExternalSkip2fa {
+  async fn resolve(
+    self,
+    ManageArgs { auth, user }: &ManageArgs,
+  ) -> Result<Self::Response, Self::Error> {
+    auth.check_username_locked(user.username())?;
+    auth
+      .update_user_external_skip_2fa(
+        user.id().to_string(),
+        self.external_skip_2fa,
+      )
+      .await?;
+    Ok(NoData {})
+  }
 }

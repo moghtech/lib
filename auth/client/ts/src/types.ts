@@ -31,6 +31,8 @@ export type ConfirmPasskeyEnrollmentResponse = NoData;
 /** Response for [ExchangeForJwt]. */
 export type ExchangeForJwtResponse = JwtResponse;
 
+export type JsonValue = any;
+
 /** JSON containing either an authentication token or the required 2fa auth check. */
 export type JwtOrTwoFactor = 
 	| { type: "Jwt", data: JwtResponse }
@@ -52,6 +54,8 @@ export type RequestChallengeResponse = any;
 /** Response for [SignUpLocalUser]. */
 export type SignUpLocalUserResponse = JwtResponse;
 
+export type U64 = number;
+
 /** Response for [UnenrollPasskey]. */
 export type UnenrollPasskeyResponse = NoData;
 
@@ -59,6 +63,8 @@ export type UnenrollPasskeyResponse = NoData;
 export type UnenrollTotpResponse = NoData;
 
 export type UnlinkLoginResponse = NoData;
+
+export type UpdateExternalSkip2faResponse = NoData;
 
 export type UpdatePasswordResponse = NoData;
 
@@ -225,6 +231,12 @@ export interface UnlinkLogin {
 	provider: LoginProvider;
 }
 
+/** Update whether user skips 2fa. Response: [NoData]. */
+export interface UpdateExternalSkip2fa {
+	/** Whether user skips 2fa when using external login method. */
+	external_skip_2fa: boolean;
+}
+
 /**
  * Update the calling user's password.
  * Response: [NoData].
@@ -266,7 +278,8 @@ export type ManageRequest =
 	| { type: "UnenrollPasskey", params: UnenrollPasskey }
 	| { type: "BeginTotpEnrollment", params: BeginTotpEnrollment }
 	| { type: "ConfirmTotpEnrollment", params: ConfirmTotpEnrollment }
-	| { type: "UnenrollTotp", params: UnenrollTotp };
+	| { type: "UnenrollTotp", params: UnenrollTotp }
+	| { type: "UpdateExternalSkip2fa", params: UpdateExternalSkip2fa };
 
 /** JSON containing either an authentication token or the required 2fa auth check. */
 export type UserIdOrTwoFactor = 

@@ -71,7 +71,7 @@ impl GoogleProvider {
       http: Default::default(),
       client_id: client_id.clone(),
       client_secret: client_secret.clone(),
-      redirect_uri: format!("{host}/auth/google/callback"),
+      redirect_uri: format!("{host}/google/callback"),
       user_agent: String::from("komodo"),
       scopes,
     }
@@ -84,7 +84,7 @@ impl GoogleProvider {
   ) -> (String, String) {
     let state_prefix = random_string(STATE_PREFIX_LENGTH);
     let state = match redirect {
-      Some(redirect) => format!("{state_prefix}{redirect}"),
+      Some(redirect) => state_prefix + &redirect,
       None => state_prefix,
     };
     let redirect_url = format!(
