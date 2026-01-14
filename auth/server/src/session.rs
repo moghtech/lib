@@ -91,7 +91,7 @@ impl Session {
       .remove(Self::GITHUB_LOGIN)
       .await
       .context("Internal session type error")?
-      .context("OIDC login has not been initiated for this session")
+      .context("Github login has not been initiated for this session")
       .status_code(StatusCode::UNAUTHORIZED)
   }
 
@@ -119,7 +119,7 @@ impl Session {
       .remove(Self::GOOGLE_LOGIN)
       .await
       .context("Internal session type error")?
-      .context("OIDC login has not been initiated for this session")
+      .context("Google login has not been initiated for this session")
       .status_code(StatusCode::UNAUTHORIZED)
   }
 

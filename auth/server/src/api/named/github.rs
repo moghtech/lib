@@ -85,7 +85,7 @@ pub async fn github_link<I: AuthImpl>(
 
   let session = &auth.client().session;
 
-  let user_id = session.retrieve_github_login().await?;
+  let user_id = session.retrieve_external_link_user_id().await?;
 
   let user = auth.get_user(user_id.clone()).await?;
   auth.check_username_locked(user.username())?;
