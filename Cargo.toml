@@ -63,14 +63,17 @@ bson = "3.1.0"
 toml = "0.9.8"
 url = "2.5.8"
 
+# CRYPTO
+chacha20poly1305 = "0.10.1"
+data-encoding = "2.10.0"
+rand = "0.9.2"
+
 # AUTH
 webauthn-rs = { version = "0.5.4", features = ["danger-allow-state-serialisation"] }
 openidconnect = { version = "4.0.1", features = ["accept-rfc3339-timestamps"] }
 jsonwebtoken = { version = "10.2.0", features = ["aws_lc_rs"] }
 totp-rs = { version = "5.7.0", features = ["qr", "serde_support"] }
-data-encoding = "2.10.0"
 bcrypt = "0.18.0"
-rand = "0.9.2"
 
 # PKI
 pem-rfc7468 = { version = "1.0.0", features = ["alloc"] }
