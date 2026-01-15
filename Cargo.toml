@@ -14,6 +14,7 @@ publish = ["mogh"]
 mogh_auth_client = { path = "auth/client/rs" }
 mogh_cache = { path = "crates/cache" }
 mogh_config = { path = "crates/config" }
+mogh_encryption = { path = "crates/encryption" }
 mogh_error = { path = "crates/error" }
 mogh_logger = { path = "crates/logger" }
 mogh_pki = { path = "crates/pki" }
@@ -28,6 +29,7 @@ mogh_validations = { path = "crates/validations" }
 mogh_auth_client = { version = "0.1.0", registry = "mogh" }
 mogh_cache = { version = "0.1.0", registry = "mogh" }
 mogh_config = { version = "0.1.0", registry = "mogh" }
+mogh_encryption = { version = "0.1.0", registry = "mogh" }
 mogh_error = { version = "0.5.5", registry = "mogh" }
 mogh_logger = { version = "0.1.0", registry = "mogh" }
 mogh_pki = { version = "0.1.0", registry = "mogh" }
