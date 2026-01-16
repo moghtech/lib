@@ -1,10 +1,10 @@
-use rand::{Rng as _, rngs::ThreadRng};
-
 pub mod xchacha20poly1305;
+
+pub use data_encoding::BASE64URL;
 
 pub struct EncryptedData {
   /// ## data
-  /// - encrypted using given cipher plus the below nonce
+  /// - encrypted using given key plus the below nonce
   /// - base64url encoded
   pub data: String,
   /// ## nonce
@@ -13,21 +13,11 @@ pub struct EncryptedData {
   pub nonce: String,
 }
 
-//
-
-pub trait NonceProvider<const LENGTH: usize> {
-  fn generate(&mut self) -> [u8; LENGTH];
-}
-
-#[derive(Default)]
-pub struct RandNonceProvider<const LENGTH: usize>(pub ThreadRng);
-
-impl<const LENGTH: usize> NonceProvider<LENGTH>
-  for RandNonceProvider<LENGTH>
-{
-  fn generate(&mut self) -> [u8; LENGTH] {
-    self.0.random()
-  }
+pub struct EnvelopeEncryptedData {
+  /// Encrypted using master key
+  pub key: EncryptedData,
+  /// Encrypted using above key, decrypted.
+  pub data: EncryptedData,
 }
 
 //
