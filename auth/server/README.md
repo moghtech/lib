@@ -538,5 +538,5 @@ impl mogh_server::session::SessionConfig for MemorySessionConfig {
 
 axum::Router::new()
   .nest("/auth", mogh_auth_server::api::router::<AppAuthImpl>())
-  .layer(mogh_server::session::memory_session_layer(config))
+  .layer(mogh_server::session::memory_session_layer(MemorySessionConfig))
 ```
