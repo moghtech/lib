@@ -5,7 +5,6 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [dependencies]
 # LOCAL
@@ -14,8 +13,7 @@ mogh_error = { workspace = true, features = ["utoipa"] }
 mogh_validations.workspace = true
 mogh_request_ip.workspace = true
 mogh_rate_limit.workspace = true
-derive_variants.workspace = true
-resolver_api.workspace = true
+mogh_resolver.workspace = true
 # EXTERNAL
 tower-sessions.workspace = true
 data-encoding.workspace = true
@@ -33,6 +31,7 @@ anyhow.workspace = true
 bcrypt.workspace = true
 utoipa.workspace = true
 serde.workspace = true
+strum.workspace = true
 rand.workspace = true
 axum.workspace = true
 uuid.workspace = true

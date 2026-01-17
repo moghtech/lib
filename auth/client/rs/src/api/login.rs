@@ -4,8 +4,7 @@
 //! used in order to gain a temporary access token (JWT)
 //! to use with other authenticated API methods.
 
-use derive_empty_traits::EmptyTraits;
-use resolver_api::{HasResponse, Resolve};
+use mogh_resolver::{HasResponse, Resolve};
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 use typeshare::typeshare;
@@ -78,9 +77,7 @@ pub trait MoghAuthLoginRequest: HasResponse {}
 /// users have to login, eg. local and external providers.
 /// Response: [GetLoginOptionsResponse].
 #[typeshare]
-#[derive(
-  Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
-)]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthLoginRequest)]
 #[response(GetLoginOptionsResponse)]
@@ -109,9 +106,7 @@ pub struct GetLoginOptionsResponse {
 /// Sign up a new local user account.
 /// Response: [SignUpLocalUserResponse].
 #[typeshare]
-#[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthLoginRequest)]
 #[response(SignUpLocalUserResponse)]
@@ -133,9 +128,7 @@ pub type SignUpLocalUserResponse = JwtResponse;
 /// Login as a local user. Will fail if the users credentials don't match
 /// any local user.
 #[typeshare]
-#[derive(
-  Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
-)]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthLoginRequest)]
 #[response(LoginLocalUserResponse)]
@@ -156,9 +149,7 @@ pub type LoginLocalUserResponse = JwtOrTwoFactor;
 /// Retrieve a JWT after completing third party login flows.
 /// Response: [ExchangeForJwtResponse].
 #[typeshare]
-#[derive(
-  Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
-)]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthLoginRequest)]
 #[response(ExchangeForJwtResponse)]
@@ -174,9 +165,7 @@ pub type ExchangeForJwtResponse = JwtResponse;
 /// Confirm a single use 2fa pending token + time-dependent user totp code for a jwt.
 /// Response: [CompletePasskeyLoginResponse].
 #[typeshare]
-#[derive(
-  Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
-)]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthLoginRequest)]
 #[response(CompletePasskeyLoginResponse)]
@@ -194,9 +183,7 @@ pub type CompletePasskeyLoginResponse = JwtResponse;
 /// Confirm a single use 2fa pending token + time-dependent user totp code for a jwt.
 /// Response: [CompleteTotpLoginResponse].
 #[typeshare]
-#[derive(
-  Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
-)]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthLoginRequest)]
 #[response(CompleteTotpLoginResponse)]

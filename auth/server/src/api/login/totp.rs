@@ -4,7 +4,7 @@ use data_encoding::BASE32_NOPAD;
 use mogh_auth_client::api::login::{CompleteTotpLogin, JwtResponse};
 use mogh_error::AddStatusCodeError as _;
 use mogh_rate_limit::WithFailureRateLimit;
-use resolver_api::Resolve;
+use mogh_resolver::Resolve;
 
 use crate::BoxAuthImpl;
 

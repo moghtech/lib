@@ -1,16 +1,31 @@
 [workspace]
 resolver = "2"
-members = ["auth/client/rs", "auth/server", "crates/*"]
+members = ["auth/client/rs", "auth/server", "crates/*", "crates/resolver/derive"]
 
 [workspace.package]
 edition = "2024"
 authors = ["moghtech <contact@mogh.tech>"]
-license = "MIT"
+license = "MPL-2.0"
 repository = "https://github.com/moghtech/lib"
-# homepage = "https://mogh.tech/lib"
-publish = ["mogh"]
 
-[patch.mogh]
+# [patch.mogh]
+# mogh_auth_client = { path = "auth/client/rs" }
+# mogh_cache = { path = "crates/cache" }
+# mogh_config = { path = "crates/config" }
+# mogh_encryption = { path = "crates/encryption" }
+# mogh_error = { path = "crates/error" }
+# mogh_logger = { path = "crates/logger" }
+# mogh_pki = { path = "crates/pki" }
+# mogh_rate_limit = { path = "crates/rate_limit" }
+# mogh_request_ip = { path = "crates/request_ip" }
+# mogh_resolver = { path = "crates/resolver" }
+# mogh_resolver_derive = { path = "crates/resolver/derive" }
+# mogh_secret_file = { path = "crates/secret_file" }
+# mogh_server = { path = "crates/server" }
+# mogh_validations = { path = "crates/validations" }
+
+[workspace.dependencies]
+# MOGH
 mogh_auth_client = { path = "auth/client/rs" }
 mogh_cache = { path = "crates/cache" }
 mogh_config = { path = "crates/config" }
@@ -20,27 +35,25 @@ mogh_logger = { path = "crates/logger" }
 mogh_pki = { path = "crates/pki" }
 mogh_rate_limit = { path = "crates/rate_limit" }
 mogh_request_ip = { path = "crates/request_ip" }
+mogh_resolver = { path = "crates/resolver" }
+mogh_resolver_derive = { path = "crates/resolver/derive" }
 mogh_secret_file = { path = "crates/secret_file" }
 mogh_server = { path = "crates/server" }
 mogh_validations = { path = "crates/validations" }
-
-[workspace.dependencies]
-# MOGH
-mogh_auth_client = { version = "0.1.0", registry = "mogh" }
-mogh_cache = { version = "0.1.0", registry = "mogh" }
-mogh_config = { version = "0.1.0", registry = "mogh" }
-mogh_encryption = { version = "0.1.0", registry = "mogh" }
-mogh_error = { version = "0.5.5", registry = "mogh" }
-mogh_logger = { version = "0.1.0", registry = "mogh" }
-mogh_pki = { version = "0.1.0", registry = "mogh" }
-mogh_rate_limit = { version = "0.1.0", registry = "mogh" }
-mogh_request_ip = { version = "0.1.0", registry = "mogh" }
-mogh_secret_file = { version = "0.2.0", registry = "mogh" }
-mogh_server = { version = "0.1.0", registry = "mogh" }
-mogh_validations = { version = "0.1.0", registry = "mogh" }
-derive_empty_traits = "0.1.0"
-derive_variants = "1.0.0"
-resolver_api = "3.0.0"
+# mogh_auth_client = { version = "0.1.0" }
+# mogh_cache = { version = "0.1.0" }
+# mogh_config = { version = "0.1.0" }
+# mogh_encryption = { version = "0.1.0" }
+# mogh_error = { version = "0.5.5" }
+# mogh_logger = { version = "0.1.0" }
+# mogh_pki = { version = "0.1.0" }
+# mogh_rate_limit = { version = "0.1.0" }
+# mogh_request_ip = { version = "0.1.0" }
+# mogh_resolver = { version = "0.1.0" }
+# mogh_resolver_derive = { version = "0.1.0" }
+# mogh_secret_file = { version = "0.2.0" }
+# mogh_server = { version = "0.1.0" }
+# mogh_validations = { version = "0.1.0" }
 
 # ASYNC
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "query", "form", "rustls"] }
@@ -96,6 +109,11 @@ opentelemetry-semantic-conventions = "0.31.0"
 tracing-opentelemetry = "0.32.0"
 opentelemetry = "0.31.0"
 tracing = "0.1.44"
+
+# MACRO
+quote = "1.0.43"
+proc-macro2 = "1.0.105"
+syn = "2.0.114"
 
 # MISC
 uuid = { version = "1.19.0", features = ["v4"] }

@@ -1,12 +1,12 @@
 use std::{sync::Arc, time::Instant};
 
 use axum::{Router, extract::Path, routing::post};
-use derive_variants::{EnumVariants, ExtractVariant as _};
 use mogh_auth_client::api::{NoData, manage::*};
 use mogh_error::Json;
-use resolver_api::Resolve;
+use mogh_resolver::Resolve;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use strum::{Display, EnumDiscriminants};
 use tracing::debug;
 use typeshare::typeshare;
 use uuid::Uuid;
@@ -32,12 +32,12 @@ pub struct ManageArgs {
 
 #[typeshare]
 #[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EnumVariants,
+  Debug, Clone, Serialize, Deserialize, Resolve, EnumDiscriminants,
 )]
 #[args(ManageArgs)]
 #[response(mogh_error::Response)]
 #[error(mogh_error::Error)]
-#[variant_derive(Debug)]
+#[strum_discriminants(name(ManageRequestMethod), derive(Display))]
 #[serde(tag = "type", content = "params")]
 #[allow(clippy::enum_variant_names, clippy::large_enum_variant)]
 pub enum ManageRequest {
@@ -86,10 +86,8 @@ async fn handler<I: AuthImpl>(
 ) -> mogh_error::Result<axum::response::Response> {
   let timer = Instant::now();
   let req_id = Uuid::new_v4();
-  debug!(
-    "/auth/manage request {req_id} | METHOD: {:?}",
-    request.extract_variant()
-  );
+  let method: ManageRequestMethod = (&request).into();
+  debug!("/auth/manage request {req_id} | METHOD: {method}");
   let args = ManageArgs {
     auth: Box::new(auth),
     user,

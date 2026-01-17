@@ -2,7 +2,7 @@ use mogh_auth_client::api::manage::{
   BeginExternalLoginLink, BeginExternalLoginLinkResponse,
   UnlinkLogin, UnlinkLoginResponse,
 };
-use resolver_api::Resolve;
+use mogh_resolver::Resolve;
 
 use crate::api::manage::ManageArgs;
 

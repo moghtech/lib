@@ -1,11 +1,11 @@
 [package]
 name = "mogh_config"
-version = "0.1.0"
+description = "Utilities to merge config from multiple files / directories."
+version = "1.0.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [dependencies]
 serde_yaml_ng.workspace = true

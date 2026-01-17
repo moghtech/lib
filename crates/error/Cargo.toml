@@ -1,11 +1,11 @@
 [package]
 name = "mogh_error"
-version = "0.5.5"
+description = "De/serialize errors into json format with customizable http status code."
+version = "1.0.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [features]
 default = []

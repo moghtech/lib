@@ -1,0 +1,11 @@
+[package]
+name = "mogh_resolver"
+description = "Traits to link Request / Response types, forming 'resolver' relationships"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mogh_resolver_derive.workspace = true

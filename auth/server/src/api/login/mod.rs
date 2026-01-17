@@ -1,13 +1,13 @@
 use std::time::Instant;
 
 use axum::{Router, extract::Path, routing::post};
-use derive_variants::{EnumVariants, ExtractVariant as _};
 use mogh_auth_client::api::login::*;
 use mogh_error::Json;
 use mogh_rate_limit::WithFailureRateLimit;
-use resolver_api::Resolve;
+use mogh_resolver::Resolve;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use strum::{Display, EnumDiscriminants};
 use tracing::debug;
 use typeshare::typeshare;
 use uuid::Uuid;
@@ -20,12 +20,12 @@ pub mod totp;
 
 #[typeshare]
 #[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EnumVariants,
+  Debug, Clone, Serialize, Deserialize, Resolve, EnumDiscriminants,
 )]
 #[args(BoxAuthImpl)]
 #[response(mogh_error::Response)]
 #[error(mogh_error::Error)]
-#[variant_derive(Debug)]
+#[strum_discriminants(name(LoginRequestMethod), derive(Display))]
 #[serde(tag = "type", content = "params")]
 #[allow(clippy::enum_variant_names, clippy::large_enum_variant)]
 pub enum LoginRequest {
@@ -61,10 +61,8 @@ async fn handler<I: AuthImpl>(
 ) -> mogh_error::Result<axum::response::Response> {
   let timer = Instant::now();
   let req_id = Uuid::new_v4();
-  debug!(
-    "/auth/login request {req_id} | METHOD: {:?}",
-    request.extract_variant()
-  );
+  let method: LoginRequestMethod = (&request).into();
+  debug!("/auth/login request {req_id} | METHOD: {method}",);
   let args: BoxAuthImpl = Box::new(auth);
   let res = request.resolve(&args).await;
   if let Err(e) = &res {

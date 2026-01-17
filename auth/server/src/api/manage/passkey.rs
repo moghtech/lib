@@ -4,7 +4,7 @@ use mogh_auth_client::api::manage::{
   ConfirmPasskeyEnrollment, ConfirmPasskeyEnrollmentResponse,
   UnenrollPasskey, UnenrollPasskeyResponse,
 };
-use resolver_api::Resolve;
+use mogh_resolver::Resolve;
 
 use crate::api::manage::ManageArgs;
 

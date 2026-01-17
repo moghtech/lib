@@ -1,0 +1,15 @@
+[package]
+name = "mogh_resolver_derive"
+description = "Derive macros for mogh_resolver::HasResponse"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+[lib]
+proc-macro = true
+
+[dependencies]
+quote.workspace = true
+proc-macro2.workspace = true
+syn.workspace = true

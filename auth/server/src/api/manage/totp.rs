@@ -7,7 +7,7 @@ use mogh_auth_client::api::manage::{
   UnenrollTotpResponse,
 };
 use mogh_error::AddStatusCodeError as _;
-use resolver_api::Resolve;
+use mogh_resolver::Resolve;
 
 use crate::{
   api::manage::ManageArgs,

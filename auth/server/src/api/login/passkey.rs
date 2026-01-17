@@ -5,7 +5,7 @@ use mogh_auth_client::api::login::{
 };
 use mogh_error::AddStatusCode;
 use mogh_rate_limit::WithFailureRateLimit;
-use resolver_api::Resolve;
+use mogh_resolver::Resolve;
 
 use crate::BoxAuthImpl;
 

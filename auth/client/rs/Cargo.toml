@@ -5,7 +5,6 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [features]
 # default = ["blocking"]
@@ -15,8 +14,7 @@ utoipa = ["dep:utoipa"]
 [dependencies]
 # MOGH
 mogh_error = { workspace = true, features = ["axum"] }
-derive_empty_traits.workspace = true
-resolver_api.workspace = true
+mogh_resolver.workspace = true
 # EXTERNAL
 utoipa = { workspace = true, optional = true }
 webauthn-rs.workspace = true

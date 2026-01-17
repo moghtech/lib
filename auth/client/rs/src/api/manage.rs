@@ -4,8 +4,7 @@
 //! to manage user login options, such as updating
 //! username / password, or configuring 2FA.
 
-use derive_empty_traits::EmptyTraits;
-use resolver_api::{HasResponse, Resolve};
+use mogh_resolver::{HasResponse, Resolve};
 use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
 
@@ -23,9 +22,7 @@ pub trait MoghAuthManageRequest: HasResponse {}
 /// Update the calling user's username.
 /// Response: [NoData].
 #[typeshare]
-#[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthManageRequest)]
 #[response(UpdateUsernameResponse)]
@@ -42,9 +39,7 @@ pub type UpdateUsernameResponse = NoData;
 /// Update the calling user's password.
 /// Response: [NoData].
 #[typeshare]
-#[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthManageRequest)]
 #[response(UpdateUsernameResponse)]
@@ -63,9 +58,7 @@ pub type UpdatePasswordResponse = NoData;
 /// Begins enrollment flow for Passkey 2FA.
 /// Response: [BeginPasskeyEnrollmentResponse]
 #[typeshare]
-#[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthManageRequest)]
 #[response(BeginPasskeyEnrollmentResponse)]
@@ -81,9 +74,7 @@ pub type BeginPasskeyEnrollmentResponse = CreationChallengeResponse;
 /// Confirm enrollment flow for Passkey 2FA.
 /// Response: [NoData]
 #[typeshare]
-#[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthManageRequest)]
 #[response(ConfirmPasskeyEnrollmentResponse)]
@@ -101,9 +92,7 @@ pub type ConfirmPasskeyEnrollmentResponse = NoData;
 /// Unenrolls user in Passkey 2FA.
 /// Response: [NoData]
 #[typeshare]
-#[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthManageRequest)]
 #[response(UnenrollPasskeyResponse)]
@@ -124,9 +113,7 @@ pub type UnenrollPasskeyResponse = NoData;
 /// This generates an otpauth URI for the user. User must confirm
 /// by providing a valid 6 digit code for the URI to [ConfirmTotpEnrollment].
 #[typeshare]
-#[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthManageRequest)]
 #[response(BeginTotpEnrollmentResponse)]
@@ -149,9 +136,7 @@ pub struct BeginTotpEnrollmentResponse {
 /// Confirm enrollment flow for TOTP 2FA auth support
 /// Response: [ConfirmTotpEnrollmentResponse]
 #[typeshare]
-#[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthManageRequest)]
 #[response(ConfirmTotpEnrollmentResponse)]
@@ -173,9 +158,7 @@ pub struct ConfirmTotpEnrollmentResponse {
 /// Unenrolls user in TOTP 2FA.
 /// Response: [UnenrollTotpResponse]
 #[typeshare]
-#[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthManageRequest)]
 #[response(UnenrollTotpResponse)]
@@ -196,9 +179,7 @@ pub type UnenrollTotpResponse = NoData;
 /// 'provider' can be:
 /// - oidc
 #[typeshare]
-#[derive(
-  Debug, Clone, Serialize, Deserialize, Resolve, EmptyTraits,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthManageRequest)]
 #[response(BeginExternalLoginLinkResponse)]
@@ -212,9 +193,7 @@ pub type BeginExternalLoginLinkResponse = NoData;
 
 /// Unlink a login. Response: [NoData].
 #[typeshare]
-#[derive(
-  Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
-)]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthManageRequest)]
 #[response(UnlinkLoginResponse)]
@@ -233,9 +212,7 @@ pub type UnlinkLoginResponse = NoData;
 
 /// Update whether user skips 2fa. Response: [NoData].
 #[typeshare]
-#[derive(
-  Serialize, Deserialize, Debug, Clone, Resolve, EmptyTraits,
-)]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[empty_traits(MoghAuthManageRequest)]
 #[response(UpdateExternalSkip2faResponse)]
