@@ -1,4 +1,4 @@
-# Secret file module
+# Mogh Secret File
 
 Helpers for parsing secret values from file contents.
 
@@ -6,3 +6,5 @@ For example, used to parse secrets from the files specified in env variable endi
 
 Compatible with docker compose secrets,
 see [https://docs.docker.com/compose/how-tos/use-secrets/](https://docs.docker.com/compose/how-tos/use-secrets/).
+
+Also contains helpers for writing these files with `0600` level permissions.

@@ -501,9 +501,9 @@ dependencies = [
 
 [[package]]
 name = "colored"
-version = "3.0.0"
+version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fde0e0ec90c9dfb3b4b1a0891a7dcd0e2bffde2f7efed5fe7c9bb00e5bfb915e"
+checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
  "windows-sys 0.52.0",
 ]
@@ -829,7 +829,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_config"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "colored",
  "indexmap 2.13.0",
@@ -1737,7 +1737,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_logger"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -1751,7 +1751,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_pki"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_rate_limit"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1778,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_request_ip"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1787,14 +1787,14 @@ dependencies = [
 
 [[package]]
 name = "mogh_resolver"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "mogh_resolver_derive",
 ]
 
 [[package]]
 name = "mogh_resolver_derive"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_secret_file"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "thiserror 2.0.17",
  "tokio",
@@ -1811,7 +1811,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_server"
-version = "0.1.4"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_validations"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bson",
@@ -1858,7 +1858,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2801,7 +2801,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3729,16 +3729,13 @@ dependencies = [
 
 [[package]]
 name = "tracing-opentelemetry"
-version = "0.32.0"
+version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e6e5658463dd88089aba75c7791e1d3120633b1bfde22478b28f625a9bb1b8e"
+checksum = "1ac28f2d093c6c477eaa76b23525478f38de514fa9aeb1285738d4b97a9552fc"
 dependencies = [
  "js-sys",
  "opentelemetry",
- "opentelemetry_sdk",
- "rustversion",
  "smallvec",
- "thiserror 2.0.17",
  "tracing",
  "tracing-core",
  "tracing-log",
@@ -4138,7 +4135,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

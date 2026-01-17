@@ -8,25 +8,12 @@ authors = ["moghtech <contact@mogh.tech>"]
 license = "MPL-2.0"
 repository = "https://github.com/moghtech/lib"
 
-# [patch.mogh]
-# mogh_auth_client = { path = "auth/client/rs" }
-# mogh_cache = { path = "crates/cache" }
-# mogh_config = { path = "crates/config" }
-# mogh_encryption = { path = "crates/encryption" }
-# mogh_error = { path = "crates/error" }
-# mogh_logger = { path = "crates/logger" }
-# mogh_pki = { path = "crates/pki" }
-# mogh_rate_limit = { path = "crates/rate_limit" }
-# mogh_request_ip = { path = "crates/request_ip" }
-# mogh_resolver = { path = "crates/resolver" }
-# mogh_resolver_derive = { path = "crates/resolver/derive" }
-# mogh_secret_file = { path = "crates/secret_file" }
-# mogh_server = { path = "crates/server" }
-# mogh_validations = { path = "crates/validations" }
-
-[workspace.dependencies]
-# MOGH
+[patch.crates-io]
+# MOGH API
 mogh_auth_client = { path = "auth/client/rs" }
+mogh_auth_server = { path = "auth/server" }
+
+# MOGH
 mogh_cache = { path = "crates/cache" }
 mogh_config = { path = "crates/config" }
 mogh_encryption = { path = "crates/encryption" }
@@ -40,20 +27,26 @@ mogh_resolver_derive = { path = "crates/resolver/derive" }
 mogh_secret_file = { path = "crates/secret_file" }
 mogh_server = { path = "crates/server" }
 mogh_validations = { path = "crates/validations" }
-# mogh_auth_client = { version = "0.1.0" }
-# mogh_cache = { version = "0.1.0" }
-# mogh_config = { version = "0.1.0" }
-# mogh_encryption = { version = "0.1.0" }
-# mogh_error = { version = "0.5.5" }
-# mogh_logger = { version = "0.1.0" }
-# mogh_pki = { version = "0.1.0" }
-# mogh_rate_limit = { version = "0.1.0" }
-# mogh_request_ip = { version = "0.1.0" }
-# mogh_resolver = { version = "0.1.0" }
-# mogh_resolver_derive = { version = "0.1.0" }
-# mogh_secret_file = { version = "0.2.0" }
-# mogh_server = { version = "0.1.0" }
-# mogh_validations = { version = "0.1.0" }
+
+[workspace.dependencies]
+# MOGH API
+mogh_auth_client = "0.1.0"
+mogh_auth_server = "0.1.0"
+
+# MOGH
+mogh_cache = "1.0.0"
+mogh_config = "1.0.1"
+mogh_encryption = "0.1.0"
+mogh_error = "1.0.0"
+mogh_logger = "1.0.0"
+mogh_pki = "1.0.0"
+mogh_rate_limit = "1.0.0"
+mogh_request_ip = "1.0.0"
+mogh_resolver = "1.0.0"
+mogh_resolver_derive = "1.0.0"
+mogh_secret_file = "1.0.0"
+mogh_server = "1.0.0"
+mogh_validations = "1.0.0"
 
 # ASYNC
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "query", "form", "rustls"] }
@@ -75,7 +68,7 @@ serde_yaml_ng = "0.10.0"
 serde_json = "1.0.149"
 serde_qs = "0.15.0"
 bson = "3.1.0"
-toml = "0.9.8"
+toml = "0.9.11+spec-1.1.0"
 url = "2.5.8"
 
 # CRYPTO
@@ -106,7 +99,7 @@ opentelemetry-otlp = { version = "0.31.0", features = ["tls-roots", "reqwest-rus
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
 tracing-subscriber = { version = "0.3.22", features = ["json"] }
 opentelemetry-semantic-conventions = "0.31.0"
-tracing-opentelemetry = "0.32.0"
+tracing-opentelemetry = "0.32.1"
 opentelemetry = "0.31.0"
 tracing = "0.1.44"
 
@@ -119,6 +112,6 @@ syn = "2.0.114"
 uuid = { version = "1.19.0", features = ["v4"] }
 typeshare = "1.0.5"
 wildcard = "0.3.0"
-colored = "3.0.0"
+colored = "3.1.1"
 utoipa = "5.4.0"
 regex = "1.12.2"

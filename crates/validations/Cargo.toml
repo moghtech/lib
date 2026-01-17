@@ -1,6 +1,7 @@
 [package]
 name = "mogh_validations"
-version = "0.1.0"
+description = "Utilities to validate incoming strings."
+version = "1.0.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

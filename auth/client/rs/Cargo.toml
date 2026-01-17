@@ -1,5 +1,6 @@
 [package]
 name = "mogh_auth_client"
+description = "Client library for Mogh Auth Server embedded API."
 version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
