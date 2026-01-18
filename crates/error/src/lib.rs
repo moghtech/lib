@@ -20,7 +20,7 @@ pub fn try_serialize_error(
 ) -> anyhow::Result<String> {
   let serror: Serror = e.into();
   let res = serde_json::to_string(&serror)?;
-  Ok(res)
+  anyhow::Ok(res)
 }
 
 pub fn serialize_error_pretty(e: &anyhow::Error) -> String {
@@ -32,7 +32,7 @@ pub fn try_serialize_error_pretty(
 ) -> anyhow::Result<String> {
   let serror: Serror = e.into();
   let res = serde_json::to_string_pretty(&serror)?;
-  Ok(res)
+  anyhow::Ok(res)
 }
 
 pub fn serialize_error_bytes(e: &anyhow::Error) -> Vec<u8> {
@@ -45,7 +45,7 @@ pub fn try_serialize_error_bytes(
 ) -> anyhow::Result<Vec<u8>> {
   let serror: Serror = e.into();
   let res = serde_json::to_vec(&serror)?;
-  Ok(res)
+  anyhow::Ok(res)
 }
 
 pub fn deserialize_error(json: String) -> anyhow::Error {
@@ -71,7 +71,7 @@ pub fn deserialize_error_bytes(json: &[u8]) -> anyhow::Error {
 pub fn deserialize_serror_bytes(json: &[u8]) -> Serror {
   try_deserialize_serror_bytes(json).unwrap_or_else(|_| Serror {
     error: match String::from_utf8(json.to_vec()) {
-      Ok(res) => res,
+      std::result::Result::Ok(res) => res,
       Err(e) => format!("Bytes are not valid utf8 | {e:?}"),
     },
     trace: Default::default(),

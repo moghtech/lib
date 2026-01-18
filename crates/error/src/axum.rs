@@ -14,6 +14,11 @@ use crate::serialize_error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[allow(non_snake_case)]
+pub fn Ok<T>(value: T) -> Result<T> {
+  Result::Ok(value)
+}
+
 /// Intermediate error type which can be converted to from any error using `?`.
 /// The standard `impl From<E> for Error` will attach StatusCode::INTERNAL_SERVER_ERROR,
 /// so if an alternative StatusCode is desired, you should use `.status_code` ([AddStatusCode] or [AddStatusCodeError])
@@ -227,13 +232,15 @@ where
     let res = match serde_json::to_string(&value)
       .context("Failed to serialize response body")
     {
-      Ok(body) => axum::response::Response::builder()
-        .header(
-          CONTENT_TYPE,
-          HeaderValue::from_static("application/json"),
-        )
-        .body(axum::body::Body::from(body))
-        .unwrap(),
+      std::result::Result::Ok(body) => {
+        axum::response::Response::builder()
+          .header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+          )
+          .body(axum::body::Body::from(body))
+          .unwrap()
+      }
       Err(e) => axum::response::Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
         .header(
@@ -258,7 +265,7 @@ where
 {
   fn from(value: T) -> JsonString {
     match serde_json::to_string(&value) {
-      Ok(body) => JsonString::Ok(body),
+      std::result::Result::Ok(body) => JsonString::Ok(body),
       Err(e) => JsonString::Err(e),
     }
   }
