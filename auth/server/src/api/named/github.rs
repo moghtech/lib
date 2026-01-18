@@ -163,6 +163,7 @@ pub async fn github_callback<I: AuthImpl>(
     let github_user =
       provider.get_github_user(&token.access_token).await?;
     let github_id = github_user.id.to_string();
+    let avatar_url = github_user.avatar_url;
 
     let user =
       auth.find_user_with_github_id(github_id.clone()).await?;
@@ -194,7 +195,12 @@ pub async fn github_callback<I: AuthImpl>(
         }
 
         let user_id = auth
-          .sign_up_github_user(username, github_id, no_users_exist)
+          .sign_up_github_user(
+            username,
+            github_id,
+            avatar_url,
+            no_users_exist,
+          )
           .await?;
 
         session.insert_authenticated_user_id(&user_id).await?;
@@ -236,6 +242,7 @@ async fn link_github_callback<I: AuthImpl>(
   let github_user =
     provider.get_github_user(&token.access_token).await?;
   let github_id = github_user.id.to_string();
+  let avatar_url = github_user.avatar_url;
 
   // Ensure there are no other existing users with this login linked.
   if let Some(existing_user) =
@@ -251,7 +258,9 @@ async fn link_github_callback<I: AuthImpl>(
     }
   }
 
-  auth.link_github_login(user_id, github_id).await?;
+  auth
+    .link_github_login(user_id, github_id, avatar_url)
+    .await?;
 
   Ok(Redirect::to(auth.post_link_redirect()))
 }

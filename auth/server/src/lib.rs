@@ -263,6 +263,7 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
     username: String,
     github_id: String,
+    avatar_url: String,
     no_users_exist: bool,
   ) -> DynFuture<mogh_error::Result<String>>;
 
@@ -270,6 +271,7 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
     user_id: String,
     github_id: String,
+    avatar_url: String,
   ) -> DynFuture<mogh_error::Result<()>>;
 
   // = GOOGLE =
@@ -286,6 +288,7 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
     username: String,
     google_id: String,
+    avatar_url: String,
     no_users_exist: bool,
   ) -> DynFuture<mogh_error::Result<String>>;
 
@@ -293,6 +296,7 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
     user_id: String,
     google_id: String,
+    avatar_url: String,
   ) -> DynFuture<mogh_error::Result<()>>;
 
   // ==========

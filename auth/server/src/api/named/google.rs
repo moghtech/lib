@@ -162,6 +162,7 @@ pub async fn google_callback<I: AuthImpl>(
     let token = provider.get_access_token(&code).await?;
     let google_user = provider.get_google_user(&token.id_token)?;
     let google_id = google_user.id;
+    let avatar_url = google_user.picture;
 
     let user =
       auth.find_user_with_google_id(google_id.clone()).await?;
@@ -199,7 +200,12 @@ pub async fn google_callback<I: AuthImpl>(
         }
 
         let user_id = auth
-          .sign_up_google_user(username, google_id, no_users_exist)
+          .sign_up_google_user(
+            username,
+            google_id,
+            avatar_url,
+            no_users_exist,
+          )
           .await?;
 
         session.insert_authenticated_user_id(&user_id).await?;
@@ -239,7 +245,8 @@ async fn link_google_callback<I: AuthImpl>(
   let token = provider.get_access_token(&code).await?;
 
   let google_user = provider.get_google_user(&token.id_token)?;
-  let google_id = google_user.id.to_string();
+  let google_id = google_user.id;
+  let avatar_url = google_user.picture;
 
   // Ensure there are no other existing users with this login linked.
   if let Some(existing_user) =
@@ -255,7 +262,9 @@ async fn link_google_callback<I: AuthImpl>(
     }
   }
 
-  auth.link_google_login(user_id, google_id).await?;
+  auth
+    .link_google_login(user_id, google_id, avatar_url)
+    .await?;
 
   Ok(Redirect::to(auth.post_link_redirect()))
 }

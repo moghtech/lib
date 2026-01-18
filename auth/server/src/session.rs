@@ -320,7 +320,7 @@ impl Session {
       .map_err(Into::into)
   }
 
-  /// Returns (user_id, state, redirect)
+  /// Returns (user_id, state)
   pub async fn retrieve_github_link(
     &self,
   ) -> mogh_error::Result<Option<(String, String)>> {
