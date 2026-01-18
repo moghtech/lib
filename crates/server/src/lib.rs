@@ -5,7 +5,7 @@ use axum::{
   Router,
   http::{HeaderName, HeaderValue},
 };
-use axum_server::tls_rustls::RustlsConfig;
+use axum_server::{Handle, tls_rustls::RustlsConfig};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::info;
 
@@ -33,6 +33,7 @@ pub trait ServerConfig {
 pub async fn serve_app(
   app: Router,
   config: impl ServerConfig,
+  handle: impl Into<Option<Handle<SocketAddr>>>,
 ) -> anyhow::Result<()> {
   // Add app standard security layers
   let app = app
@@ -70,7 +71,12 @@ pub async fn serve_app(
     )
     .await
     .context("Invalid ssl cert / key")?;
-    axum_server::bind_rustls(socket_addr, ssl_config)
+    let mut server =
+      axum_server::bind_rustls(socket_addr, ssl_config);
+    if let Some(handle) = handle.into() {
+      server = server.handle(handle);
+    }
+    server
       .serve(app)
       .await
       .context("Failed to start https server")
@@ -78,7 +84,11 @@ pub async fn serve_app(
     // Run the server without TLS (http)
     info!("🔓 Server SSL Disabled");
     info!("Server starting on http://{socket_addr}");
-    axum_server::bind(socket_addr)
+    let mut server = axum_server::bind(socket_addr);
+    if let Some(handle) = handle.into() {
+      server = server.handle(handle);
+    }
+    server
       .serve(app)
       .await
       .context("Failed to start http server")
