@@ -4,7 +4,7 @@ use anyhow::{Context, anyhow};
 use data_encoding::BASE64;
 use der::{Decode as _, Encode as _, asn1::OctetStringRef};
 
-use crate::PkiType;
+use crate::PkiKind;
 
 #[derive(PartialEq, Clone)]
 pub struct Pkcs8PrivateKey(String);
@@ -205,10 +205,10 @@ impl Pkcs8PrivateKey {
 
   pub fn compute_public_key_using_dh(
     &self,
-    pki_type: PkiType,
+    pki_kind: PkiKind,
   ) -> anyhow::Result<super::public::SpkiPublicKey> {
     super::public::SpkiPublicKey::from_private_key_using_dh(
-      pki_type, &self.0,
+      pki_kind, &self.0,
     )
   }
 }

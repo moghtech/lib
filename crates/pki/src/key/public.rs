@@ -9,7 +9,7 @@ use snow::{
 };
 use spki::SubjectPublicKeyInfoRef;
 
-use crate::PkiType;
+use crate::PkiKind;
 
 #[derive(PartialEq, Clone)]
 pub struct SpkiPublicKey(String);
@@ -191,10 +191,10 @@ impl SpkiPublicKey {
   }
 
   pub fn from_private_key_using_dh(
-    pki_type: PkiType,
+    pki_kind: PkiKind,
     maybe_pkcs8_private_key: &str,
   ) -> anyhow::Result<Self> {
-    let params: NoiseParams = pki_type.noise_params().parse()?;
+    let params: NoiseParams = pki_kind.noise_params().parse()?;
     let mut dh = DefaultResolver.resolve_dh(&params.dh).context(
       "No DH implementation available with these noise params",
     )?;

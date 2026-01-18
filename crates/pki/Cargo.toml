@@ -1,16 +1,25 @@
 [package]
 name = "mogh_pki"
 description = "Public key identification utilities using Noise"
-version = "1.0.0"
+version = "1.1.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+cli = ["dep:clap", "dep:strum", "dep:serde", "dep:serde_json", "dep:colored"]
+default = ["cli"]
+
 [dependencies]
 # MOGH
 mogh_secret_file = { workspace = true, features = ["write", "tokio"] }
 # EXTERNAL
+serde_json = { workspace = true, optional = true }
+colored = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+strum = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
 data-encoding.workspace = true
 pem-rfc7468.workspace = true
 arc-swap.workspace = true

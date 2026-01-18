@@ -1,7 +1,7 @@
 use anyhow::Context;
 use data_encoding::BASE64;
 
-use crate::{PkiType, key::SpkiPublicKey};
+use crate::{PkiKind, key::SpkiPublicKey};
 
 /// Wrapper around [snow::HandshakeState] to streamline this implementation
 pub struct OneWayNoiseHandshake(snow::HandshakeState);
@@ -13,7 +13,7 @@ impl OneWayNoiseHandshake {
     prologue: &[u8],
   ) -> anyhow::Result<OneWayNoiseHandshake> {
     Ok(OneWayNoiseHandshake(
-      snow::Builder::new(PkiType::ONE_WAY.parse()?)
+      snow::Builder::new(PkiKind::ONE_WAY.parse()?)
         .local_private_key(private_key)
         .context("Invalid private key")?
         .remote_public_key(remote_public_key)
@@ -30,7 +30,7 @@ impl OneWayNoiseHandshake {
     prologue: &[u8],
   ) -> anyhow::Result<OneWayNoiseHandshake> {
     Ok(OneWayNoiseHandshake(
-      snow::Builder::new(PkiType::ONE_WAY.parse()?)
+      snow::Builder::new(PkiKind::ONE_WAY.parse()?)
         .local_private_key(private_key)
         .context("Invalid private key")?
         .prologue(prologue)

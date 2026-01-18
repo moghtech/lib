@@ -13,7 +13,7 @@ mod public;
 pub use private::Pkcs8PrivateKey;
 pub use public::SpkiPublicKey;
 
-use crate::PkiType;
+use crate::PkiKind;
 
 const OID_X25519: spki::ObjectIdentifier =
   spki::ObjectIdentifier::new_unwrap("1.3.101.110");
@@ -33,9 +33,9 @@ pub struct EncodedKeyPair {
 }
 
 impl EncodedKeyPair {
-  pub fn generate(pki_type: PkiType) -> anyhow::Result<Self> {
+  pub fn generate(pki_kind: PkiKind) -> anyhow::Result<Self> {
     let builder =
-      snow::Builder::new(pki_type.noise_params().parse()?);
+      snow::Builder::new(pki_kind.noise_params().parse()?);
     let keypair = builder
       .generate_keypair()
       .context("Failed to generate keypair")?;
@@ -45,24 +45,24 @@ impl EncodedKeyPair {
   }
 
   pub fn generate_write_sync(
-    pki_type: PkiType,
+    pki_kind: PkiKind,
     path: impl AsRef<Path>,
   ) -> anyhow::Result<Self> {
     let path = path.as_ref();
     // Generate and write pems to path
-    let keys = Self::generate(pki_type)?;
+    let keys = Self::generate(pki_kind)?;
     keys.private.write_pem_sync(path)?;
     keys.public.write_pem_sync(path.with_extension("pub"))?;
     Ok(keys)
   }
 
   pub async fn generate_write_async(
-    pki_type: PkiType,
+    pki_kind: PkiKind,
     path: impl AsRef<Path>,
   ) -> anyhow::Result<Self> {
     let path = path.as_ref();
     // Generate and write pems to path
-    let keys = Self::generate(pki_type)?;
+    let keys = Self::generate(pki_kind)?;
     keys.private.write_pem_async(path).await?;
     keys
       .public
@@ -72,7 +72,7 @@ impl EncodedKeyPair {
   }
 
   pub fn load_maybe_generate(
-    pki_type: PkiType,
+    pki_kind: PkiKind,
     private_key_path: impl AsRef<Path>,
   ) -> anyhow::Result<Self> {
     let path = private_key_path.as_ref();
@@ -82,22 +82,22 @@ impl EncodedKeyPair {
     })?;
 
     if !exists {
-      return Self::generate_write_sync(pki_type, path);
+      return Self::generate_write_sync(pki_kind, path);
     }
 
     let private = Pkcs8PrivateKey::from_file(private_key_path)?;
-    let public = private.compute_public_key_using_dh(pki_type)?;
+    let public = private.compute_public_key_using_dh(pki_kind)?;
 
     Ok(Self { private, public })
   }
 
   pub fn from_private_key(
-    pki_type: PkiType,
+    pki_kind: PkiKind,
     maybe_pkcs8_private_key: &str,
   ) -> anyhow::Result<Self> {
     let private =
       Pkcs8PrivateKey::from_maybe_raw_bytes(maybe_pkcs8_private_key)?;
-    let public = private.compute_public_key_using_dh(pki_type)?;
+    let public = private.compute_public_key_using_dh(pki_kind)?;
     Ok(Self { private, public })
   }
 
@@ -120,7 +120,7 @@ impl RotatableKeyPair {
   /// or from file containing raw / der / pem.
   /// Use `file:/path/to/private.key` to specify file.
   pub fn from_private_key_spec(
-    pki_type: PkiType,
+    pki_kind: PkiKind,
     private_key_spec: &str,
   ) -> anyhow::Result<Self> {
     let (keys, path) = if let Some(path) =
@@ -128,12 +128,12 @@ impl RotatableKeyPair {
     {
       let path = PathBuf::from(path);
       (
-        EncodedKeyPair::load_maybe_generate(pki_type, &path)?,
+        EncodedKeyPair::load_maybe_generate(pki_kind, &path)?,
         Some(path),
       )
     } else {
       (
-        EncodedKeyPair::from_private_key(pki_type, private_key_spec)?,
+        EncodedKeyPair::from_private_key(pki_kind, private_key_spec)?,
         None,
       )
     };
@@ -147,13 +147,13 @@ impl RotatableKeyPair {
   /// Returns the public key, maybe new if using file.
   pub async fn rotate(
     &self,
-    pki_type: PkiType,
+    pki_kind: PkiKind,
   ) -> anyhow::Result<SpkiPublicKey> {
     let Some(path) = self.path.as_deref() else {
       return Ok(self.keys.load().public.clone());
     };
     let keys =
-      EncodedKeyPair::generate_write_async(pki_type, path).await?;
+      EncodedKeyPair::generate_write_async(pki_kind, path).await?;
     let public_key = keys.public.clone();
     self.keys.store(Arc::new(keys));
     Ok(public_key)

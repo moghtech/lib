@@ -1,6 +1,6 @@
 use anyhow::Context;
 
-use crate::PkiType;
+use crate::PkiKind;
 
 /// Wrapper around [snow::HandshakeState] to streamline this implementation
 pub struct MutualNoiseHandshake(snow::HandshakeState);
@@ -14,7 +14,7 @@ impl MutualNoiseHandshake {
       maybe_pkcs8_private_key,
     )?;
     Ok(MutualNoiseHandshake(
-      snow::Builder::new(PkiType::MUTUAL.parse()?)
+      snow::Builder::new(PkiKind::MUTUAL.parse()?)
         .local_private_key(&private_key)
         .context("Invalid private key")?
         .prologue(prologue)
@@ -33,7 +33,7 @@ impl MutualNoiseHandshake {
       maybe_pkcs8_private_key,
     )?;
     Ok(MutualNoiseHandshake(
-      snow::Builder::new(PkiType::MUTUAL.parse()?)
+      snow::Builder::new(PkiKind::MUTUAL.parse()?)
         .local_private_key(&private_key)
         .context("Invalid private key")?
         .prologue(prologue)

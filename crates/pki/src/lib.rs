@@ -2,11 +2,16 @@
 //!
 //! Utilities for Public Key Infrastructure
 
-pub mod key;
-pub mod mutual;
-pub mod one_way;
+mod key;
+mod kinds;
 
-pub enum PkiType {
+pub use key::*;
+pub use kinds::*;
+
+#[cfg(feature = "cli")]
+pub mod cli;
+
+pub enum PkiKind {
   /// The client has server public key pinned, and transmits
   /// its public key in one zero trust call by encrypting
   /// some mutually known information (such as request body)
@@ -24,13 +29,13 @@ pub enum PkiType {
   Mutual,
 }
 
-impl PkiType {
+impl PkiKind {
   const ONE_WAY: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
   const MUTUAL: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
   pub fn noise_params(&self) -> &'static str {
     match self {
-      PkiType::OneWay => Self::ONE_WAY,
-      PkiType::Mutual => Self::MUTUAL,
+      PkiKind::OneWay => Self::ONE_WAY,
+      PkiKind::Mutual => Self::MUTUAL,
     }
   }
 }
