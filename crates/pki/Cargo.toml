@@ -9,7 +9,6 @@ repository.workspace = true
 
 [features]
 cli = ["dep:clap", "dep:strum", "dep:serde", "dep:serde_json", "dep:colored"]
-default = ["cli"]
 
 [dependencies]
 # MOGH
