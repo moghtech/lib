@@ -2,13 +2,14 @@ use anyhow::Context as _;
 use axum::{
   body::Body,
   extract::{FromRequest, rejection::JsonRejection},
-  http::{
-    HeaderMap, HeaderValue, StatusCode,
-    header::{CONTENT_TYPE, IntoHeaderName},
-  },
   response::IntoResponse,
 };
 use serde::Serialize;
+
+pub use axum::http::{
+  HeaderMap, HeaderValue, StatusCode,
+  header::{self, IntoHeaderName},
+};
 
 use crate::serialize_error;
 
@@ -235,7 +236,7 @@ where
       std::result::Result::Ok(body) => {
         axum::response::Response::builder()
           .header(
-            CONTENT_TYPE,
+            header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
           )
           .body(axum::body::Body::from(body))
@@ -244,7 +245,7 @@ where
       Err(e) => axum::response::Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
         .header(
-          CONTENT_TYPE,
+          header::CONTENT_TYPE,
           HeaderValue::from_static("application/json"),
         )
         .body(axum::body::Body::from(serialize_error(&e)))
@@ -276,7 +277,7 @@ impl JsonString {
     match self {
       JsonString::Ok(body) => axum::response::Response::builder()
         .header(
-          CONTENT_TYPE,
+          header::CONTENT_TYPE,
           HeaderValue::from_static("application/json"),
         )
         .body(axum::body::Body::from(body))
@@ -284,7 +285,7 @@ impl JsonString {
       JsonString::Err(error) => axum::response::Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
         .header(
-          CONTENT_TYPE,
+          header::CONTENT_TYPE,
           HeaderValue::from_static("application/json"),
         )
         .body(axum::body::Body::from(serialize_error(
