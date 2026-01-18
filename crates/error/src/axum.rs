@@ -21,11 +21,22 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub struct Error {
   pub status: StatusCode,
-  pub headers: HeaderMap,
+  pub headers: Option<HeaderMap>,
   pub error: anyhow::Error,
 }
 
 impl Error {
+  pub fn msg<M>(message: M) -> Error
+  where
+    M: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static,
+  {
+    Self {
+      status: StatusCode::INTERNAL_SERVER_ERROR,
+      headers: None,
+      error: anyhow::Error::msg(message),
+    }
+  }
+
   pub fn status_code(mut self, status_code: StatusCode) -> Error {
     self.status = status_code;
     self
@@ -36,12 +47,17 @@ impl Error {
     name: impl IntoHeaderName,
     value: HeaderValue,
   ) -> Error {
-    self.headers.append(name, value);
-    self
+    if let Some(headers) = &mut self.headers {
+      headers.append(name, value);
+      return self;
+    }
+    let mut headers = HeaderMap::with_capacity(1);
+    headers.append(name, value);
+    self.headers(headers)
   }
 
   pub fn headers(mut self, headers: HeaderMap) -> Error {
-    self.headers = headers;
+    self.headers = Some(headers);
     self
   }
 }
@@ -58,7 +74,9 @@ impl IntoResponse for Error {
       "Content-Type",
       HeaderValue::from_static("application/json"),
     );
-    headers.extend(self.headers);
+    if let Some(self_headers) = self.headers {
+      headers.extend(self_headers);
+    }
 
     response
   }
@@ -77,7 +95,7 @@ where
   fn from(err: E) -> Self {
     Self {
       status: StatusCode::INTERNAL_SERVER_ERROR,
-      headers: Default::default(),
+      headers: None,
       error: err.into(),
     }
   }
@@ -89,7 +107,7 @@ pub trait AddStatusCodeError: Into<anyhow::Error> {
   fn status_code(self, status_code: StatusCode) -> Error {
     Error {
       status: status_code,
-      headers: Default::default(),
+      headers: None,
       error: self.into(),
     }
   }
@@ -126,14 +144,14 @@ pub trait AddHeadersError: Into<anyhow::Error> {
     let mut headers = HeaderMap::with_capacity(1);
     headers.append(name, value);
     Error {
-      headers,
+      headers: Some(headers),
       status: StatusCode::INTERNAL_SERVER_ERROR,
       error: self.into(),
     }
   }
   fn headers(self, headers: HeaderMap) -> Error {
     Error {
-      headers,
+      headers: Some(headers),
       status: StatusCode::INTERNAL_SERVER_ERROR,
       error: self.into(),
     }

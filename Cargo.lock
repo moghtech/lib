@@ -1726,7 +1726,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_error"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "axum",
