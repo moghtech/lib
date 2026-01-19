@@ -53,6 +53,7 @@ pub trait LogConfig {
   ///
   /// ```rust
   /// fn targets(&self) -> &[String] {
+  ///   use std::sync::LazyLock;
   ///   static TARGETS: LazyLock<Vec<String>> =
   ///     LazyLock::new(|| {
   ///       ["binary_name"].into_iter().map(str::to_string).collect()
