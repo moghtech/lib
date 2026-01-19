@@ -28,19 +28,6 @@ pub fn router<I: AuthImpl>() -> Router {
     .route("/callback", get(oidc_callback::<I>))
 }
 
-#[utoipa::path(
-  get,
-  path = "/oidc/login",
-  description = "Login using OIDC",
-  params(
-    ("redirect", description = "Optional path to redirect back to after login.")
-  ),
-  responses(
-    (status = 303, description = "Redirect to OIDC provider for login"),
-    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 500, description = "Request failed", body = mogh_error::Serror)
-  ),
-)]
 pub async fn oidc_login<I: AuthImpl>(
   AuthExtractor(auth): AuthExtractor<I>,
   Query(RedirectQuery { redirect }): Query<RedirectQuery>,
@@ -82,19 +69,6 @@ pub async fn oidc_login<I: AuthImpl>(
   auth_redirect(auth, auth_url.as_str())
 }
 
-#[utoipa::path(
-  get,
-  path = "/oidc/link",
-  description = "Link existing account to OIDC user",
-  params(
-    ("redirect", description = "Optional path to redirect back to after login.")
-  ),
-  responses(
-    (status = 303, description = "Redirect to OIDC provider for link"),
-    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 500, description = "Request failed", body = mogh_error::Serror)
-  ),
-)]
 pub async fn oidc_link<I: AuthImpl>(
   AuthExtractor(auth): AuthExtractor<I>,
 ) -> mogh_error::Result<Redirect> {
@@ -168,21 +142,6 @@ fn auth_redirect<I: AuthImpl>(
   Ok(redirect)
 }
 
-#[utoipa::path(
-  get,
-  path = "/oidc/callback",
-  description = "Callback to finish OIDC login",
-  params(
-    ("state", description = "Callback state."),
-    ("code", description = "Callback code."),
-    ("error", description = "Callback error.")
-  ),
-  responses(
-    (status = 303, description = "Redirect back to app to continue login steps."),
-    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 500, description = "Request failed", body = mogh_error::Serror)
-  ),
-)]
 pub async fn oidc_callback<I: AuthImpl>(
   AuthExtractor(auth): AuthExtractor<I>,
   Query(query): Query<StandardCallbackQuery>,

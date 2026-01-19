@@ -108,7 +108,7 @@ export interface BeginTotpEnrollmentResponse {
 }
 
 /**
- * Confirm a single use 2fa pending token + time-dependent user totp code for a jwt.
+ * Complete login using passkey as second factor.
  * Response: [CompletePasskeyLoginResponse].
  */
 export interface CompletePasskeyLogin {
@@ -116,7 +116,7 @@ export interface CompletePasskeyLogin {
 }
 
 /**
- * Confirm a single use 2fa pending token + time-dependent user totp code for a jwt.
+ * Complete login using TOTP code as second factor.
  * Response: [CompleteTotpLoginResponse].
  */
 export interface CompleteTotpLogin {
@@ -153,8 +153,7 @@ export interface ExchangeForJwt {
 }
 
 /**
- * See the available options
- * users have to login, eg. local and external providers.
+ * Get the available options to login, eg. local and external providers.
  * Response: [GetLoginOptionsResponse].
  */
 export interface GetLoginOptions {
@@ -174,10 +173,7 @@ export interface GetLoginOptionsResponse {
 	registration_disabled: boolean;
 }
 
-/**
- * Login as a local user. Will fail if the users credentials don't match
- * any local user.
- */
+/** Login as a local user. */
 export interface LoginLocalUser {
 	/** The user's username */
 	username: string;
@@ -221,7 +217,7 @@ export enum LoginProvider {
 	Google = "Google",
 }
 
-/** Unlink a login. Response: [NoData]. */
+/** Unlink a login provider. Response: [NoData]. */
 export interface UnlinkLogin {
 	/**
 	 * 'provider' can be:
@@ -231,7 +227,10 @@ export interface UnlinkLogin {
 	provider: LoginProvider;
 }
 
-/** Update whether user skips 2fa. Response: [NoData]. */
+/**
+ * Update whether the calling user skips 2fa when using external login method.
+ * Response: [NoData].
+ */
 export interface UpdateExternalSkip2fa {
 	/** Whether user skips 2fa when using external login method. */
 	external_skip_2fa: boolean;

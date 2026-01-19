@@ -73,8 +73,19 @@ pub trait MoghAuthLoginRequest: HasResponse {}
 
 //
 
-/// See the available options
-/// users have to login, eg. local and external providers.
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/login/GetLoginOptions",
+  description = "Get the available options to login, eg. local and external providers.",
+  request_body(content = GetLoginOptions),
+  responses(
+    (status = 200, description = "The available login options", body = GetLoginOptionsResponse)
+  ),
+)]
+pub fn get_login_options() {}
+
+/// Get the available options to login, eg. local and external providers.
 /// Response: [GetLoginOptionsResponse].
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
@@ -103,6 +114,50 @@ pub struct GetLoginOptionsResponse {
 
 //
 
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/login/ExchangeForJwt",
+  description = "Retrieve a JWT after completing third party login flows.",
+  request_body(content = ExchangeForJwt),
+  responses(
+    (status = 200, description = "Authentication JWT", body = ExchangeForJwtResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn exchange_for_jwt() {}
+
+/// Retrieve a JWT after completing third party login flows.
+/// Response: [ExchangeForJwtResponse].
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[empty_traits(MoghAuthLoginRequest)]
+#[response(ExchangeForJwtResponse)]
+#[error(mogh_error::Error)]
+pub struct ExchangeForJwt {}
+
+/// Response for [ExchangeForJwt].
+#[typeshare]
+pub type ExchangeForJwtResponse = JwtResponse;
+
+//
+
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/login/SignUpLocalUser",
+  description = "Sign up a new local user account.",
+  request_body(content = LoginLocalUser),
+  responses(
+    (status = 200, description = "Authentication JWT", body = SignUpLocalUserResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn sign_up_local_user() {}
+
 /// Sign up a new local user account.
 /// Response: [SignUpLocalUserResponse].
 #[typeshare]
@@ -125,8 +180,21 @@ pub type SignUpLocalUserResponse = JwtResponse;
 
 //
 
-/// Login as a local user. Will fail if the users credentials don't match
-/// any local user.
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/login/LoginLocalUser",
+  description = "Login as a local user.",
+  request_body(content = LoginLocalUser),
+  responses(
+    (status = 200, description = "JWT auth token or 2 factor login continuation", body = LoginLocalUserResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn login_local_user() {}
+
+/// Login as a local user.
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -146,23 +214,21 @@ pub type LoginLocalUserResponse = JwtOrTwoFactor;
 
 //
 
-/// Retrieve a JWT after completing third party login flows.
-/// Response: [ExchangeForJwtResponse].
-#[typeshare]
-#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[empty_traits(MoghAuthLoginRequest)]
-#[response(ExchangeForJwtResponse)]
-#[error(mogh_error::Error)]
-pub struct ExchangeForJwt {}
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/login/CompletePasskeyLogin",
+  description = "Complete login using passkey as second factor.",
+  request_body(content = CompletePasskeyLogin),
+  responses(
+    (status = 200, description = "Authentication JWT", body = CompletePasskeyLoginResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn complete_passkey_login() {}
 
-/// Response for [ExchangeForJwt].
-#[typeshare]
-pub type ExchangeForJwtResponse = JwtResponse;
-
-//
-
-/// Confirm a single use 2fa pending token + time-dependent user totp code for a jwt.
+/// Complete login using passkey as second factor.
 /// Response: [CompletePasskeyLoginResponse].
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
@@ -180,7 +246,21 @@ pub type CompletePasskeyLoginResponse = JwtResponse;
 
 //
 
-/// Confirm a single use 2fa pending token + time-dependent user totp code for a jwt.
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/login/CompleteTotpLogin",
+  description = "Complete login using TOTP code as second factor.",
+  request_body(content = CompleteTotpLogin),
+  responses(
+    (status = 200, description = "Authentication JWT", body = CompleteTotpLoginResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn complete_totp_login() {}
+
+/// Complete login using TOTP code as second factor.
 /// Response: [CompleteTotpLoginResponse].
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone, Resolve)]

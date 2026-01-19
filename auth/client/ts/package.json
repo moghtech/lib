@@ -1,6 +1,6 @@
 {
   "name": "mogh_auth_client",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Mogh auth client package",
   "repository": {
     "url": "https://github.com/moghtech/lib"

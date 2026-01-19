@@ -73,17 +73,6 @@ async fn handler<I: AuthImpl>(
   res.map(|res| res.0)
 }
 
-#[utoipa::path(
-  post,
-  path = "/login/GetLoginOptions",
-  description = "Get the available login options",
-  request_body(content = GetLoginOptions),
-  responses(
-    (status = 200, description = "The available login options", body = GetLoginOptionsResponse)
-  ),
-)]
-pub fn get_login_options() {}
-
 impl Resolve<BoxAuthImpl> for GetLoginOptions {
   async fn resolve(
     self,
@@ -98,19 +87,6 @@ impl Resolve<BoxAuthImpl> for GetLoginOptions {
     })
   }
 }
-
-#[utoipa::path(
-  post,
-  path = "/login/ExchangeForJwt",
-  description = "Follow up call after successful third party login to retrieve an authentication JWT.",
-  request_body(content = ExchangeForJwt),
-  responses(
-    (status = 200, description = "Authentication JWT", body = JwtResponse),
-    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 500, description = "Request failed", body = mogh_error::Serror)
-  ),
-)]
-pub fn exchange_for_jwt() {}
 
 impl Resolve<BoxAuthImpl> for ExchangeForJwt {
   async fn resolve(

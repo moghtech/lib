@@ -2,12 +2,7 @@ use serde::Serialize;
 use utoipa::OpenApi;
 
 mod auth {
-  pub use crate::api::{
-    login::{local::*, passkey::*, totp::*, *},
-    manage::{external::*, local::*, passkey::*, totp::*, *},
-    named::{github::*, google::*},
-    oidc::*,
-  };
+  pub use crate::api::{external::*, login::*, manage::*};
 }
 
 #[derive(OpenApi)]

@@ -19,19 +19,6 @@ const TOTP_ENROLLMENT_SECRET_LENGTH: usize = 40;
 
 //
 
-#[utoipa::path(
-  post,
-  path = "/manage/BeginTotpEnrollment",
-  description = "Begins enrollment flow for Totp 2FA.",
-  request_body(content = BeginTotpEnrollment),
-  responses(
-    (status = 200, description = "Creation challenge", body = BeginTotpEnrollmentResponse),
-    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 500, description = "Request failed", body = mogh_error::Serror)
-  ),
-)]
-pub fn begin_totp_enrollment() {}
-
 impl Resolve<ManageArgs> for BeginTotpEnrollment {
   async fn resolve(
     self,
@@ -57,19 +44,6 @@ impl Resolve<ManageArgs> for BeginTotpEnrollment {
 }
 
 //
-
-#[utoipa::path(
-  post,
-  path = "/manage/ConfirmTotpEnrollment",
-  description = "Confirm enrollment for Totp 2FA.",
-  request_body(content = ConfirmTotpEnrollment),
-  responses(
-    (status = 200, description = "Enrolled in Totp 2FA", body = ConfirmTotpEnrollmentResponse),
-    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 500, description = "Request failed", body = mogh_error::Serror)
-  ),
-)]
-pub fn confirm_totp_enrollment() {}
 
 impl Resolve<ManageArgs> for ConfirmTotpEnrollment {
   async fn resolve(
@@ -113,19 +87,6 @@ impl Resolve<ManageArgs> for ConfirmTotpEnrollment {
 }
 
 //
-
-#[utoipa::path(
-  post,
-  path = "/manage/UnenrollTotp",
-  description = "Unenroll in Totp 2FA.",
-  request_body(content = UnenrollTotp),
-  responses(
-    (status = 200, description = "Unenrolled in Totp 2FA", body = UnenrollTotpResponse),
-    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 500, description = "Request failed", body = mogh_error::Serror)
-  ),
-)]
-pub fn unenroll_totp() {}
 
 impl Resolve<ManageArgs> for UnenrollTotp {
   async fn resolve(

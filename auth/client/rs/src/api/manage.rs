@@ -19,6 +19,20 @@ pub trait MoghAuthManageRequest: HasResponse {}
 
 //
 
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/UpdateUsername",
+  description = "Update the calling user's username.",
+  request_body(content = UpdateUsername),
+  responses(
+    (status = 200, description = "Username updated", body = UpdateUsernameResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn update_username() {}
+
 /// Update the calling user's username.
 /// Response: [NoData].
 #[typeshare]
@@ -35,6 +49,20 @@ pub struct UpdateUsername {
 pub type UpdateUsernameResponse = NoData;
 
 //
+
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/UpdatePassword",
+  description = "Update the calling user's password.",
+  request_body(content = UpdatePassword),
+  responses(
+    (status = 200, description = "Password updated", body = UpdatePasswordResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn update_password() {}
 
 /// Update the calling user's password.
 /// Response: [NoData].
@@ -55,6 +83,20 @@ pub type UpdatePasswordResponse = NoData;
 // = PASSKEY 2FA =
 // ===============
 
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/BeginPasskeyEnrollment",
+  description = "Begins enrollment flow for Passkey 2FA.",
+  request_body(content = BeginPasskeyEnrollment),
+  responses(
+    (status = 200, description = "Creation challenge", body = BeginPasskeyEnrollmentResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn begin_passkey_enrollment() {}
+
 /// Begins enrollment flow for Passkey 2FA.
 /// Response: [BeginPasskeyEnrollmentResponse]
 #[typeshare]
@@ -70,6 +112,20 @@ pub struct BeginPasskeyEnrollment {}
 pub type BeginPasskeyEnrollmentResponse = CreationChallengeResponse;
 
 //
+
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/ConfirmPasskeyEnrollment",
+  description = "Confirm enrollment for Passkey 2FA.",
+  request_body(content = ConfirmPasskeyEnrollment),
+  responses(
+    (status = 200, description = "Enrolled in Passkey 2FA", body = ConfirmPasskeyEnrollmentResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn confirm_passkey_enrollment() {}
 
 /// Confirm enrollment flow for Passkey 2FA.
 /// Response: [NoData]
@@ -89,6 +145,20 @@ pub type ConfirmPasskeyEnrollmentResponse = NoData;
 
 //
 
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/UnenrollPasskey",
+  description = "Unenroll user in Passkey 2FA.",
+  request_body(content = UnenrollPasskey),
+  responses(
+    (status = 200, description = "Unenrolled in Passkey 2FA", body = UnenrollPasskeyResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn unenroll_passkey() {}
+
 /// Unenrolls user in Passkey 2FA.
 /// Response: [NoData]
 #[typeshare]
@@ -106,6 +176,20 @@ pub type UnenrollPasskeyResponse = NoData;
 // ============
 // = TOTP 2FA =
 // ============
+
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/BeginTotpEnrollment",
+  description = "Begins enrollment flow for Totp 2FA.",
+  request_body(content = BeginTotpEnrollment),
+  responses(
+    (status = 200, description = "Creation challenge", body = BeginTotpEnrollmentResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn begin_totp_enrollment() {}
 
 /// Starts enrollment flow for TOTP 2FA auth support.
 /// Response: [BeginTotpEnrollmentResponse]
@@ -133,6 +217,20 @@ pub struct BeginTotpEnrollmentResponse {
 
 //
 
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/ConfirmTotpEnrollment",
+  description = "Confirm enrollment for Totp 2FA.",
+  request_body(content = ConfirmTotpEnrollment),
+  responses(
+    (status = 200, description = "Enrolled in Totp 2FA", body = ConfirmTotpEnrollmentResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn confirm_totp_enrollment() {}
+
 /// Confirm enrollment flow for TOTP 2FA auth support
 /// Response: [ConfirmTotpEnrollmentResponse]
 #[typeshare]
@@ -155,6 +253,20 @@ pub struct ConfirmTotpEnrollmentResponse {
 
 //
 
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/UnenrollTotp",
+  description = "Unenroll user in Totp 2FA.",
+  request_body(content = UnenrollTotp),
+  responses(
+    (status = 200, description = "Unenrolled in Totp 2FA", body = UnenrollTotpResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn unenroll_totp() {}
+
 /// Unenrolls user in TOTP 2FA.
 /// Response: [UnenrollTotpResponse]
 #[typeshare]
@@ -170,6 +282,20 @@ pub struct UnenrollTotp {}
 pub type UnenrollTotpResponse = NoData;
 
 //
+
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/BeginExternalLoginLink",
+  description = "Begin linking flow for an external login.",
+  request_body(content = BeginExternalLoginLink),
+  responses(
+    (status = 200, description = "Login linking flow has been started", body = BeginExternalLoginLinkResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn begin_external_login_link() {}
 
 /// Begin linking flow for an external login. Response: [NoData].
 ///
@@ -191,7 +317,21 @@ pub type BeginExternalLoginLinkResponse = NoData;
 
 //
 
-/// Unlink a login. Response: [NoData].
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/UnlinkLogin",
+  description = "Unlink a login provider.",
+  request_body(content = UnlinkLogin),
+  responses(
+    (status = 200, description = "Login provider unlinked", body = UnlinkLoginResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn unlink_login() {}
+
+/// Unlink a login provider. Response: [NoData].
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -210,7 +350,22 @@ pub type UnlinkLoginResponse = NoData;
 
 //
 
-/// Update whether user skips 2fa. Response: [NoData].
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/UpdateExternalSkip2fa",
+  description = "Update whether the calling user skips 2fa when using external login method.",
+  request_body(content = UpdateExternalSkip2fa),
+  responses(
+    (status = 200, description = "External skip 2fa mode updated", body = UpdateExternalSkip2faResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+pub fn update_external_skip_2fa() {}
+
+/// Update whether the calling user skips 2fa when using external login method.
+/// Response: [NoData].
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

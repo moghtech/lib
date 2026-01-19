@@ -12,7 +12,6 @@ pub mod login;
 pub mod manage;
 pub mod named;
 pub mod oidc;
-pub mod openapi;
 
 /// This router should be nested without any additional middleware
 pub fn router<I: AuthImpl>() -> Router {

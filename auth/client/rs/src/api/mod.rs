@@ -4,6 +4,9 @@ use typeshare::typeshare;
 pub mod login;
 pub mod manage;
 
+#[cfg(feature = "utoipa")]
+pub mod external;
+
 /// Represents an empty json object: `{}`
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]

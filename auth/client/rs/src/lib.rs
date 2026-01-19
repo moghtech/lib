@@ -6,6 +6,9 @@ pub mod event;
 pub mod passkey;
 pub mod request;
 
+#[cfg(feature = "utoipa")]
+pub mod openapi;
+
 #[typeshare(serialized_as = "any")]
 pub type JsonValue = serde_json::Value;
 #[typeshare(serialized_as = "number")]

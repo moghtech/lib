@@ -101,19 +101,6 @@ async fn handler<I: AuthImpl>(
   res.map(|res| res.0)
 }
 
-#[utoipa::path(
-  post,
-  path = "/manage/UpdateExternalSkip2fa",
-  description = "Update whether the calling user skips 2fa when using external login method.",
-  request_body(content = UpdateExternalSkip2fa),
-  responses(
-    (status = 200, description = "External skip 2fa mode updated", body = NoData),
-    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 500, description = "Request failed", body = mogh_error::Serror)
-  ),
-)]
-pub fn update_external_skip_2fa() {}
-
 impl Resolve<ManageArgs> for UpdateExternalSkip2fa {
   async fn resolve(
     self,
