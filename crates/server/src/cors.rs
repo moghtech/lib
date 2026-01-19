@@ -21,11 +21,16 @@ pub trait CorsConfig {
 /// - Methods and headers are always allowed (Any)
 /// - Credentials are only allowed if `cors_allow_credentials` is true
 pub fn cors_layer(config: impl CorsConfig) -> CorsLayer {
+  let allowed_origins = config.allowed_origins();
   let mut cors = CorsLayer::new()
     .allow_methods(tower_http::cors::AllowMethods::mirror_request())
     .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
-    .allow_credentials(config.allow_credentials());
-  let allowed_origins = config.allowed_origins();
+    // Allow credentials only valid when allowed origins is not *
+    .allow_credentials(if allowed_origins.is_empty() {
+      false
+    } else {
+      config.allow_credentials()
+    });
   if allowed_origins.is_empty() {
     warn!(
       "CORS using allowed origin 'Any' (*). Use {} to configure specific origins.",
