@@ -2,10 +2,10 @@
   "name": "mogh_auth_client",
   "version": "0.1.0",
   "description": "Mogh auth client package",
-  "homepage": "https://mogh.tech/lib",
+  "repository": "https://github.com/moghtech/lib",
   "main": "dist/lib.js",
   "type": "module",
-  "license": "GPL-3.0",
+  "license": "MPL-2.0",
   "publishConfig": {
     "access": "public"
   },
