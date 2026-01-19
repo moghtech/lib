@@ -1,7 +1,8 @@
 use anyhow::Context;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{
-  Registry, layer::SubscriberExt, util::SubscriberInitExt,
+  Layer as _, Registry, filter::Targets, layer::SubscriberExt as _,
+  util::SubscriberInitExt,
 };
 
 mod config;
@@ -10,8 +11,19 @@ mod otel;
 pub use config::*;
 
 pub fn init(config: impl config::LogConfig) -> anyhow::Result<()> {
-  let registry =
-    Registry::default().with(LevelFilter::from(config.level()));
+  let mut filter_targets = Targets::new()
+    .with_default(config.level())
+    // Always exclude tower sessions, logs a lot at info level.
+    .with_target("tower-sessions", LevelFilter::OFF);
+
+  for target in config.filter_targets() {
+    filter_targets =
+      filter_targets.with_target(target, LevelFilter::OFF);
+  }
+
+  let registry = Registry::default().with(
+    tracing_subscriber::fmt::layer().with_filter(filter_targets),
+  );
 
   let use_otel = !config.otlp_endpoint().is_empty();
 

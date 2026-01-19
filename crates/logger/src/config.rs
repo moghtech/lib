@@ -48,4 +48,20 @@ pub trait LogConfig {
   fn opentelemetry_scope_name(&self) -> String {
     String::from("MoghApp")
   }
+
+  /// Always filters 'tower-sessions'.
+  /// Add additional crates to filter here:
+  ///
+  /// ```rust
+  /// fn filter_targets(&self) -> &[String] {
+  ///   static FILTER_TARGETS: LazyLock<Vec<String>> =
+  ///     LazyLock::new(|| {
+  ///       ["extra-crate"].into_iter().map(str::to_string).collect()
+  ///     });
+  ///   &FILTER_TARGETS
+  /// }
+  /// ```
+  fn filter_targets(&self) -> &[String] {
+    &[]
+  }
 }
