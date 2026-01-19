@@ -1,3 +1,3 @@
-[publish-ts-client]
+[publish-auth-ts-client]
 description = "Publish the typescript client to npm"
 cmd = "npm publish"
