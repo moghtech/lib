@@ -49,19 +49,18 @@ pub trait LogConfig {
     String::from("MoghApp")
   }
 
-  /// Always filters 'tower-sessions'.
-  /// Add additional crates to filter here:
+  /// Specify which module targets (eg the current binary) are included.
   ///
   /// ```rust
-  /// fn filter_targets(&self) -> &[String] {
-  ///   static FILTER_TARGETS: LazyLock<Vec<String>> =
+  /// fn targets(&self) -> &[String] {
+  ///   static TARGETS: LazyLock<Vec<String>> =
   ///     LazyLock::new(|| {
-  ///       ["extra-crate"].into_iter().map(str::to_string).collect()
+  ///       ["binary_name"].into_iter().map(str::to_string).collect()
   ///     });
-  ///   &FILTER_TARGETS
+  ///   &TARGETS
   /// }
   /// ```
-  fn filter_targets(&self) -> &[String] {
+  fn targets(&self) -> &[String] {
     &[]
   }
 }

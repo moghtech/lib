@@ -11,14 +11,12 @@ mod otel;
 pub use config::*;
 
 pub fn init(config: impl config::LogConfig) -> anyhow::Result<()> {
-  let mut filter_targets = Targets::new()
-    .with_default(config.level())
-    // Always exclude tower sessions, logs a lot at info level.
-    .with_target("tower-sessions", LevelFilter::OFF);
+  let mut filter_targets =
+    Targets::new().with_default(LevelFilter::OFF);
 
-  for target in config.filter_targets() {
+  for target in config.targets() {
     filter_targets =
-      filter_targets.with_target(target, LevelFilter::OFF);
+      filter_targets.with_target(target, config.level());
   }
 
   let registry = Registry::default().with(
