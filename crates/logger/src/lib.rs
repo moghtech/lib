@@ -1,8 +1,7 @@
 use anyhow::Context;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{
-  Layer as _, Registry, filter::Targets, layer::SubscriberExt as _,
-  util::SubscriberInitExt,
+  filter::Targets, layer::SubscriberExt as _, util::SubscriberInitExt,
 };
 
 mod config;
@@ -19,9 +18,7 @@ pub fn init(config: impl config::LogConfig) -> anyhow::Result<()> {
       filter_targets.with_target(target, config.level());
   }
 
-  let registry = Registry::default().with(
-    tracing_subscriber::fmt::layer().with_filter(filter_targets),
-  );
+  let registry = tracing_subscriber::registry().with(filter_targets);
 
   let use_otel = !config.otlp_endpoint().is_empty();
 
