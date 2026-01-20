@@ -92,7 +92,7 @@ der = "0.7.10"
 
 # ERROR
 anyhow = "1.0.100"
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 
 # LOGGING
 opentelemetry-otlp = { version = "0.31.0", features = ["tls-roots", "reqwest-rustls"] }
