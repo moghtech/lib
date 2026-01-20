@@ -32,20 +32,22 @@ pub async fn oidc_login<I: AuthImpl>(
   AuthExtractor(auth): AuthExtractor<I>,
   Query(RedirectQuery { redirect }): Query<RedirectQuery>,
 ) -> mogh_error::Result<Redirect> {
-  if !auth.oidc_config().enabled() {
+  let config = auth
+    .oidc_config()
+    .context("OIDC login is not set up")
+    .status_code(StatusCode::BAD_REQUEST)?;
+
+  if !config.enabled() {
     return Err(
       anyhow!("OIDC login is not enabled")
         .status_code(StatusCode::UNAUTHORIZED),
     );
   }
 
-  let provider = load_oidc_provider(
-    auth.app_name(),
-    auth.host(),
-    auth.oidc_config(),
-  )
-  .await
-  .context("OIDC Provider not available")?;
+  let provider =
+    load_oidc_provider(auth.app_name(), auth.host(), config)
+      .await
+      .context("OIDC Provider not available")?;
 
   let (pkce_challenge, pkce_verifier) =
     PkceCodeChallenge::new_random_sha256();
@@ -66,13 +68,18 @@ pub async fn oidc_login<I: AuthImpl>(
     })
     .await?;
 
-  auth_redirect(auth, auth_url.as_str())
+  auth_redirect(auth_url.as_str(), &config.redirect_host)
 }
 
 pub async fn oidc_link<I: AuthImpl>(
   AuthExtractor(auth): AuthExtractor<I>,
 ) -> mogh_error::Result<Redirect> {
-  if !auth.oidc_config().enabled() {
+  let config = auth
+    .oidc_config()
+    .context("OIDC login is not set up")
+    .status_code(StatusCode::BAD_REQUEST)?;
+
+  if !config.enabled() {
     return Err(
       anyhow!("OIDC login is not enabled")
         .status_code(StatusCode::UNAUTHORIZED),
@@ -88,14 +95,11 @@ pub async fn oidc_link<I: AuthImpl>(
   let user = auth.get_user(user_id.clone()).await?;
   auth.check_username_locked(user.username())?;
 
-  let provider = load_oidc_provider(
-    auth.app_name(),
-    auth.host(),
-    auth.oidc_config(),
-  )
-  .await
-  .context("OIDC provider not available")
-  .status_code(StatusCode::UNAUTHORIZED)?;
+  let provider =
+    load_oidc_provider(auth.app_name(), auth.host(), config)
+      .await
+      .context("OIDC provider not available")
+      .status_code(StatusCode::UNAUTHORIZED)?;
 
   let (pkce_challenge, pkce_verifier) =
     PkceCodeChallenge::new_random_sha256();
@@ -115,15 +119,14 @@ pub async fn oidc_link<I: AuthImpl>(
     })
     .await?;
 
-  auth_redirect(auth, auth_url.as_str())
+  auth_redirect(auth_url.as_str(), &config.redirect_host)
 }
 
 /// Applies 'oidc_redirect_host'
-fn auth_redirect<I: AuthImpl>(
-  auth: I,
+fn auth_redirect(
   auth_url: &str,
+  redirect_host: &str,
 ) -> mogh_error::Result<Redirect> {
-  let redirect_host = &auth.oidc_config().redirect_host;
   let redirect = if !redirect_host.is_empty() {
     let (protocol, rest) = auth_url
       .split_once("://")
@@ -147,7 +150,12 @@ pub async fn oidc_callback<I: AuthImpl>(
   Query(query): Query<StandardCallbackQuery>,
 ) -> mogh_error::Result<Redirect> {
   async {
-    if !auth.oidc_config().enabled() {
+    let config = auth
+      .oidc_config()
+      .context("OIDC login is not set up")
+      .status_code(StatusCode::BAD_REQUEST)?;
+
+    if !config.enabled() {
       return Err(
         anyhow!("OIDC login is not enabled")
           .status_code(StatusCode::UNAUTHORIZED),
@@ -161,13 +169,10 @@ pub async fn oidc_callback<I: AuthImpl>(
       );
     }
 
-    let provider = load_oidc_provider(
-      auth.app_name(),
-      auth.host(),
-      auth.oidc_config(),
-    )
-    .await
-    .context("OIDC Provider not available")?;
+    let provider =
+      load_oidc_provider(auth.app_name(), auth.host(), config)
+        .await
+        .context("OIDC Provider not available")?;
 
     let code = query.code.context("Provider did not return code")?;
     let state = CsrfToken::new(
@@ -192,7 +197,7 @@ pub async fn oidc_callback<I: AuthImpl>(
 
     let (subject, token) = provider
       .validate_extract_subject_and_token(
-        auth.oidc_config(),
+        config,
         (state, csrf_token),
         code,
         pkce_verifier,
@@ -230,7 +235,7 @@ pub async fn oidc_callback<I: AuthImpl>(
               .email()
               .map(|email| email.as_str())
               .unwrap_or(subject.as_str());
-            if auth.oidc_config().use_full_email {
+            if config.use_full_email {
               email
             } else {
               email
@@ -288,9 +293,14 @@ async fn link_oidc_callback<I: AuthImpl>(
   state: CsrfToken,
   code: String,
 ) -> mogh_error::Result<Redirect> {
+  let config = auth
+    .oidc_config()
+    .context("OIDC login is not set up")
+    .status_code(StatusCode::BAD_REQUEST)?;
+  
   let (subject, _) = provider
     .validate_extract_subject_and_token(
-      auth.oidc_config(),
+      config,
       (state, csrf_token),
       code,
       pkce_verifier,

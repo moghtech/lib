@@ -4,9 +4,12 @@ use std::{
 };
 
 use anyhow::{Context as _, anyhow};
-use axum::{extract::FromRequestParts, http::StatusCode};
+use axum::{
+  extract::{FromRequestParts, Request},
+  http::StatusCode,
+};
 use mogh_auth_client::{
-  api::login::LoginProvider,
+  api::{login::LoginProvider, manage::CreateApiKey},
   config::{NamedOauthConfig, OidcConfig},
   passkey::Passkey,
 };
@@ -16,6 +19,7 @@ use mogh_request_ip::get_ip_from_headers_and_extensions;
 use openidconnect::SubjectIdentifier;
 
 pub mod api;
+pub mod middleware;
 pub mod provider;
 pub mod rand;
 pub mod user;
@@ -27,7 +31,9 @@ use crate::{
   provider::{jwt::JwtProvider, passkey::PasskeyProvider},
   session::Session,
   user::BoxAuthUser,
-  validations::{validate_password, validate_username},
+  validations::{
+    validate_api_key_name, validate_password, validate_username,
+  },
 };
 
 pub mod request_ip {
@@ -69,6 +75,18 @@ impl<S: Send + Sync> FromRequestParts<S> for RequestClientArgs {
   }
 }
 
+#[derive(Clone)]
+pub enum RequestAuthentication {
+  /// The user ID comes from JWT, which is already validated by the JwtProvider.
+  UserId(String),
+  /// X-API-KEY and X-API-SECRET.
+  /// DANGER ⚠️ the key and secret must still be validated.
+  KeyAndSecret { key: String, secret: String },
+  /// X-API-SIGNATURE and X-API-TIMESTAMP. The handshake produces the public key.
+  /// DANGER ⚠️ the public key must still be validated as belonging to a particular client.
+  PublicKey(String),
+}
+
 /// This trait is implemented at the app level
 /// to support custom schemas, storage providers, and business logic.
 pub trait AuthImpl: Send + Sync + 'static {
@@ -82,12 +100,20 @@ pub trait AuthImpl: Send + Sync + 'static {
   fn client(&self) -> &RequestClientArgs;
 
   /// Provide a static app name for passkeys.
-  fn app_name(&self) -> &'static str;
+  fn app_name(&self) -> &'static str {
+    panic!(
+      "Must implement 'AuthImpl::app_name' in order for passkey 2fa to work."
+    )
+  }
 
   /// Provide the app 'host' config.
   /// This should include the path to where the auth server is nested,
   /// Ie if it is nested on /auth, this points to https://example.com/auth
-  fn host(&self) -> &str;
+  fn host(&self) -> &str {
+    panic!(
+      "Must implement 'AuthImpl::host' in order for external logins and other features to work."
+    )
+  }
 
   /// Disable new user registration.
   fn registration_disabled(&self) -> bool {
@@ -133,6 +159,14 @@ pub trait AuthImpl: Send + Sync + 'static {
     user_id: String,
   ) -> DynFuture<mogh_error::Result<BoxAuthUser>>;
 
+  /// Handle incoming request authentication in middleware.
+  /// Can attach a client struct as request extension here.
+  fn handle_request_authentication(
+    &self,
+    auth: RequestAuthentication,
+    req: Request,
+  ) -> DynFuture<mogh_error::Result<Request>>;
+
   // =========
   // = STATE =
   // =========
@@ -154,7 +188,11 @@ pub trait AuthImpl: Send + Sync + 'static {
   }
 
   /// Where to default redirect after linking an external login method.
-  fn post_link_redirect(&self) -> &str;
+  fn post_link_redirect(&self) -> &str {
+    panic!(
+      "Must implement 'AuthImpl::post_link_redirect' in order for linking to work. This is usually the application profile or settings page."
+    )
+  }
 
   // ==============
   // = LOCAL AUTH =
@@ -197,53 +235,73 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// The username and password have already been validated.
   fn sign_up_local_user(
     &self,
-    username: String,
-    hashed_password: String,
-    no_users_exist: bool,
-  ) -> DynFuture<mogh_error::Result<String>>;
+    _username: String,
+    _hashed_password: String,
+    _no_users_exist: bool,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    panic!(
+      "Must implement 'AuthImpl::sign_up_local_user' in order for local login to work."
+    )
+  }
 
   /// Finds user using the username, returning UNAUTHORIZED if none exists.
   fn find_user_with_username(
     &self,
-    username: String,
-  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>>;
+    _username: String,
+  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>> {
+    panic!(
+      "Must implement 'AuthImpl::find_user_with_username' in order for local login to work."
+    )
+  }
 
   fn update_user_username(
     &self,
-    user_id: String,
-    username: String,
-  ) -> DynFuture<mogh_error::Result<()>>;
+    _user_id: String,
+    _username: String,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!("Must implement 'AuthImpl::update_user_username'.")
+  }
 
   fn update_user_password(
     &self,
-    user_id: String,
-    hashed_password: String,
-  ) -> DynFuture<mogh_error::Result<()>>;
+    _user_id: String,
+    _hashed_password: String,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!("Must implement 'AuthImpl::update_user_password'.")
+  }
 
   // =============
   // = OIDC AUTH =
   // =============
 
-  fn oidc_config(&self) -> &OidcConfig;
+  fn oidc_config(&self) -> Option<&OidcConfig> {
+    None
+  }
 
   fn find_user_with_oidc_subject(
     &self,
-    subject: SubjectIdentifier,
-  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>>;
+    _subject: SubjectIdentifier,
+  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>> {
+    panic!("Must implement 'AuthImpl::find_user_with_oidc_subject'.")
+  }
 
   /// Returns created user id, or error.
   fn sign_up_oidc_user(
     &self,
-    username: String,
-    subject: SubjectIdentifier,
-    no_users_exist: bool,
-  ) -> DynFuture<mogh_error::Result<String>>;
+    _username: String,
+    _subject: SubjectIdentifier,
+    _no_users_exist: bool,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    panic!("Must implement 'AuthImpl::sign_up_oidc_user'.")
+  }
 
   fn link_oidc_login(
     &self,
-    user_id: String,
-    subject: SubjectIdentifier,
-  ) -> DynFuture<mogh_error::Result<()>>;
+    _user_id: String,
+    _subject: SubjectIdentifier,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!("Must implement 'AuthImpl::link_oidc_login'.")
+  }
 
   // ==============
   // = NAMED AUTH =
@@ -251,53 +309,69 @@ pub trait AuthImpl: Send + Sync + 'static {
 
   // = GITHUB =
 
-  fn github_config(&self) -> &NamedOauthConfig;
+  fn github_config(&self) -> Option<&NamedOauthConfig> {
+    None
+  }
 
   fn find_user_with_github_id(
     &self,
-    github_id: String,
-  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>>;
+    _github_id: String,
+  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>> {
+    panic!("Must implement 'AuthImpl::find_user_with_github_id'.")
+  }
 
   /// Returns created user id, or error.
   fn sign_up_github_user(
     &self,
-    username: String,
-    github_id: String,
-    avatar_url: String,
-    no_users_exist: bool,
-  ) -> DynFuture<mogh_error::Result<String>>;
+    _username: String,
+    _github_id: String,
+    _avatar_url: String,
+    _no_users_exist: bool,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    panic!("Must implement 'AuthImpl::sign_up_github_user'.")
+  }
 
   fn link_github_login(
     &self,
-    user_id: String,
-    github_id: String,
-    avatar_url: String,
-  ) -> DynFuture<mogh_error::Result<()>>;
+    _user_id: String,
+    _github_id: String,
+    _avatar_url: String,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!("Must implement 'AuthImpl::link_github_login'.")
+  }
 
   // = GOOGLE =
 
-  fn google_config(&self) -> &NamedOauthConfig;
+  fn google_config(&self) -> Option<&NamedOauthConfig> {
+    None
+  }
 
   fn find_user_with_google_id(
     &self,
-    google_id: String,
-  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>>;
+    _google_id: String,
+  ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>> {
+    panic!("Must implement 'AuthImpl::find_user_with_google_id'.")
+  }
 
   /// Returns created user id, or error.
   fn sign_up_google_user(
     &self,
-    username: String,
-    google_id: String,
-    avatar_url: String,
-    no_users_exist: bool,
-  ) -> DynFuture<mogh_error::Result<String>>;
+    _username: String,
+    _google_id: String,
+    _avatar_url: String,
+    _no_users_exist: bool,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    panic!("Must implement 'AuthImpl::sign_up_google_user'.")
+  }
 
   fn link_google_login(
     &self,
-    user_id: String,
-    google_id: String,
-    avatar_url: String,
-  ) -> DynFuture<mogh_error::Result<()>>;
+    _user_id: String,
+    _google_id: String,
+    _avatar_url: String,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!("Must implement 'AuthImpl::link_google_login'.")
+  }
 
   // ==========
   // = UNLINK =
@@ -305,9 +379,11 @@ pub trait AuthImpl: Send + Sync + 'static {
 
   fn unlink_login(
     &self,
-    user_id: String,
-    provider: LoginProvider,
-  ) -> DynFuture<mogh_error::Result<()>>;
+    _user_id: String,
+    _provider: LoginProvider,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!("Must implement 'AuthImpl::unlink_login'.")
+  }
 
   // ===============
   // = PASSKEY 2FA =
@@ -320,9 +396,11 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// unenrolling the user from passkey 2fa.
   fn update_user_stored_passkey(
     &self,
-    user_id: String,
-    passkey: Option<Passkey>,
-  ) -> DynFuture<mogh_error::Result<()>>;
+    _user_id: String,
+    _passkey: Option<Passkey>,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!("Must implement 'AuthImpl::update_user_stored_passkey'.")
+  }
 
   // ============
   // = TOTP 2FA =
@@ -330,15 +408,19 @@ pub trait AuthImpl: Send + Sync + 'static {
 
   fn update_user_stored_totp(
     &self,
-    user_id: String,
-    encoded_secret: String,
-    hashed_recovery_codes: Vec<String>,
-  ) -> DynFuture<mogh_error::Result<()>>;
+    _user_id: String,
+    _encoded_secret: String,
+    _hashed_recovery_codes: Vec<String>,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!("Must implement 'AuthImpl::update_user_stored_totp'.")
+  }
 
   fn remove_user_stored_totp(
     &self,
-    user_id: String,
-  ) -> DynFuture<mogh_error::Result<()>>;
+    _user_id: String,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!("Must implement 'AuthImpl::remove_user_stored_totp'.")
+  }
 
   fn make_totp(
     &self,
@@ -362,9 +444,87 @@ pub trait AuthImpl: Send + Sync + 'static {
   // ============
   fn update_user_external_skip_2fa(
     &self,
-    user_id: String,
-    external_skip_2fa: bool,
-  ) -> DynFuture<mogh_error::Result<()>>;
+    _user_id: String,
+    _external_skip_2fa: bool,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!(
+      "Must implement 'AuthImpl::update_user_external_skip_2fa'."
+    )
+  }
+
+  // ============
+  // = API KEYS =
+  // ============
+  /// Validate api key name.
+  fn validate_api_key_name(
+    &self,
+    api_key_name: &str,
+  ) -> mogh_error::Result<()> {
+    validate_api_key_name(api_key_name)
+      .status_code(StatusCode::BAD_REQUEST)
+  }
+
+  /// Set custom API key length. Default is 40.
+  fn api_key_secret_length(&self) -> usize {
+    40
+  }
+
+  /// Set the api secret hash bcrypt cost.
+  fn api_secret_bcrypt_cost(&self) -> u32 {
+    self.local_auth_bcrypt_cost()
+  }
+
+  fn create_api_key(
+    &self,
+    _user_id: String,
+    _body: CreateApiKey,
+    _key: String,
+    _hashed_secret: String,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!("Must implement 'AuthImpl::create_api_key'.")
+  }
+
+  fn get_api_key_user_id(
+    &self,
+    _key: String,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    panic!("Must implement 'AuthImpl::get_api_key_user_id'.")
+  }
+
+  fn delete_api_key(
+    &self,
+    _key: String,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    panic!("Must implement 'AuthImpl::delete_api_key'.")
+  }
+
+  /// Pass the server private key to use with api key v2 handshakes.
+  fn server_private_key(&self) -> Option<&str> {
+    None
+  }
+
+  fn create_api_key_v2(
+    &self,
+    _user_id: String,
+    _body: CreateApiKey,
+    _public_key: String,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    panic!("Must implement 'AuthImpl::create_api_key_v2'.")
+  }
+
+  fn get_api_key_v2_user_id(
+    &self,
+    _public_key: String,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    panic!("Must implement 'AuthImpl::get_api_key_v2_user_id'.")
+  }
+
+  fn delete_api_key_v2(
+    &self,
+    _public_key: String,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    panic!("Must implement 'AuthImpl::delete_api_key_v2'.")
+  }
 }
 
 /// Extract an implementer of AuthImpl from the request body.

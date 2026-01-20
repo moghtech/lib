@@ -31,14 +31,19 @@ pub async fn github_login<I: AuthImpl>(
   AuthExtractor(auth): AuthExtractor<I>,
   Query(RedirectQuery { redirect }): Query<RedirectQuery>,
 ) -> mogh_error::Result<Redirect> {
-  if !auth.github_config().enabled() {
+  let config = auth
+    .github_config()
+    .context("Github login is not set up")
+    .status_code(StatusCode::BAD_REQUEST)?;
+
+  if !config.enabled() {
     return Err(
       anyhow!("Github login is not enabled")
         .status_code(StatusCode::UNAUTHORIZED),
     );
   }
 
-  let provider = github_provider(auth.host(), auth.github_config())
+  let provider = github_provider(auth.host(), config)
     .context("Github provider not available")
     .status_code(StatusCode::UNAUTHORIZED)?;
 
@@ -53,7 +58,12 @@ pub async fn github_login<I: AuthImpl>(
 pub async fn github_link<I: AuthImpl>(
   AuthExtractor(auth): AuthExtractor<I>,
 ) -> mogh_error::Result<Redirect> {
-  if !auth.github_config().enabled() {
+  let config = auth
+    .github_config()
+    .context("Github login is not set up")
+    .status_code(StatusCode::BAD_REQUEST)?;
+
+  if !config.enabled() {
     return Err(
       anyhow!("Github login is not enabled")
         .status_code(StatusCode::UNAUTHORIZED),
@@ -67,7 +77,7 @@ pub async fn github_link<I: AuthImpl>(
   let user = auth.get_user(user_id.clone()).await?;
   auth.check_username_locked(user.username())?;
 
-  let provider = github_provider(auth.host(), auth.github_config())
+  let provider = github_provider(auth.host(), config)
     .context("Github provider not available")
     .status_code(StatusCode::UNAUTHORIZED)?;
 
@@ -84,7 +94,12 @@ pub async fn github_callback<I: AuthImpl>(
   Query(query): Query<StandardCallbackQuery>,
 ) -> mogh_error::Result<Redirect> {
   async {
-    if !auth.github_config().enabled() {
+    let config = auth
+      .github_config()
+      .context("Github login is not set up")
+      .status_code(StatusCode::BAD_REQUEST)?;
+
+    if !config.enabled() {
       return Err(
         anyhow!("Github login is not enabled")
           .status_code(StatusCode::UNAUTHORIZED),
@@ -93,7 +108,7 @@ pub async fn github_callback<I: AuthImpl>(
 
     let (client_state, code) = query.open()?;
 
-    let provider = github_provider(auth.host(), auth.github_config())
+    let provider = github_provider(auth.host(), config)
       .context("Github provider not available")
       .status_code(StatusCode::UNAUTHORIZED)?;
 

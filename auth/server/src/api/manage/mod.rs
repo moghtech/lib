@@ -16,6 +16,7 @@ use crate::{
   user::BoxAuthUser,
 };
 
+pub mod api_key;
 pub mod external;
 pub mod local;
 pub mod passkey;
@@ -57,6 +58,11 @@ pub enum ManageRequest {
   UnenrollTotp(UnenrollTotp),
   // SKIP 2FA
   UpdateExternalSkip2fa(UpdateExternalSkip2fa),
+  // API KEY
+  CreateApiKey(CreateApiKey),
+  DeleteApiKey(DeleteApiKey),
+  CreateApiKeyV2(CreateApiKeyV2),
+  DeleteApiKeyV2(DeleteApiKeyV2),
 }
 
 pub fn router<I: AuthImpl>() -> Router {

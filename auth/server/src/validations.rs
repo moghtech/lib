@@ -37,3 +37,16 @@ pub fn validate_password(password: &str) -> anyhow::Result<()> {
     .validate(password)
     .context("Failed to validate password")
 }
+
+/// Maximum length for API key names
+pub const MAX_API_KEY_NAME_LENGTH: usize = 200;
+
+/// Validate api key names
+///
+/// - Greater than [MAX_API_KEY_NAME_LENGTH] characters
+pub fn validate_api_key_name(name: &str) -> anyhow::Result<()> {
+  StringValidator::default()
+    .max_length(MAX_API_KEY_NAME_LENGTH)
+    .validate(name)
+    .context("Failed to validate api key name")
+}

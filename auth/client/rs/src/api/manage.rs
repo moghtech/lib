@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
 
 use crate::{
+  U64,
   api::{NoData, login::LoginProvider},
   passkey::{CreationChallengeResponse, RegisterPublicKeyCredential},
 };
@@ -379,3 +380,184 @@ pub struct UpdateExternalSkip2fa {
 
 #[typeshare]
 pub type UpdateExternalSkip2faResponse = NoData;
+
+//
+
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/CreateApiKey",
+  description = "Create an api key for the calling user.",
+  request_body(content = CreateApiKey),
+  responses(
+    (status = 200, description = "The api key and secret. The secret is not available again after this response is returned.", body = CreateApiKeyResponse),
+    (status = 400, description = "Invalid api key name", body = mogh_error::Serror),
+    (status = 500, description = "Failed", body = mogh_error::Serror),
+  ),
+)]
+pub fn create_api_key() {}
+
+/// Create an API key for the calling user.
+/// Response: [NoData].
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[empty_traits(MoghAuthManageRequest)]
+#[response(CreateApiKeyResponse)]
+#[error(mogh_error::Error)]
+pub struct CreateApiKey {
+  /// The name for the api key.
+  pub name: String,
+
+  /// A unix timestamp in millseconds specifying api key expire time.
+  /// Default is 0, which means no expiry.
+  #[serde(default)]
+  pub expires: U64,
+}
+
+/// Response for [CreateApiKey].
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct CreateApiKeyResponse {
+  /// X-API-KEY
+  pub key: String,
+
+  /// X-API-SECRET
+  ///
+  /// Note.
+  /// There is no way to get the secret again after it is distributed in this response
+  pub secret: String,
+}
+
+//
+
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/DeleteApiKey",
+  description = "Delete an api key for the calling user.",
+  request_body(content = DeleteApiKey),
+  responses(
+    (status = 200, description = "Api key deleted.", body = DeleteApiKeyResponse),
+    (status = 404, description = "Api key not found.", body = mogh_error::Serror),
+    (status = 500, description = "Failed", body = mogh_error::Serror),
+  ),
+)]
+pub fn delete_api_key() {}
+
+/// Delete an API key for the calling user.
+/// Response: [NoData].
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[empty_traits(MoghAuthManageRequest)]
+#[response(DeleteApiKeyResponse)]
+#[error(mogh_error::Error)]
+pub struct DeleteApiKey {
+  /// The key which the user intends to delete.
+  pub key: String,
+}
+
+/// Response for [DeleteApiKey].
+#[typeshare]
+pub type DeleteApiKeyResponse = NoData;
+
+//
+
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/CreateApiKeyV2",
+  description = "Create an api key (v2) for the calling user.",
+  request_body(content = CreateApiKeyV2),
+  responses(
+    (status = 200, description = "The private key, if one was generated.", body = CreateApiKeyV2Response),
+    (status = 400, description = "Invalid api key name", body = mogh_error::Serror),
+    (status = 500, description = "Failed", body = mogh_error::Serror),
+  ),
+)]
+pub fn create_api_key_v2() {}
+
+/// Create an API key (v2) for the calling user.
+/// Response: [NoData].
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[empty_traits(MoghAuthManageRequest)]
+#[response(CreateApiKeyV2Response)]
+#[error(mogh_error::Error)]
+pub struct CreateApiKeyV2 {
+  /// The name for the api key.
+  pub name: String,
+
+  /// A unix timestamp in millseconds specifying api key expire time.
+  /// Default is 0, which means no expiry.
+  #[serde(default)]
+  pub expires: U64,
+
+  /// Optionally provide a pre-existing public key.
+  /// Otherwise, a private key will be generated and
+  /// returned in the response
+  #[serde(default)]
+  pub public_key: String,
+}
+
+/// Response for [CreateApiKeyV2].
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct CreateApiKeyV2Response {
+  /// Used to sign requests for authentication
+  /// without transmitting the key itself.
+  ///
+  /// The server will store the associated public key.
+  ///
+  /// If user provides a pre-existing public key,
+  /// this field will be null.
+  pub private_key: Option<String>,
+}
+
+//
+
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/manage/DeleteApiKeyV2",
+  description = "Create an api key (v2) for the calling user.",
+  request_body(content = DeleteApiKeyV2),
+  responses(
+    (status = 200, description = "The private key, if one was generated.", body = DeleteApiKeyV2Response),
+    (status = 400, description = "Invalid api key name", body = mogh_error::Serror),
+    (status = 500, description = "Failed", body = mogh_error::Serror),
+  ),
+)]
+pub fn delete_api_key_v2() {}
+
+/// Delete an API key (v2) for the calling user.
+/// Response: [NoData].
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[empty_traits(MoghAuthManageRequest)]
+#[response(DeleteApiKeyV2Response)]
+#[error(mogh_error::Error)]
+pub struct DeleteApiKeyV2 {
+  /// The name for the api key.
+  pub name: String,
+
+  /// A unix timestamp in millseconds specifying api key expire time.
+  /// Default is 0, which means no expiry.
+  #[serde(default)]
+  pub expires: U64,
+
+  /// Optionally provide a pre-existing public key.
+  /// Otherwise, a private key will be generated and
+  /// returned in the response
+  #[serde(default)]
+  pub public_key: String,
+}
+
+/// Response for [DeleteApiKeyV2].
+#[typeshare]
+pub type DeleteApiKeyV2Response = NoData;

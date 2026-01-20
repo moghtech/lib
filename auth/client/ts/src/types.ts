@@ -28,6 +28,12 @@ export type CompleteTotpLoginResponse = JwtResponse;
 /** Response for [ConfirmPasskeyEnrollment]. */
 export type ConfirmPasskeyEnrollmentResponse = NoData;
 
+/** Response for [DeleteApiKey]. */
+export type DeleteApiKeyResponse = NoData;
+
+/** Response for [DeleteApiKeyV2]. */
+export type DeleteApiKeyV2Response = NoData;
+
 /** Response for [ExchangeForJwt]. */
 export type ExchangeForJwtResponse = JwtResponse;
 
@@ -143,6 +149,96 @@ export interface ConfirmTotpEnrollment {
 /** Response for [ConfirmTotpEnrollment]. */
 export interface ConfirmTotpEnrollmentResponse {
 	recovery_codes: string[];
+}
+
+/**
+ * Create an API key for the calling user.
+ * Response: [NoData].
+ */
+export interface CreateApiKey {
+	/** The name for the api key. */
+	name: string;
+	/**
+	 * A unix timestamp in millseconds specifying api key expire time.
+	 * Default is 0, which means no expiry.
+	 */
+	expires?: U64;
+}
+
+/** Response for [CreateApiKey]. */
+export interface CreateApiKeyResponse {
+	/** X-API-KEY */
+	key: string;
+	/**
+	 * X-API-SECRET
+	 * 
+	 * Note.
+	 * There is no way to get the secret again after it is distributed in this response
+	 */
+	secret: string;
+}
+
+/**
+ * Create an API key (v2) for the calling user.
+ * Response: [NoData].
+ */
+export interface CreateApiKeyV2 {
+	/** The name for the api key. */
+	name: string;
+	/**
+	 * A unix timestamp in millseconds specifying api key expire time.
+	 * Default is 0, which means no expiry.
+	 */
+	expires?: U64;
+	/**
+	 * Optionally provide a pre-existing public key.
+	 * Otherwise, a private key will be generated and
+	 * returned in the response
+	 */
+	public_key?: string;
+}
+
+/** Response for [CreateApiKeyV2]. */
+export interface CreateApiKeyV2Response {
+	/**
+	 * Used to sign requests for authentication
+	 * without transmitting the key itself.
+	 * 
+	 * The server will store the associated public key.
+	 * 
+	 * If user provides a pre-existing public key,
+	 * this field will be null.
+	 */
+	private_key?: string;
+}
+
+/**
+ * Delete an API key for the calling user.
+ * Response: [NoData].
+ */
+export interface DeleteApiKey {
+	/** The key which the user intends to delete. */
+	key: string;
+}
+
+/**
+ * Delete an API key (v2) for the calling user.
+ * Response: [NoData].
+ */
+export interface DeleteApiKeyV2 {
+	/** The name for the api key. */
+	name: string;
+	/**
+	 * A unix timestamp in millseconds specifying api key expire time.
+	 * Default is 0, which means no expiry.
+	 */
+	expires?: U64;
+	/**
+	 * Optionally provide a pre-existing public key.
+	 * Otherwise, a private key will be generated and
+	 * returned in the response
+	 */
+	public_key?: string;
 }
 
 /**
@@ -278,7 +374,11 @@ export type ManageRequest =
 	| { type: "BeginTotpEnrollment", params: BeginTotpEnrollment }
 	| { type: "ConfirmTotpEnrollment", params: ConfirmTotpEnrollment }
 	| { type: "UnenrollTotp", params: UnenrollTotp }
-	| { type: "UpdateExternalSkip2fa", params: UpdateExternalSkip2fa };
+	| { type: "UpdateExternalSkip2fa", params: UpdateExternalSkip2fa }
+	| { type: "CreateApiKey", params: CreateApiKey }
+	| { type: "DeleteApiKey", params: DeleteApiKey }
+	| { type: "CreateApiKeyV2", params: CreateApiKeyV2 }
+	| { type: "DeleteApiKeyV2", params: DeleteApiKeyV2 };
 
 /** JSON containing either an authentication token or the required 2fa auth check. */
 export type UserIdOrTwoFactor = 

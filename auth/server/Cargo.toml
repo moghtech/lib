@@ -1,7 +1,7 @@
 [package]
 name = "mogh_auth_server"
 description = "Implements the Mogh Auth Server embedded API."
-version = "1.0.0"
+version = "1.1.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -15,6 +15,7 @@ mogh_validations.workspace = true
 mogh_request_ip.workspace = true
 mogh_rate_limit.workspace = true
 mogh_resolver.workspace = true
+mogh_pki.workspace = true
 # EXTERNAL
 tower-sessions.workspace = true
 data-encoding.workspace = true

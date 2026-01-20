@@ -26,4 +26,9 @@ export type ManageResponses = {
   UnenrollTotp: Types.UnenrollTotpResponse;
   // Skip
   UpdateExternalSkip2fa: Types.UpdateExternalSkip2faResponse;
+  // API KEY
+  CreateApiKey: Types.CreateApiKeyResponse;
+  DeleteApiKey: Types.DeleteApiKeyResponse;
+  CreateApiKeyV2: Types.CreateApiKeyV2Response;
+  DeleteApiKeyV2: Types.DeleteApiKeyV2Response;
 };

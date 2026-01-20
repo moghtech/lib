@@ -34,6 +34,11 @@ mod auth {
     auth::unenroll_totp,
     // Skip 2FA
     auth::update_external_skip_2fa,
+    // Api key
+    auth::create_api_key,
+    auth::delete_api_key,
+    auth::create_api_key_v2,
+    auth::delete_api_key_v2,
     // =============
     // = PROVIDERS =
     // =============
