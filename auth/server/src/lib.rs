@@ -495,7 +495,7 @@ pub trait AuthImpl: Send + Sync + 'static {
   fn delete_api_key(
     &self,
     _key: String,
-  ) -> DynFuture<mogh_error::Result<String>> {
+  ) -> DynFuture<mogh_error::Result<()>> {
     panic!("Must implement 'AuthImpl::delete_api_key'.")
   }
 
@@ -523,7 +523,7 @@ pub trait AuthImpl: Send + Sync + 'static {
   fn delete_api_key_v2(
     &self,
     _public_key: String,
-  ) -> DynFuture<mogh_error::Result<String>> {
+  ) -> DynFuture<mogh_error::Result<()>> {
     panic!("Must implement 'AuthImpl::delete_api_key_v2'.")
   }
 }
