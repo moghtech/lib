@@ -158,9 +158,11 @@ pub fn extract_request_public_key<I: AuthImpl>(
 
   let mut handshake = OneWayNoiseHandshake::new_responder(
     &Pkcs8PrivateKey::maybe_raw_bytes(
-      auth.server_private_key().context(
-        "Missing server private key for request handshake",
-      )?,
+      auth
+        .server_private_key()
+        .context("Missing server private key for request handshake")?
+        .load()
+        .private(),
     )?,
     prologue.as_bytes(),
   )?;

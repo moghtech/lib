@@ -14,6 +14,7 @@ use mogh_auth_client::{
   passkey::Passkey,
 };
 use mogh_error::{AddStatusCode, AddStatusCodeError};
+use mogh_pki::RotatableKeyPair;
 use mogh_rate_limit::RateLimiter;
 use mogh_request_ip::get_ip_from_headers_and_extensions;
 use openidconnect::SubjectIdentifier;
@@ -499,7 +500,7 @@ pub trait AuthImpl: Send + Sync + 'static {
   }
 
   /// Pass the server private key to use with api key v2 handshakes.
-  fn server_private_key(&self) -> Option<&str> {
+  fn server_private_key(&self) -> Option<&RotatableKeyPair> {
     None
   }
 
