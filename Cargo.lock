@@ -1763,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_server"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "arc-swap",

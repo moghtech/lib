@@ -1,4 +1,4 @@
-use std::{net::IpAddr, time::Instant};
+use std::net::IpAddr;
 
 use axum::{Router, extract::Path, routing::post};
 use mogh_auth_client::api::login::*;
@@ -68,21 +68,26 @@ async fn handler<I: AuthImpl>(
   session: Session,
   Json(request): Json<LoginRequest>,
 ) -> mogh_error::Result<axum::response::Response> {
-  let timer = Instant::now();
   let req_id = Uuid::new_v4();
   let method: LoginRequestMethod = (&request).into();
+
   debug!("AUTH LOGIN {req_id} | METHOD: {method}",);
+
   let args = LoginArgs {
     auth: Box::new(I::new()),
     session,
     ip,
   };
+
   let res = request.resolve(&args).await;
+
   if let Err(e) = &res {
-    debug!("AUTH LOGIN {req_id} | METHOD: {method} | error: {:#}", e.error);
+    debug!(
+      "AUTH LOGIN {req_id} | METHOD: {method} | ERROR: {:#}",
+      e.error
+    );
   }
-  let elapsed = timer.elapsed();
-  debug!("AUTH LOGIN {req_id} | METHOD: {method} | resolve time: {elapsed:?}");
+
   res.map(|res| res.0)
 }
 

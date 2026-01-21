@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use axum::{Router, extract::Path, routing::post};
 use mogh_auth_client::api::{NoData, manage::*};
@@ -91,30 +91,30 @@ async fn handler<I: AuthImpl>(
   UserExtractor(user): UserExtractor,
   Json(request): Json<ManageRequest>,
 ) -> mogh_error::Result<axum::response::Response> {
-  let timer = Instant::now();
   let req_id = Uuid::new_v4();
   let method: ManageRequestMethod = (&request).into();
   let username = user.username();
   let user_id = user.id();
+
   debug!(
     "AUTH MANAGE REQUEST {req_id} | METHOD: {method} | USER: {username} ({user_id})",
   );
+
   let args = ManageArgs {
     auth: Box::new(I::new()),
     user,
     session,
   };
+
   let res = request.resolve(&args).await;
+
   if let Err(e) = &res {
     debug!(
       "AUTH MANAGE REQUEST {req_id} | METHOD: {method} | error: {:#}",
       e.error
     );
   }
-  let elapsed = timer.elapsed();
-  debug!(
-    "AUTH MANAGE REQUEST {req_id} | METHOD: {method} | resolve time: {elapsed:?}"
-  );
+
   res.map(|res| res.0)
 }
 
