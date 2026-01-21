@@ -30,8 +30,8 @@ mogh_validations = { path = "crates/validations" }
 
 [workspace.dependencies]
 # MOGH API
-mogh_auth_client = "1.1.0"
-mogh_auth_server = "1.1.2"
+mogh_auth_client = "1.2.0"
+mogh_auth_server = "1.2.0"
 
 # MOGH
 mogh_cache = "1.0.0"
