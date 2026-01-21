@@ -30,7 +30,7 @@ where
 }
 
 #[cfg(feature = "blocking")]
-fn login<T>(
+pub fn login<T>(
   reqwest: &reqwest::blocking::Client,
   address: &str,
   request: T,
@@ -73,7 +73,7 @@ where
 }
 
 #[cfg(feature = "blocking")]
-fn manage<T>(
+pub fn manage<T>(
   reqwest: &reqwest::blocking::Client,
   address: &str,
   request: T,
