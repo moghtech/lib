@@ -12,19 +12,19 @@ use typeshare::typeshare;
 use uuid::Uuid;
 
 use crate::{
-  AuthImpl, BoxAuthImpl,
-  api::{Variant, manage::middleware::UserExtractor},
-  middleware::authenticate_request,
-  session::Session,
+  AuthImpl, BoxAuthImpl, api::Variant, session::Session,
   user::BoxAuthUser,
 };
 
 pub mod api_key;
 pub mod external;
 pub mod local;
-pub mod middleware;
 pub mod passkey;
 pub mod totp;
+
+mod middleware;
+
+use middleware::{UserExtractor, attach_user};
 
 pub struct ManageArgs {
   auth: BoxAuthImpl,
@@ -70,7 +70,7 @@ pub fn router<I: AuthImpl>() -> Router {
   Router::new()
     .route("/", post(handler::<I>))
     .route("/{variant}", post(variant_handler::<I>))
-    .layer(axum::middleware::from_fn(authenticate_request::<I>))
+    .layer(axum::middleware::from_fn(attach_user::<I>))
 }
 
 async fn variant_handler<I: AuthImpl>(

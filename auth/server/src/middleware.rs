@@ -17,14 +17,17 @@ use crate::{
   AuthImpl, RequestAuthentication, provider::jwt::JwtProvider,
 };
 
-pub async fn authenticate_request<I: AuthImpl>(
+pub async fn authenticate_request<
+  I: AuthImpl,
+  const REQUIRE_USER_ENABLED: bool,
+>(
   RequestIp(ip): RequestIp,
   OriginalUri(uri): OriginalUri,
   req: Request,
   next: Next,
 ) -> mogh_error::Result<Response> {
   let auth = I::new();
-  
+
   let req_auth = extract_request_authentication(
     &auth,
     req.method(),
@@ -35,7 +38,11 @@ pub async fn authenticate_request<I: AuthImpl>(
   .status_code(StatusCode::UNAUTHORIZED)?;
 
   let req = auth
-    .handle_request_authentication(req_auth, req)
+    .handle_request_authentication(
+      req_auth,
+      REQUIRE_USER_ENABLED,
+      req,
+    )
     .with_failure_rate_limit_using_ip(
       auth.general_rate_limiter(),
       &ip,

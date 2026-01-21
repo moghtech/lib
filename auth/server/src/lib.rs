@@ -123,6 +123,7 @@ pub trait AuthImpl: Send + Sync + 'static {
   fn handle_request_authentication(
     &self,
     auth: RequestAuthentication,
+    require_user_enabled: bool,
     req: Request,
   ) -> DynFuture<mogh_error::Result<Request>>;
 
