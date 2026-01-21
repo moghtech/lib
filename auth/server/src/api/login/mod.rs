@@ -71,7 +71,7 @@ async fn handler<I: AuthImpl>(
   let timer = Instant::now();
   let req_id = Uuid::new_v4();
   let method: LoginRequestMethod = (&request).into();
-  debug!("/auth/login request {req_id} | METHOD: {method}",);
+  debug!("AUTH LOGIN {req_id} | METHOD: {method}",);
   let args = LoginArgs {
     auth: Box::new(I::new()),
     session,
@@ -79,10 +79,10 @@ async fn handler<I: AuthImpl>(
   };
   let res = request.resolve(&args).await;
   if let Err(e) = &res {
-    debug!("/auth/login request {req_id} | error: {:#}", e.error);
+    debug!("AUTH LOGIN {req_id} | METHOD: {method} | error: {:#}", e.error);
   }
   let elapsed = timer.elapsed();
-  debug!("/auth/login request {req_id} | resolve time: {elapsed:?}");
+  debug!("AUTH LOGIN {req_id} | METHOD: {method} | resolve time: {elapsed:?}");
   res.map(|res| res.0)
 }
 

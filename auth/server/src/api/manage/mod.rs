@@ -94,7 +94,11 @@ async fn handler<I: AuthImpl>(
   let timer = Instant::now();
   let req_id = Uuid::new_v4();
   let method: ManageRequestMethod = (&request).into();
-  debug!("/auth/manage request {req_id} | METHOD: {method}");
+  let username = user.username();
+  let user_id = user.id();
+  debug!(
+    "AUTH MANAGE REQUEST {req_id} | METHOD: {method} | USER: {username} ({user_id})",
+  );
   let args = ManageArgs {
     auth: Box::new(I::new()),
     user,
@@ -102,10 +106,15 @@ async fn handler<I: AuthImpl>(
   };
   let res = request.resolve(&args).await;
   if let Err(e) = &res {
-    debug!("/auth/login request {req_id} | error: {:#}", e.error);
+    debug!(
+      "AUTH MANAGE REQUEST {req_id} | METHOD: {method} | error: {:#}",
+      e.error
+    );
   }
   let elapsed = timer.elapsed();
-  debug!("/auth/login request {req_id} | resolve time: {elapsed:?}");
+  debug!(
+    "AUTH MANAGE REQUEST {req_id} | METHOD: {method} | resolve time: {elapsed:?}"
+  );
   res.map(|res| res.0)
 }
 
