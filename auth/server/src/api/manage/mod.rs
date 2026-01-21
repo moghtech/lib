@@ -12,23 +12,24 @@ use typeshare::typeshare;
 use uuid::Uuid;
 
 use crate::{
-  AuthExtractor, AuthImpl, BoxAuthImpl, api::Variant,
+  AuthImpl, BoxAuthImpl,
+  api::{Variant, manage::middleware::UserExtractor},
+  middleware::authenticate_request,
+  session::Session,
   user::BoxAuthUser,
 };
 
 pub mod api_key;
 pub mod external;
 pub mod local;
+pub mod middleware;
 pub mod passkey;
 pub mod totp;
-
-mod middleware;
-
-use middleware::*;
 
 pub struct ManageArgs {
   auth: BoxAuthImpl,
   user: Arc<BoxAuthUser>,
+  session: Session,
 }
 
 #[typeshare]
@@ -69,11 +70,11 @@ pub fn router<I: AuthImpl>() -> Router {
   Router::new()
     .route("/", post(handler::<I>))
     .route("/{variant}", post(variant_handler::<I>))
-    .layer(axum::middleware::from_fn(attach_user::<I>))
+    .layer(axum::middleware::from_fn(authenticate_request::<I>))
 }
 
 async fn variant_handler<I: AuthImpl>(
-  auth: AuthExtractor<I>,
+  session: Session,
   user: UserExtractor,
   Path(Variant { variant }): Path<Variant>,
   Json(params): Json<serde_json::Value>,
@@ -82,11 +83,11 @@ async fn variant_handler<I: AuthImpl>(
     "type": variant,
     "params": params,
   }))?;
-  handler::<I>(auth, user, Json(req)).await
+  handler::<I>(session, user, Json(req)).await
 }
 
 async fn handler<I: AuthImpl>(
-  AuthExtractor(auth): AuthExtractor<I>,
+  session: Session,
   UserExtractor(user): UserExtractor,
   Json(request): Json<ManageRequest>,
 ) -> mogh_error::Result<axum::response::Response> {
@@ -95,8 +96,9 @@ async fn handler<I: AuthImpl>(
   let method: ManageRequestMethod = (&request).into();
   debug!("/auth/manage request {req_id} | METHOD: {method}");
   let args = ManageArgs {
-    auth: Box::new(auth),
+    auth: Box::new(I::new()),
     user,
+    session,
   };
   let res = request.resolve(&args).await;
   if let Err(e) = &res {
@@ -110,7 +112,7 @@ async fn handler<I: AuthImpl>(
 impl Resolve<ManageArgs> for UpdateExternalSkip2fa {
   async fn resolve(
     self,
-    ManageArgs { auth, user }: &ManageArgs,
+    ManageArgs { auth, user, .. }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
     auth.check_username_locked(user.username())?;
     auth

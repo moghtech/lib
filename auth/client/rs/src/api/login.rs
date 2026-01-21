@@ -73,6 +73,8 @@ pub trait MoghAuthLoginRequest: HasResponse {}
 
 //
 
+#[allow(unused)]
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -83,7 +85,7 @@ pub trait MoghAuthLoginRequest: HasResponse {}
     (status = 200, description = "The available login options", body = GetLoginOptionsResponse)
   ),
 )]
-pub fn get_login_options() {}
+fn get_login_options() {}
 
 /// Get the available options to login, eg. local and external providers.
 /// Response: [GetLoginOptionsResponse].
@@ -114,6 +116,7 @@ pub struct GetLoginOptionsResponse {
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -126,7 +129,7 @@ pub struct GetLoginOptionsResponse {
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn exchange_for_jwt() {}
+fn exchange_for_jwt() {}
 
 /// Retrieve a JWT after completing third party login flows.
 /// Response: [ExchangeForJwtResponse].
@@ -144,6 +147,7 @@ pub type ExchangeForJwtResponse = JwtResponse;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -156,7 +160,7 @@ pub type ExchangeForJwtResponse = JwtResponse;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn sign_up_local_user() {}
+fn sign_up_local_user() {}
 
 /// Sign up a new local user account.
 /// Response: [SignUpLocalUserResponse].
@@ -180,6 +184,7 @@ pub type SignUpLocalUserResponse = JwtResponse;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -192,7 +197,7 @@ pub type SignUpLocalUserResponse = JwtResponse;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn login_local_user() {}
+fn login_local_user() {}
 
 /// Login as a local user.
 #[typeshare]
@@ -214,6 +219,7 @@ pub type LoginLocalUserResponse = JwtOrTwoFactor;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -226,7 +232,7 @@ pub type LoginLocalUserResponse = JwtOrTwoFactor;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn complete_passkey_login() {}
+fn complete_passkey_login() {}
 
 /// Complete login using passkey as second factor.
 /// Response: [CompletePasskeyLoginResponse].
@@ -246,6 +252,7 @@ pub type CompletePasskeyLoginResponse = JwtResponse;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -258,7 +265,7 @@ pub type CompletePasskeyLoginResponse = JwtResponse;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn complete_totp_login() {}
+fn complete_totp_login() {}
 
 /// Complete login using TOTP code as second factor.
 /// Response: [CompleteTotpLoginResponse].

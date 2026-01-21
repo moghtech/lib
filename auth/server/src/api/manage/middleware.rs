@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use axum::{
-  extract::{FromRequestParts, Request},
+  extract::{FromRequestParts, OriginalUri, Request},
   http::StatusCode,
   middleware::Next,
   response::Response,
 };
 use mogh_error::AddStatusCode;
 
-use crate::{AuthExtractor, AuthImpl, user::BoxAuthUser};
+use crate::{
+  AuthImpl, middleware::extract_request_authentication,
+  user::BoxAuthUser,
+};
 
 #[derive(Clone)]
 pub struct UserExtractor(pub Arc<BoxAuthUser>);
@@ -30,26 +33,29 @@ impl<S: Send + Sync> FromRequestParts<S> for UserExtractor {
   }
 }
 
-/// Requires 'Authorization' header including jwt
 pub async fn attach_user<I: AuthImpl>(
-  AuthExtractor(auth): AuthExtractor<I>,
+  OriginalUri(uri): OriginalUri,
   mut req: Request,
   next: Next,
 ) -> mogh_error::Result<Response> {
-  let jwt = req
-    .headers()
-    .get("authorization")
-    .context("Missing authorization header")?
-    .to_str()
-    .context("Authorization header is not valid UTF-8")?;
-  // Strip the "Bearer" prefix, if there
-  let jwt = jwt.strip_prefix("Bearer ").unwrap_or(jwt);
+  let auth = I::new();
+
+  let req_auth = extract_request_authentication(
+    &auth,
+    req.method(),
+    &uri,
+    req.headers(),
+  )?
+  .context("Invalid client credentials")
+  .status_code(StatusCode::UNAUTHORIZED)?;
+
   let user_id = auth
-    .jwt_provider()
-    .decode_sub(jwt)
-    .map_err(|_| anyhow!("Invalid authorization token"))
-    .status_code(StatusCode::UNAUTHORIZED)?;
+    .get_user_id_from_request_authentication(req_auth)
+    .await?;
+
   let user = auth.get_user(user_id).await?;
+
   req.extensions_mut().insert(UserExtractor(Arc::new(user)));
+
   Ok(next.run(req).await)
 }

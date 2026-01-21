@@ -5,21 +5,19 @@ use mogh_error::AddStatusCode;
 use mogh_rate_limit::WithFailureRateLimit;
 use mogh_resolver::Resolve;
 
-use crate::BoxAuthImpl;
+use crate::api::login::LoginArgs;
 
-impl Resolve<BoxAuthImpl> for CompletePasskeyLogin {
+impl Resolve<LoginArgs> for CompletePasskeyLogin {
   async fn resolve(
     self,
-    auth: &BoxAuthImpl,
+    LoginArgs { auth, session, ip }: &LoginArgs,
   ) -> Result<Self::Response, Self::Error> {
     async {
       let provider = auth.passkey_provider().context(
         "No passkey provider available, possibly invalid 'host' config.",
       )?;
 
-      let (user_id, state) = auth
-        .client()
-        .session
+      let (user_id, state) = session
         .retrieve_passkey_login()
         .await?;
 
@@ -48,7 +46,7 @@ impl Resolve<BoxAuthImpl> for CompletePasskeyLogin {
     }
     .with_failure_rate_limit_using_ip(
       auth.general_rate_limiter(),
-      &auth.client().ip,
+      &ip,
     )
     .await
   }

@@ -6,6 +6,7 @@ pub mod event;
 pub mod passkey;
 pub mod request;
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 pub mod openapi;
 

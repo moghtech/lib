@@ -6,7 +6,7 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use utoipa::ToSchema;
 
-use crate::{AuthImpl, user::BoxAuthUser};
+use crate::{AuthImpl, session::Session, user::BoxAuthUser};
 
 pub mod login;
 pub mod manage;
@@ -89,6 +89,7 @@ fn format_redirect(
 
 async fn get_user_id_or_two_factor<I: AuthImpl>(
   auth: &I,
+  session: &Session,
   user: &BoxAuthUser,
 ) -> mogh_error::Result<UserIdOrTwoFactor> {
   let res = match (
@@ -98,11 +99,7 @@ async fn get_user_id_or_two_factor<I: AuthImpl>(
   ) {
     // Skip / No 2FA
     (true, _, _) | (false, None, None) => {
-      auth
-        .client()
-        .session
-        .insert_authenticated_user_id(user.id())
-        .await?;
+      session.insert_authenticated_user_id(user.id()).await?;
       UserIdOrTwoFactor::UserId(user.id().to_string())
     }
     // WebAuthn Passkey 2FA
@@ -113,20 +110,12 @@ async fn get_user_id_or_two_factor<I: AuthImpl>(
       let (response, state) = provider
         .start_passkey_authentication(passkey)
         .context("Failed to start passkey authentication flow")?;
-      auth
-        .client()
-        .session
-        .insert_passkey_login(user.id(), &state)
-        .await?;
+      session.insert_passkey_login(user.id(), &state).await?;
       UserIdOrTwoFactor::Passkey(response)
     }
     // TOTP 2FA
     (false, None, Some(_)) => {
-      auth
-        .client()
-        .session
-        .insert_totp_login_user_id(user.id())
-        .await?;
+      session.insert_totp_login_user_id(user.id()).await?;
       UserIdOrTwoFactor::Totp {}
     }
   };

@@ -6,10 +6,11 @@ use axum::{
 use mogh_auth_client::api::login::UserIdOrTwoFactor;
 use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::WithFailureRateLimit;
+use mogh_request_ip::RequestIp;
 use openidconnect::{CsrfToken, PkceCodeChallenge};
 
 use crate::{
-  AuthExtractor, AuthImpl,
+  AuthImpl,
   api::{
     RedirectQuery, StandardCallbackQuery, get_user_id_or_two_factor,
     user_id_or_two_factor_redirect,
@@ -19,6 +20,7 @@ use crate::{
     load_oidc_provider,
   },
   rand::random_string,
+  session::Session,
 };
 
 pub fn router<I: AuthImpl>() -> Router {
@@ -29,97 +31,101 @@ pub fn router<I: AuthImpl>() -> Router {
 }
 
 pub async fn oidc_login<I: AuthImpl>(
-  AuthExtractor(auth): AuthExtractor<I>,
+  RequestIp(ip): RequestIp,
+  session: Session,
   Query(RedirectQuery { redirect }): Query<RedirectQuery>,
 ) -> mogh_error::Result<Redirect> {
-  let config = auth
-    .oidc_config()
-    .context("OIDC login is not set up")
-    .status_code(StatusCode::BAD_REQUEST)?;
+  let auth = I::new();
+  async {
+    let config = auth
+      .oidc_config()
+      .context("OIDC login is not set up")
+      .status_code(StatusCode::BAD_REQUEST)?;
 
-  if !config.enabled() {
-    return Err(
-      anyhow!("OIDC login is not enabled")
-        .status_code(StatusCode::UNAUTHORIZED),
-    );
+    if !config.enabled() {
+      return Err(
+        anyhow!("OIDC login is not enabled")
+          .status_code(StatusCode::UNAUTHORIZED),
+      );
+    }
+
+    let provider =
+      load_oidc_provider(auth.app_name(), auth.host(), config)
+        .await
+        .context("OIDC Provider not available")?;
+
+    let (pkce_challenge, pkce_verifier) =
+      PkceCodeChallenge::new_random_sha256();
+
+    // Generate the authorization URL.
+    let (auth_url, csrf_token, nonce) =
+      provider.authorize_url(pkce_challenge);
+
+    // Data inserted here will be matched on callback side for csrf protection.
+    session
+      .insert_oidc_login(&SessionOidcLogin {
+        csrf_token: csrf_token.secret().clone(),
+        pkce_verifier,
+        nonce,
+        redirect,
+      })
+      .await?;
+
+    auth_redirect(auth_url.as_str(), &config.redirect_host)
   }
-
-  let provider =
-    load_oidc_provider(auth.app_name(), auth.host(), config)
-      .await
-      .context("OIDC Provider not available")?;
-
-  let (pkce_challenge, pkce_verifier) =
-    PkceCodeChallenge::new_random_sha256();
-
-  // Generate the authorization URL.
-  let (auth_url, csrf_token, nonce) =
-    provider.authorize_url(pkce_challenge);
-
-  // Data inserted here will be matched on callback side for csrf protection.
-  auth
-    .client()
-    .session
-    .insert_oidc_login(&SessionOidcLogin {
-      csrf_token: csrf_token.secret().clone(),
-      pkce_verifier,
-      nonce,
-      redirect,
-    })
-    .await?;
-
-  auth_redirect(auth_url.as_str(), &config.redirect_host)
+  .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), &ip)
+  .await
 }
 
 pub async fn oidc_link<I: AuthImpl>(
-  AuthExtractor(auth): AuthExtractor<I>,
+  RequestIp(ip): RequestIp,
+  session: Session,
 ) -> mogh_error::Result<Redirect> {
-  let config = auth
-    .oidc_config()
-    .context("OIDC login is not set up")
-    .status_code(StatusCode::BAD_REQUEST)?;
+  let auth = I::new();
+  async {
+    let config = auth
+      .oidc_config()
+      .context("OIDC login is not set up")
+      .status_code(StatusCode::BAD_REQUEST)?;
 
-  if !config.enabled() {
-    return Err(
-      anyhow!("OIDC login is not enabled")
-        .status_code(StatusCode::UNAUTHORIZED),
-    );
+    if !config.enabled() {
+      return Err(
+        anyhow!("OIDC login is not enabled")
+          .status_code(StatusCode::UNAUTHORIZED),
+      );
+    }
+
+    let user_id = session.retrieve_external_link_user_id().await?;
+
+    let user = auth.get_user(user_id.clone()).await?;
+    auth.check_username_locked(user.username())?;
+
+    let provider =
+      load_oidc_provider(auth.app_name(), auth.host(), config)
+        .await
+        .context("OIDC provider not available")
+        .status_code(StatusCode::UNAUTHORIZED)?;
+
+    let (pkce_challenge, pkce_verifier) =
+      PkceCodeChallenge::new_random_sha256();
+
+    // Generate the authorization URL.
+    let (auth_url, csrf_token, nonce) =
+      provider.authorize_url(pkce_challenge);
+
+    session
+      .insert_oidc_link(&SessionOidcLink {
+        user_id,
+        csrf_token: csrf_token.secret().clone(),
+        pkce_verifier,
+        nonce,
+      })
+      .await?;
+
+    auth_redirect(auth_url.as_str(), &config.redirect_host)
   }
-
-  let user_id = auth
-    .client()
-    .session
-    .retrieve_external_link_user_id()
-    .await?;
-
-  let user = auth.get_user(user_id.clone()).await?;
-  auth.check_username_locked(user.username())?;
-
-  let provider =
-    load_oidc_provider(auth.app_name(), auth.host(), config)
-      .await
-      .context("OIDC provider not available")
-      .status_code(StatusCode::UNAUTHORIZED)?;
-
-  let (pkce_challenge, pkce_verifier) =
-    PkceCodeChallenge::new_random_sha256();
-
-  // Generate the authorization URL.
-  let (auth_url, csrf_token, nonce) =
-    provider.authorize_url(pkce_challenge);
-
-  auth
-    .client()
-    .session
-    .insert_oidc_link(&SessionOidcLink {
-      user_id,
-      csrf_token: csrf_token.secret().clone(),
-      pkce_verifier,
-      nonce,
-    })
-    .await?;
-
-  auth_redirect(auth_url.as_str(), &config.redirect_host)
+  .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), &ip)
+  .await
 }
 
 /// Applies 'oidc_redirect_host'
@@ -146,9 +152,11 @@ fn auth_redirect(
 }
 
 pub async fn oidc_callback<I: AuthImpl>(
-  AuthExtractor(auth): AuthExtractor<I>,
+  RequestIp(ip): RequestIp,
+  session: Session,
   Query(query): Query<StandardCallbackQuery>,
 ) -> mogh_error::Result<Redirect> {
+  let auth = I::new();
   async {
     let config = auth
       .oidc_config()
@@ -179,8 +187,6 @@ pub async fn oidc_callback<I: AuthImpl>(
       query.state.context("Provider did not return state")?,
     );
 
-    let session = &auth.client().session;
-
     // Check first if this is a link callback
     // and use the linking handler if so.
     if let Ok(Some(info)) = session.retrieve_oidc_link().await {
@@ -210,7 +216,9 @@ pub async fn oidc_callback<I: AuthImpl>(
 
     let user_id_or_two_factor = match user {
       // Log in existing user
-      Some(user) => get_user_id_or_two_factor(&auth, &user).await?,
+      Some(user) => {
+        get_user_id_or_two_factor(&auth, &session, &user).await?
+      }
       // Sign up user
       None => {
         let no_users_exist = auth.no_users_exist().await?;
@@ -272,10 +280,7 @@ pub async fn oidc_callback<I: AuthImpl>(
       redirect.as_deref(),
     )
   }
-  .with_failure_rate_limit_using_ip(
-    auth.general_rate_limiter(),
-    &auth.client().ip,
-  )
+  .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), &ip)
   .await
 }
 
@@ -297,7 +302,7 @@ async fn link_oidc_callback<I: AuthImpl>(
     .oidc_config()
     .context("OIDC login is not set up")
     .status_code(StatusCode::BAD_REQUEST)?;
-  
+
   let (subject, _) = provider
     .validate_extract_subject_and_token(
       config,

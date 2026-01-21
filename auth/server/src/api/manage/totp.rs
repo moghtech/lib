@@ -10,6 +10,7 @@ use mogh_error::AddStatusCodeError as _;
 use mogh_resolver::Resolve;
 
 use crate::{
+  AuthImpl,
   api::manage::ManageArgs,
   rand::{random_bytes, random_string},
 };
@@ -22,7 +23,11 @@ const TOTP_ENROLLMENT_SECRET_LENGTH: usize = 40;
 impl Resolve<ManageArgs> for BeginTotpEnrollment {
   async fn resolve(
     self,
-    ManageArgs { auth, user }: &ManageArgs,
+    ManageArgs {
+      auth,
+      user,
+      session,
+    }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
     auth.check_username_locked(user.username())?;
 
@@ -37,7 +42,7 @@ impl Resolve<ManageArgs> for BeginTotpEnrollment {
       .context("Failed to generate QR code png")?;
     let uri = totp.get_url();
 
-    auth.client().session.insert_totp_enrollment(&totp).await?;
+    session.insert_totp_enrollment(&totp).await?;
 
     Ok(BeginTotpEnrollmentResponse { uri, png })
   }
@@ -48,10 +53,13 @@ impl Resolve<ManageArgs> for BeginTotpEnrollment {
 impl Resolve<ManageArgs> for ConfirmTotpEnrollment {
   async fn resolve(
     self,
-    ManageArgs { auth, user }: &ManageArgs,
+    ManageArgs {
+      auth,
+      user,
+      session,
+    }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
-    let totp =
-      auth.client().session.retrieve_totp_enrollment().await?;
+    let totp = session.retrieve_totp_enrollment().await?;
 
     let valid = totp
       .check_current(&self.code)
@@ -88,13 +96,27 @@ impl Resolve<ManageArgs> for ConfirmTotpEnrollment {
 
 //
 
+pub async fn unenroll_totp<I: AuthImpl + ?Sized>(
+  auth: &I,
+  username: &str,
+  user_id: String,
+) -> mogh_error::Result<()> {
+  auth.check_username_locked(username)?;
+  auth.remove_user_stored_totp(user_id).await?;
+  Ok(())
+}
+
 impl Resolve<ManageArgs> for UnenrollTotp {
   async fn resolve(
     self,
-    ManageArgs { auth, user }: &ManageArgs,
+    ManageArgs { auth, user, .. }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
-    auth.check_username_locked(user.username())?;
-    auth.remove_user_stored_totp(user.id().to_string()).await?;
+    unenroll_totp(
+      auth.as_ref(),
+      user.username(),
+      user.id().to_string(),
+    )
+    .await?;
     Ok(UnenrollTotpResponse {})
   }
 }

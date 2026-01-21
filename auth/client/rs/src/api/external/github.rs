@@ -1,3 +1,4 @@
+#[allow(unused)]
 #[utoipa::path(
   get,
   path = "/github/login",
@@ -11,8 +12,9 @@
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn github_login() {}
+fn github_login() {}
 
+#[allow(unused)]
 #[utoipa::path(
   get,
   path = "/github/link",
@@ -23,8 +25,9 @@ pub fn github_login() {}
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn github_link() {}
+fn github_link() {}
 
+#[allow(unused)]
 #[utoipa::path(
   get,
   path = "/github/callback",
@@ -40,4 +43,4 @@ pub fn github_link() {}
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn github_callback() {}
+fn github_callback() {}

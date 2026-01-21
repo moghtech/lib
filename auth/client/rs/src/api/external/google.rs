@@ -1,3 +1,4 @@
+#[allow(unused)]
 #[utoipa::path(
   get,
   path = "/google/login",
@@ -11,8 +12,9 @@
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn google_login() {}
+fn google_login() {}
 
+#[allow(unused)]
 #[utoipa::path(
   get,
   path = "/google/link",
@@ -23,8 +25,9 @@ pub fn google_login() {}
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn google_link() {}
+fn google_link() {}
 
+#[allow(unused)]
 #[utoipa::path(
   get,
   path = "/google/callback",
@@ -40,4 +43,4 @@ pub fn google_link() {}
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn google_callback() {}
+fn google_callback() {}

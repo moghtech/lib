@@ -20,6 +20,7 @@ pub trait MoghAuthManageRequest: HasResponse {}
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -32,7 +33,7 @@ pub trait MoghAuthManageRequest: HasResponse {}
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn update_username() {}
+fn update_username() {}
 
 /// Update the calling user's username.
 /// Response: [NoData].
@@ -51,6 +52,7 @@ pub type UpdateUsernameResponse = NoData;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -63,7 +65,7 @@ pub type UpdateUsernameResponse = NoData;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn update_password() {}
+fn update_password() {}
 
 /// Update the calling user's password.
 /// Response: [NoData].
@@ -84,6 +86,7 @@ pub type UpdatePasswordResponse = NoData;
 // = PASSKEY 2FA =
 // ===============
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -96,7 +99,7 @@ pub type UpdatePasswordResponse = NoData;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn begin_passkey_enrollment() {}
+fn begin_passkey_enrollment() {}
 
 /// Begins enrollment flow for Passkey 2FA.
 /// Response: [BeginPasskeyEnrollmentResponse]
@@ -114,6 +117,7 @@ pub type BeginPasskeyEnrollmentResponse = CreationChallengeResponse;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -126,7 +130,7 @@ pub type BeginPasskeyEnrollmentResponse = CreationChallengeResponse;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn confirm_passkey_enrollment() {}
+fn confirm_passkey_enrollment() {}
 
 /// Confirm enrollment flow for Passkey 2FA.
 /// Response: [NoData]
@@ -146,6 +150,7 @@ pub type ConfirmPasskeyEnrollmentResponse = NoData;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -158,7 +163,7 @@ pub type ConfirmPasskeyEnrollmentResponse = NoData;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn unenroll_passkey() {}
+fn unenroll_passkey() {}
 
 /// Unenrolls user in Passkey 2FA.
 /// Response: [NoData]
@@ -178,6 +183,7 @@ pub type UnenrollPasskeyResponse = NoData;
 // = TOTP 2FA =
 // ============
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -190,7 +196,7 @@ pub type UnenrollPasskeyResponse = NoData;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn begin_totp_enrollment() {}
+fn begin_totp_enrollment() {}
 
 /// Starts enrollment flow for TOTP 2FA auth support.
 /// Response: [BeginTotpEnrollmentResponse]
@@ -218,6 +224,7 @@ pub struct BeginTotpEnrollmentResponse {
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -230,7 +237,7 @@ pub struct BeginTotpEnrollmentResponse {
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn confirm_totp_enrollment() {}
+fn confirm_totp_enrollment() {}
 
 /// Confirm enrollment flow for TOTP 2FA auth support
 /// Response: [ConfirmTotpEnrollmentResponse]
@@ -254,6 +261,7 @@ pub struct ConfirmTotpEnrollmentResponse {
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -266,7 +274,7 @@ pub struct ConfirmTotpEnrollmentResponse {
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn unenroll_totp() {}
+fn unenroll_totp() {}
 
 /// Unenrolls user in TOTP 2FA.
 /// Response: [UnenrollTotpResponse]
@@ -284,6 +292,7 @@ pub type UnenrollTotpResponse = NoData;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -296,7 +305,7 @@ pub type UnenrollTotpResponse = NoData;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn begin_external_login_link() {}
+fn begin_external_login_link() {}
 
 /// Begin linking flow for an external login. Response: [NoData].
 ///
@@ -318,6 +327,7 @@ pub type BeginExternalLoginLinkResponse = NoData;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -330,7 +340,7 @@ pub type BeginExternalLoginLinkResponse = NoData;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn unlink_login() {}
+fn unlink_login() {}
 
 /// Unlink a login provider. Response: [NoData].
 #[typeshare]
@@ -351,6 +361,7 @@ pub type UnlinkLoginResponse = NoData;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -363,7 +374,7 @@ pub type UnlinkLoginResponse = NoData;
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn update_external_skip_2fa() {}
+fn update_external_skip_2fa() {}
 
 /// Update whether the calling user skips 2fa when using external login method.
 /// Response: [NoData].
@@ -383,6 +394,7 @@ pub type UpdateExternalSkip2faResponse = NoData;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -395,7 +407,7 @@ pub type UpdateExternalSkip2faResponse = NoData;
     (status = 500, description = "Failed", body = mogh_error::Serror),
   ),
 )]
-pub fn create_api_key() {}
+fn create_api_key() {}
 
 /// Create an API key for the calling user.
 /// Response: [NoData].
@@ -432,6 +444,7 @@ pub struct CreateApiKeyResponse {
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -444,7 +457,7 @@ pub struct CreateApiKeyResponse {
     (status = 500, description = "Failed", body = mogh_error::Serror),
   ),
 )]
-pub fn delete_api_key() {}
+fn delete_api_key() {}
 
 /// Delete an API key for the calling user.
 /// Response: [NoData].
@@ -465,6 +478,7 @@ pub type DeleteApiKeyResponse = NoData;
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -477,7 +491,7 @@ pub type DeleteApiKeyResponse = NoData;
     (status = 500, description = "Failed", body = mogh_error::Serror),
   ),
 )]
-pub fn create_api_key_v2() {}
+fn create_api_key_v2() {}
 
 /// Create an API key (v2) for the calling user.
 /// Response: [NoData].
@@ -520,6 +534,7 @@ pub struct CreateApiKeyV2Response {
 
 //
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
@@ -532,7 +547,7 @@ pub struct CreateApiKeyV2Response {
     (status = 500, description = "Failed", body = mogh_error::Serror),
   ),
 )]
-pub fn delete_api_key_v2() {}
+fn delete_api_key_v2() {}
 
 /// Delete an API key (v2) for the calling user.
 /// Response: [NoData].

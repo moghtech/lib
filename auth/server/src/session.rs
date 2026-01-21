@@ -1,4 +1,5 @@
 use anyhow::Context;
+use axum::extract::FromRequestParts;
 use mogh_error::AddStatusCode;
 use reqwest::StatusCode;
 use webauthn_rs::prelude::{
@@ -9,6 +10,22 @@ use crate::provider::oidc::{SessionOidcLink, SessionOidcLogin};
 
 #[derive(Clone)]
 pub struct Session(pub tower_sessions::Session);
+
+impl<S: Send + Sync> FromRequestParts<S> for Session {
+  type Rejection = mogh_error::Error;
+
+  async fn from_request_parts(
+    parts: &mut axum::http::request::Parts,
+    _: &S,
+  ) -> Result<Self, Self::Rejection> {
+    let session = parts
+      .extensions
+      .get::<tower_sessions::Session>()
+      .cloned()
+      .context("Request context missing Session extension")?;
+    Ok(Session(session))
+  }
+}
 
 impl Session {
   // =========

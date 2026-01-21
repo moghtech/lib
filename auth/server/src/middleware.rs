@@ -10,31 +10,35 @@ use axum::{
 use mogh_error::AddStatusCode;
 use mogh_pki::{Pkcs8PrivateKey, one_way::OneWayNoiseHandshake};
 use mogh_rate_limit::WithFailureRateLimit;
+use mogh_request_ip::RequestIp;
 use reqwest::StatusCode;
 
 use crate::{
-  AuthExtractor, AuthImpl, RequestAuthentication,
-  provider::jwt::JwtProvider,
+  AuthImpl, RequestAuthentication, provider::jwt::JwtProvider,
 };
 
 pub async fn authenticate_request<I: AuthImpl>(
-  AuthExtractor(auth): AuthExtractor<I>,
+  RequestIp(ip): RequestIp,
   OriginalUri(uri): OriginalUri,
   req: Request,
   next: Next,
 ) -> mogh_error::Result<Response> {
+  let auth = I::new();
+  
   let req_auth = extract_request_authentication(
     &auth,
     req.method(),
     &uri,
     req.headers(),
-  )?;
+  )?
+  .context("Invalid client credentials")
+  .status_code(StatusCode::UNAUTHORIZED)?;
 
   let req = auth
     .handle_request_authentication(req_auth, req)
     .with_failure_rate_limit_using_ip(
       auth.general_rate_limiter(),
-      &auth.client().ip,
+      &ip,
     )
     .await?;
 
@@ -46,45 +50,29 @@ pub fn extract_request_authentication<I: AuthImpl>(
   method: &Method,
   uri: &Uri,
   headers: &HeaderMap,
-) -> mogh_error::Result<RequestAuthentication> {
+) -> mogh_error::Result<Option<RequestAuthentication>> {
   if let Some(user_id) =
     extract_request_user_id(auth.jwt_provider(), headers)?
   {
-    return Ok(RequestAuthentication::UserId(user_id));
+    return Ok(Some(RequestAuthentication::UserId(user_id)));
   }
 
   if let Some((key, secret)) =
     extract_request_key_and_secret(headers)?
   {
-    return Ok(RequestAuthentication::KeyAndSecret { key, secret });
+    return Ok(Some(RequestAuthentication::KeyAndSecret {
+      key,
+      secret,
+    }));
   }
 
-  if let Some(key) = headers.get("x-api-key") {
-    let key = key
-      .to_str()
-      .context("X-API-KEY is not valid UTF-8")?
-      .trim()
-      .to_string();
-    let secret = headers
-      .get("x-api-secret")
-      .context(
-        "Request headers have X-API-KEY but missing X-API-SECRET",
-      )?
-      .to_str()
-      .context("X-API-KEY is not valid UTF-8")?
-      .trim()
-      .to_string();
-    return Ok(RequestAuthentication::KeyAndSecret { key, secret });
+  if let Some(public_key) =
+    extract_request_public_key(auth, method, uri, headers)?
+  {
+    return Ok(Some(RequestAuthentication::PublicKey(public_key)));
   }
 
-  extract_request_public_key(auth, method, uri, headers).and_then(
-    |res| {
-      res
-        .context("Invalid client credentials")
-        .status_code(StatusCode::UNAUTHORIZED)
-        .map(RequestAuthentication::PublicKey)
-    },
-  )
+  Ok(None)
 }
 
 pub fn extract_request_user_id(

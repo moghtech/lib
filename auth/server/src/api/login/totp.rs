@@ -6,16 +6,15 @@ use mogh_error::AddStatusCodeError as _;
 use mogh_rate_limit::WithFailureRateLimit;
 use mogh_resolver::Resolve;
 
-use crate::BoxAuthImpl;
+use crate::api::login::LoginArgs;
 
-impl Resolve<BoxAuthImpl> for CompleteTotpLogin {
+impl Resolve<LoginArgs> for CompleteTotpLogin {
   async fn resolve(
     self,
-    auth: &BoxAuthImpl,
+    LoginArgs { auth, session, ip }: &LoginArgs,
   ) -> Result<Self::Response, Self::Error> {
     async {
-      let user_id =
-        auth.client().session.retrieve_totp_login_user_id().await?;
+      let user_id = session.retrieve_totp_login_user_id().await?;
 
       let user = auth.get_user(user_id.clone()).await?;
       let totp_secret = user
@@ -42,7 +41,7 @@ impl Resolve<BoxAuthImpl> for CompleteTotpLogin {
     }
     .with_failure_rate_limit_using_ip(
       auth.general_rate_limiter(),
-      &auth.client().ip,
+      &ip,
     )
     .await
   }

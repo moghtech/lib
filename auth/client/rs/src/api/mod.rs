@@ -4,6 +4,7 @@ use typeshare::typeshare;
 pub mod login;
 pub mod manage;
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 pub mod external;
 

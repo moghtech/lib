@@ -5,10 +5,11 @@ use axum::{
 use mogh_auth_client::api::login::UserIdOrTwoFactor;
 use mogh_error::{AddStatusCode as _, AddStatusCodeError as _};
 use mogh_rate_limit::WithFailureRateLimit as _;
+use mogh_request_ip::RequestIp;
 use reqwest::StatusCode;
 
 use crate::{
-  AuthExtractor, AuthImpl,
+  AuthImpl,
   api::{
     RedirectQuery, StandardCallbackQuery, get_user_id_or_two_factor,
     user_id_or_two_factor_redirect,
@@ -18,6 +19,7 @@ use crate::{
     google::{GoogleProvider, google_provider},
   },
   rand::random_string,
+  session::Session,
 };
 
 pub fn router<I: AuthImpl>() -> Router {
@@ -28,77 +30,89 @@ pub fn router<I: AuthImpl>() -> Router {
 }
 
 pub async fn google_login<I: AuthImpl>(
-  AuthExtractor(auth): AuthExtractor<I>,
+  RequestIp(ip): RequestIp,
+  session: Session,
   Query(RedirectQuery { redirect }): Query<RedirectQuery>,
 ) -> mogh_error::Result<Redirect> {
-  let config = auth
-    .google_config()
-    .context("Google login is not set up")
-    .status_code(StatusCode::BAD_REQUEST)?;
-
-  if !config.enabled() {
-    return Err(
-      anyhow!("Google login is not enabled")
-        .status_code(StatusCode::UNAUTHORIZED),
-    );
-  }
-
-  let provider = google_provider(auth.host(), config)
-    .context("Google provider not available")
-    .status_code(StatusCode::UNAUTHORIZED)?;
-
-  let (state, uri) =
-    provider.get_state_and_login_redirect_url(redirect).await;
-
-  auth.client().session.insert_google_login(&state).await?;
-
-  Ok(Redirect::to(&uri))
-}
-
-pub async fn google_link<I: AuthImpl>(
-  AuthExtractor(auth): AuthExtractor<I>,
-) -> mogh_error::Result<Redirect> {
-  let config = auth
-    .google_config()
-    .context("Google login is not set up")
-    .status_code(StatusCode::BAD_REQUEST)?;
-
-  if !config.enabled() {
-    return Err(
-      anyhow!("Google login is not enabled")
-        .status_code(StatusCode::UNAUTHORIZED),
-    );
-  }
-
-  let session = &auth.client().session;
-
-  let user_id = session.retrieve_external_link_user_id().await?;
-
-  let user = auth.get_user(user_id.clone()).await?;
-  auth.check_username_locked(user.username())?;
-
-  let provider = google_provider(auth.host(), config)
-    .context("Google provider not available")
-    .status_code(StatusCode::UNAUTHORIZED)?;
-
-  let (state, uri) =
-    provider.get_state_and_login_redirect_url(None).await;
-
-  session.insert_google_link(&user_id, &state).await?;
-
-  Ok(Redirect::to(&uri))
-}
-
-pub async fn google_callback<I: AuthImpl>(
-  AuthExtractor(auth): AuthExtractor<I>,
-  Query(query): Query<StandardCallbackQuery>,
-) -> mogh_error::Result<Redirect> {
+  let auth = I::new();
   async {
     let config = auth
       .google_config()
       .context("Google login is not set up")
       .status_code(StatusCode::BAD_REQUEST)?;
-    
+
+    if !config.enabled() {
+      return Err(
+        anyhow!("Google login is not enabled")
+          .status_code(StatusCode::UNAUTHORIZED),
+      );
+    }
+
+    let provider = google_provider(auth.host(), config)
+      .context("Google provider not available")
+      .status_code(StatusCode::UNAUTHORIZED)?;
+
+    let (state, uri) =
+      provider.get_state_and_login_redirect_url(redirect).await;
+
+    session.insert_google_login(&state).await?;
+
+    Ok(Redirect::to(&uri))
+  }
+  .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), &ip)
+  .await
+}
+
+pub async fn google_link<I: AuthImpl>(
+  RequestIp(ip): RequestIp,
+  session: Session,
+) -> mogh_error::Result<Redirect> {
+  let auth = I::new();
+  async {
+    let config = auth
+      .google_config()
+      .context("Google login is not set up")
+      .status_code(StatusCode::BAD_REQUEST)?;
+
+    if !config.enabled() {
+      return Err(
+        anyhow!("Google login is not enabled")
+          .status_code(StatusCode::UNAUTHORIZED),
+      );
+    }
+
+    let user_id = session.retrieve_external_link_user_id().await?;
+
+    let user = auth.get_user(user_id.clone()).await?;
+    auth.check_username_locked(user.username())?;
+
+    let provider = google_provider(auth.host(), config)
+      .context("Google provider not available")
+      .status_code(StatusCode::UNAUTHORIZED)?;
+
+    let (state, uri) =
+      provider.get_state_and_login_redirect_url(None).await;
+
+    session.insert_google_link(&user_id, &state).await?;
+
+    Ok(Redirect::to(&uri))
+  }
+  .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), &ip)
+  .await
+}
+
+pub async fn google_callback<I: AuthImpl>(
+  RequestIp(ip): RequestIp,
+  session: Session,
+  Query(query): Query<StandardCallbackQuery>,
+) -> mogh_error::Result<Redirect> {
+  let auth = I::new();
+  async {
+    let config = auth
+      .google_config()
+      .context("Google login is not set up")
+      .status_code(StatusCode::BAD_REQUEST)?;
+
     if !config.enabled() {
       return Err(
         anyhow!("Google login is not enabled")
@@ -111,8 +125,6 @@ pub async fn google_callback<I: AuthImpl>(
     let provider = google_provider(auth.host(), config)
       .context("Google provider not available")
       .status_code(StatusCode::UNAUTHORIZED)?;
-
-    let session = &auth.client().session;
 
     // Check first if this is a link callback
     // and use the linking handler if so.
@@ -146,7 +158,9 @@ pub async fn google_callback<I: AuthImpl>(
 
     let user_id_or_two_factor = match user {
       // Log in existing user
-      Some(user) => get_user_id_or_two_factor(&auth, &user).await?,
+      Some(user) => {
+        get_user_id_or_two_factor(&auth, &session, &user).await?
+      }
       // Sign up user
       None => {
         let no_users_exist = auth.no_users_exist().await?;
@@ -197,10 +211,7 @@ pub async fn google_callback<I: AuthImpl>(
       Some(&state[STATE_PREFIX_LENGTH..]),
     )
   }
-  .with_failure_rate_limit_using_ip(
-    auth.general_rate_limiter(),
-    &auth.client().ip,
-  )
+  .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), &ip)
   .await
 }
 

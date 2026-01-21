@@ -1,13 +1,7 @@
-use std::{
-  net::IpAddr,
-  sync::{Arc, LazyLock},
-};
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context as _, anyhow};
-use axum::{
-  extract::{FromRequestParts, Request},
-  http::StatusCode,
-};
+use axum::{extract::Request, http::StatusCode};
 use mogh_auth_client::{
   api::{login::LoginProvider, manage::CreateApiKey},
   config::{NamedOauthConfig, OidcConfig},
@@ -16,7 +10,6 @@ use mogh_auth_client::{
 use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_pki::RotatableKeyPair;
 use mogh_rate_limit::RateLimiter;
-use mogh_request_ip::get_ip_from_headers_and_extensions;
 use openidconnect::SubjectIdentifier;
 
 pub mod api;
@@ -30,7 +23,6 @@ mod session;
 
 use crate::{
   provider::{jwt::JwtProvider, passkey::PasskeyProvider},
-  session::Session,
   user::BoxAuthUser,
   validations::{
     validate_api_key_name, validate_password, validate_username,
@@ -44,37 +36,6 @@ pub mod request_ip {
 pub type BoxAuthImpl = Box<dyn AuthImpl>;
 pub type DynFuture<O> =
   std::pin::Pin<Box<dyn Future<Output = O> + Send>>;
-
-pub struct RequestClientArgs {
-  /// Prefers extraction from headers 'x-forwarded-for', then 'x-real-ip'.
-  /// If missing, uses fallback IP extracted directly from request.
-  pub ip: IpAddr,
-  /// Per-client session state
-  pub session: Session,
-}
-
-impl<S: Send + Sync> FromRequestParts<S> for RequestClientArgs {
-  type Rejection = mogh_error::Error;
-
-  async fn from_request_parts(
-    parts: &mut axum::http::request::Parts,
-    _: &S,
-  ) -> Result<Self, Self::Rejection> {
-    let ip = get_ip_from_headers_and_extensions(
-      &parts.headers,
-      &parts.extensions,
-    )?;
-    let session = parts
-      .extensions
-      .get::<tower_sessions::Session>()
-      .cloned()
-      .context("Request context missing Session extension")?;
-    Ok(RequestClientArgs {
-      ip,
-      session: Session(session),
-    })
-  }
-}
 
 #[derive(Clone)]
 pub enum RequestAuthentication {
@@ -91,14 +52,11 @@ pub enum RequestAuthentication {
 /// This trait is implemented at the app level
 /// to support custom schemas, storage providers, and business logic.
 pub trait AuthImpl: Send + Sync + 'static {
-  /// Construct the auth implementation
-  /// for a request client.
-  fn from_client(client: RequestClientArgs) -> Self
+  /// Construct the auth implementation for extraction.
+  /// Only use this at the top level of a client request.
+  fn new() -> Self
   where
     Self: Sized;
-
-  /// Get the request client args.
-  fn client(&self) -> &RequestClientArgs;
 
   /// Provide a static app name for passkeys.
   fn app_name(&self) -> &'static str {
@@ -167,6 +125,28 @@ pub trait AuthImpl: Send + Sync + 'static {
     auth: RequestAuthentication,
     req: Request,
   ) -> DynFuture<mogh_error::Result<Request>>;
+
+  /// Get user id from request authentication.
+  /// Used by manage auth api. By default, only
+  /// RequestAuthentication::UserId (callers using JWT)
+  /// are allowed to call these APIs, but this can be
+  /// changed here.
+  fn get_user_id_from_request_authentication(
+    &self,
+    auth: RequestAuthentication,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    Box::pin(async {
+      let RequestAuthentication::UserId(user_id) = auth else {
+        return Err(
+          anyhow!(
+            "Can only authenticate to auth management API using JWT."
+          )
+          .status_code(StatusCode::BAD_REQUEST),
+        );
+      };
+      Ok(user_id)
+    })
+  }
 
   // =========
   // = STATE =
@@ -240,9 +220,14 @@ pub trait AuthImpl: Send + Sync + 'static {
     _hashed_password: String,
     _no_users_exist: bool,
   ) -> DynFuture<mogh_error::Result<String>> {
-    panic!(
-      "Must implement 'AuthImpl::sign_up_local_user' in order for local login to work."
-    )
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::sign_up_local_user' in order for local login to work."
+        )
+        .into(),
+      )
+    })
   }
 
   /// Finds user using the username, returning UNAUTHORIZED if none exists.
@@ -250,9 +235,14 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
     _username: String,
   ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>> {
-    panic!(
-      "Must implement 'AuthImpl::find_user_with_username' in order for local login to work."
-    )
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::find_user_with_username' in order for local login to work."
+        )
+        .into(),
+      )
+    })
   }
 
   fn update_user_username(
@@ -260,7 +250,12 @@ pub trait AuthImpl: Send + Sync + 'static {
     _user_id: String,
     _username: String,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::update_user_username'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::update_user_username'.")
+          .into(),
+      )
+    })
   }
 
   fn update_user_password(
@@ -268,7 +263,12 @@ pub trait AuthImpl: Send + Sync + 'static {
     _user_id: String,
     _hashed_password: String,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::update_user_password'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::update_user_password'.")
+          .into(),
+      )
+    })
   }
 
   // =============
@@ -283,7 +283,14 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
     _subject: SubjectIdentifier,
   ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>> {
-    panic!("Must implement 'AuthImpl::find_user_with_oidc_subject'.")
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::find_user_with_oidc_subject'."
+        )
+        .into(),
+      )
+    })
   }
 
   /// Returns created user id, or error.
@@ -293,7 +300,12 @@ pub trait AuthImpl: Send + Sync + 'static {
     _subject: SubjectIdentifier,
     _no_users_exist: bool,
   ) -> DynFuture<mogh_error::Result<String>> {
-    panic!("Must implement 'AuthImpl::sign_up_oidc_user'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::sign_up_oidc_user'.")
+          .into(),
+      )
+    })
   }
 
   fn link_oidc_login(
@@ -301,7 +313,11 @@ pub trait AuthImpl: Send + Sync + 'static {
     _user_id: String,
     _subject: SubjectIdentifier,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::link_oidc_login'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::link_oidc_login'.").into(),
+      )
+    })
   }
 
   // ==============
@@ -318,7 +334,14 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
     _github_id: String,
   ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>> {
-    panic!("Must implement 'AuthImpl::find_user_with_github_id'.")
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::find_user_with_github_id'."
+        )
+        .into(),
+      )
+    })
   }
 
   /// Returns created user id, or error.
@@ -329,7 +352,12 @@ pub trait AuthImpl: Send + Sync + 'static {
     _avatar_url: String,
     _no_users_exist: bool,
   ) -> DynFuture<mogh_error::Result<String>> {
-    panic!("Must implement 'AuthImpl::sign_up_github_user'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::sign_up_github_user'.")
+          .into(),
+      )
+    })
   }
 
   fn link_github_login(
@@ -338,7 +366,12 @@ pub trait AuthImpl: Send + Sync + 'static {
     _github_id: String,
     _avatar_url: String,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::link_github_login'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::link_github_login'.")
+          .into(),
+      )
+    })
   }
 
   // = GOOGLE =
@@ -351,7 +384,14 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
     _google_id: String,
   ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>> {
-    panic!("Must implement 'AuthImpl::find_user_with_google_id'.")
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::find_user_with_google_id'."
+        )
+        .into(),
+      )
+    })
   }
 
   /// Returns created user id, or error.
@@ -362,7 +402,12 @@ pub trait AuthImpl: Send + Sync + 'static {
     _avatar_url: String,
     _no_users_exist: bool,
   ) -> DynFuture<mogh_error::Result<String>> {
-    panic!("Must implement 'AuthImpl::sign_up_google_user'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::sign_up_google_user'.")
+          .into(),
+      )
+    })
   }
 
   fn link_google_login(
@@ -371,7 +416,12 @@ pub trait AuthImpl: Send + Sync + 'static {
     _google_id: String,
     _avatar_url: String,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::link_google_login'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::link_google_login'.")
+          .into(),
+      )
+    })
   }
 
   // ==========
@@ -383,7 +433,9 @@ pub trait AuthImpl: Send + Sync + 'static {
     _user_id: String,
     _provider: LoginProvider,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::unlink_login'.")
+    Box::pin(async {
+      Err(anyhow!("Must implement 'AuthImpl::unlink_login'.").into())
+    })
   }
 
   // ===============
@@ -400,7 +452,14 @@ pub trait AuthImpl: Send + Sync + 'static {
     _user_id: String,
     _passkey: Option<Passkey>,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::update_user_stored_passkey'.")
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::update_user_stored_passkey'."
+        )
+        .into(),
+      )
+    })
   }
 
   // ============
@@ -413,14 +472,28 @@ pub trait AuthImpl: Send + Sync + 'static {
     _encoded_secret: String,
     _hashed_recovery_codes: Vec<String>,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::update_user_stored_totp'.")
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::update_user_stored_totp'."
+        )
+        .into(),
+      )
+    })
   }
 
   fn remove_user_stored_totp(
     &self,
     _user_id: String,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::remove_user_stored_totp'.")
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::remove_user_stored_totp'."
+        )
+        .into(),
+      )
+    })
   }
 
   fn make_totp(
@@ -448,9 +521,14 @@ pub trait AuthImpl: Send + Sync + 'static {
     _user_id: String,
     _external_skip_2fa: bool,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!(
-      "Must implement 'AuthImpl::update_user_external_skip_2fa'."
-    )
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::update_user_external_skip_2fa'."
+        )
+        .into(),
+      )
+    })
   }
 
   // ============
@@ -482,21 +560,34 @@ pub trait AuthImpl: Send + Sync + 'static {
     _key: String,
     _hashed_secret: String,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::create_api_key'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::create_api_key'.").into(),
+      )
+    })
   }
 
   fn get_api_key_user_id(
     &self,
     _key: String,
   ) -> DynFuture<mogh_error::Result<String>> {
-    panic!("Must implement 'AuthImpl::get_api_key_user_id'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::get_api_key_user_id'.")
+          .into(),
+      )
+    })
   }
 
   fn delete_api_key(
     &self,
     _key: String,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::delete_api_key'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::delete_api_key'.").into(),
+      )
+    })
   }
 
   /// Pass the server private key to use with api key v2 handshakes.
@@ -510,38 +601,35 @@ pub trait AuthImpl: Send + Sync + 'static {
     _body: CreateApiKey,
     _public_key: String,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::create_api_key_v2'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::create_api_key_v2'.")
+          .into(),
+      )
+    })
   }
 
   fn get_api_key_v2_user_id(
     &self,
     _public_key: String,
   ) -> DynFuture<mogh_error::Result<String>> {
-    panic!("Must implement 'AuthImpl::get_api_key_v2_user_id'.")
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::get_api_key_v2_user_id'.")
+          .into(),
+      )
+    })
   }
 
   fn delete_api_key_v2(
     &self,
     _public_key: String,
   ) -> DynFuture<mogh_error::Result<()>> {
-    panic!("Must implement 'AuthImpl::delete_api_key_v2'.")
-  }
-}
-
-/// Extract an implementer of AuthImpl from the request body.
-pub struct AuthExtractor<I>(pub I);
-
-impl<I: AuthImpl, S: Send + Sync> FromRequestParts<S>
-  for AuthExtractor<I>
-{
-  type Rejection = mogh_error::Error;
-
-  async fn from_request_parts(
-    parts: &mut axum::http::request::Parts,
-    state: &S,
-  ) -> Result<Self, Self::Rejection> {
-    let client =
-      RequestClientArgs::from_request_parts(parts, state).await?;
-    Ok(AuthExtractor(I::from_client(client)))
+    Box::pin(async {
+      Err(
+        anyhow!("Must implement 'AuthImpl::delete_api_key_v2'.")
+          .into(),
+      )
+    })
   }
 }

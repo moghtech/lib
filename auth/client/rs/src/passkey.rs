@@ -7,6 +7,7 @@ pub struct RequestChallengeResponse(
   pub webauthn_rs::prelude::RequestChallengeResponse,
 );
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 impl utoipa::PartialSchema for RequestChallengeResponse {
   fn schema()
@@ -15,6 +16,7 @@ impl utoipa::PartialSchema for RequestChallengeResponse {
   }
 }
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 impl utoipa::ToSchema for RequestChallengeResponse {}
 
@@ -24,6 +26,7 @@ pub struct PublicKeyCredential(
   pub webauthn_rs::prelude::PublicKeyCredential,
 );
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 impl utoipa::PartialSchema for PublicKeyCredential {
   fn schema()
@@ -32,6 +35,7 @@ impl utoipa::PartialSchema for PublicKeyCredential {
   }
 }
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 impl utoipa::ToSchema for PublicKeyCredential {}
 
@@ -39,6 +43,7 @@ impl utoipa::ToSchema for PublicKeyCredential {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Passkey(pub webauthn_rs::prelude::Passkey);
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 impl utoipa::PartialSchema for Passkey {
   fn schema()
@@ -47,6 +52,7 @@ impl utoipa::PartialSchema for Passkey {
   }
 }
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 impl utoipa::ToSchema for Passkey {}
 
@@ -56,6 +62,7 @@ pub struct CreationChallengeResponse(
   pub webauthn_rs::prelude::CreationChallengeResponse,
 );
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 impl utoipa::PartialSchema for CreationChallengeResponse {
   fn schema()
@@ -64,6 +71,7 @@ impl utoipa::PartialSchema for CreationChallengeResponse {
   }
 }
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 impl utoipa::ToSchema for CreationChallengeResponse {}
 
@@ -73,6 +81,7 @@ pub struct RegisterPublicKeyCredential(
   pub webauthn_rs::prelude::RegisterPublicKeyCredential,
 );
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 impl utoipa::PartialSchema for RegisterPublicKeyCredential {
   fn schema()
@@ -81,5 +90,6 @@ impl utoipa::PartialSchema for RegisterPublicKeyCredential {
   }
 }
 
+#[allow(unused)]
 #[cfg(feature = "utoipa")]
 impl utoipa::ToSchema for RegisterPublicKeyCredential {}

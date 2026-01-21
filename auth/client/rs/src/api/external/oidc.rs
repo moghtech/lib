@@ -1,3 +1,4 @@
+#[allow(unused)]
 #[utoipa::path(
   get,
   path = "/oidc/login",
@@ -11,8 +12,9 @@
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn oidc_login() {}
+fn oidc_login() {}
 
+#[allow(unused)]
 #[utoipa::path(
   get,
   path = "/oidc/link",
@@ -26,8 +28,9 @@ pub fn oidc_login() {}
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn oidc_link() {}
+fn oidc_link() {}
 
+#[allow(unused)]
 #[utoipa::path(
   get,
   path = "/oidc/callback",
@@ -43,4 +46,4 @@ pub fn oidc_link() {}
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
-pub fn oidc_callback() {}
+fn oidc_callback() {}
