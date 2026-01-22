@@ -127,26 +127,23 @@ pub trait AuthImpl: Send + Sync + 'static {
     req: Request,
   ) -> DynFuture<mogh_error::Result<Request>>;
 
-  /// Get user id from request authentication.
-  /// Used by manage auth api. By default, only
-  /// RequestAuthentication::UserId (callers using JWT)
-  /// are allowed to call these APIs, but this can be
-  /// changed here.
+  /// Get user id from request authentication
+  /// for use in auth management API middleware.
   fn get_user_id_from_request_authentication(
     &self,
     auth: RequestAuthentication,
   ) -> DynFuture<mogh_error::Result<String>> {
-    Box::pin(async {
-      let RequestAuthentication::UserId(user_id) = auth else {
-        return Err(
-          anyhow!(
-            "Can only authenticate to auth management API using JWT."
-          )
-          .status_code(StatusCode::BAD_REQUEST),
-        );
-      };
-      Ok(user_id)
-    })
+    match auth {
+      RequestAuthentication::UserId(user_id) => {
+        Box::pin(async { Ok(user_id) })
+      }
+      RequestAuthentication::KeyAndSecret { key, .. } => {
+        self.get_api_key_user_id(key)
+      }
+      RequestAuthentication::PublicKey(public_key) => {
+        self.get_api_key_v2_user_id(public_key)
+      }
+    }
   }
 
   // =========
@@ -568,6 +565,7 @@ pub trait AuthImpl: Send + Sync + 'static {
     })
   }
 
+  /// Get the user id for a given API key
   fn get_api_key_user_id(
     &self,
     _key: String,
@@ -610,6 +608,7 @@ pub trait AuthImpl: Send + Sync + 'static {
     })
   }
 
+  /// Get the user id for a given public key
   fn get_api_key_v2_user_id(
     &self,
     _public_key: String,
