@@ -34,7 +34,7 @@ mogh_auth_client = "1.2.1"
 mogh_auth_server = "1.2.4"
 
 # MOGH
-mogh_cache = "1.0.0"
+mogh_cache = "1.1.0"
 mogh_config = "1.0.1"
 mogh_encryption = "0.1.0"
 mogh_error = "1.0.3"

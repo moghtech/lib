@@ -1,4 +1,8 @@
-use std::{collections::HashMap, hash::Hash, sync::Arc};
+use std::{
+  collections::{HashMap, HashSet},
+  hash::Hash,
+  sync::Arc,
+};
 
 use tokio::sync::{Mutex, RwLock};
 
@@ -204,5 +208,27 @@ impl<T: Clone + Default> CloneVecCache<T> {
         item
       }
     }
+  }
+}
+
+pub struct SetCache<K>(Mutex<HashSet<K>>);
+
+impl<K> Default for SetCache<K> {
+  fn default() -> Self {
+    Self(Default::default())
+  }
+}
+
+impl<K: Eq + Hash> SetCache<K> {
+  pub async fn contains(&self, key: &K) -> bool {
+    self.0.lock().await.contains(key)
+  }
+
+  pub async fn insert(&self, key: K) -> bool {
+    self.0.lock().await.insert(key)
+  }
+
+  pub async fn remove(&self, key: &K) -> bool {
+    self.0.lock().await.remove(key)
   }
 }
