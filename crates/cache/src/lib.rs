@@ -231,4 +231,8 @@ impl<K: Eq + Hash> SetCache<K> {
   pub async fn remove(&self, key: &K) -> bool {
     self.0.lock().await.remove(key)
   }
+
+  pub async fn retain(&self, retain: impl FnMut(&K) -> bool) {
+    self.0.lock().await.retain(retain);
+  }
 }
