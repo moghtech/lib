@@ -45,7 +45,7 @@ mogh_request_ip = "1.0.0"
 mogh_resolver = "1.0.0"
 mogh_resolver_derive = "1.0.0"
 mogh_secret_file = "1.0.0"
-mogh_server = "1.1.2"
+mogh_server = "1.2.0"
 mogh_validations = "1.0.0"
 
 # ASYNC
