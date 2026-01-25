@@ -3,7 +3,7 @@ use std::{net::SocketAddr, str::FromStr as _};
 use anyhow::Context as _;
 use axum::{
   Router,
-  http::{HeaderName, HeaderValue},
+  http::{HeaderValue, header},
 };
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -40,19 +40,19 @@ pub async fn serve_app(
   // Add app standard security layers
   let app = app
     .layer(SetResponseHeaderLayer::overriding(
-      HeaderName::from_static("x-content-type-options"),
+      header::X_CONTENT_TYPE_OPTIONS,
       HeaderValue::from_static("nosniff"),
     ))
     .layer(SetResponseHeaderLayer::overriding(
-      HeaderName::from_static("x-frame-options"),
+      header::X_FRAME_OPTIONS,
       HeaderValue::from_static("DENY"),
     ))
     .layer(SetResponseHeaderLayer::overriding(
-      HeaderName::from_static("x-xss-protection"),
+      header::X_XSS_PROTECTION,
       HeaderValue::from_static("1; mode=block"),
     ))
     .layer(SetResponseHeaderLayer::overriding(
-      HeaderName::from_static("referrer-policy"),
+      header::REFERRER_POLICY,
       HeaderValue::from_static("strict-origin-when-cross-origin"),
     ))
     .into_make_service_with_connect_info::<SocketAddr>();
