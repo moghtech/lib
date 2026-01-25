@@ -17,12 +17,20 @@ use tracing::warn;
 ///
 /// Tries to hash index contents to use as ETag, falls
 /// back to 'Cache-Control: no-cache' if this fails.
-pub fn serve_static_ui(ui_path: &str) -> ServeDir<SetStatus<Router>> {
+pub fn serve_static_ui(
+  ui_path: &str,
+  force_no_cache: bool,
+) -> ServeDir<SetStatus<Router>> {
   let directory = PathBuf::from(ui_path);
   let index = directory.join("index.html");
 
   let index_router =
     Router::new().fallback_service(ServeFile::new(&index));
+
+  if force_no_cache {
+    return ServeDir::new(directory)
+      .not_found_service(add_no_cache_layer(index_router));
+  }
 
   let index = match hash_encode_contents(&index) {
     Ok(header_value) => {
@@ -38,10 +46,7 @@ pub fn serve_static_ui(ui_path: &str) -> ServeDir<SetStatus<Router>> {
       warn!(
         "Failed to create ETag header for index.html, using 'Cache-Control: no-cache' | {e:#}"
       );
-      index_router.layer(SetResponseHeaderLayer::overriding(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-cache"),
-      ))
+      add_no_cache_layer(index_router)
     }
   };
 
@@ -58,4 +63,11 @@ fn hash_encode_contents(path: &Path) -> anyhow::Result<HeaderValue> {
   let value = data_encoding::BASE64URL.encode(&digest);
   HeaderValue::from_bytes(value.as_bytes())
     .context("Invalid index hash for ETag header value")
+}
+
+fn add_no_cache_layer(router: Router) -> Router {
+  router.layer(SetResponseHeaderLayer::overriding(
+    header::CACHE_CONTROL,
+    HeaderValue::from_static("no-cache"),
+  ))
 }
