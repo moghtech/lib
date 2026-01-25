@@ -1919,11 +1919,13 @@ dependencies = [
 
 [[package]]
 name = "mogh_server"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "axum",
  "axum-server",
+ "data-encoding",
+ "sha2",
  "tower-http",
  "tower-sessions",
  "tracing",
