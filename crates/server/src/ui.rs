@@ -17,6 +17,9 @@ use tracing::warn;
 ///
 /// Tries to hash index contents to use as ETag, falls
 /// back to 'Cache-Control: no-cache' if this fails.
+/// 
+/// If `force_no_cache` is passed, the `index.html` will
+/// always be served with no-cache header.
 pub fn serve_static_ui(
   ui_path: &str,
   force_no_cache: bool,
