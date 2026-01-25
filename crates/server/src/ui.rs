@@ -22,6 +22,8 @@ pub fn serve_static_ui(
 
   let index = Router::new()
     .fallback_service(ServeFile::new(index))
+    // The ETag header helps browser know when the
+    // contents have changed / invalidate cache.
     .layer(SetResponseHeaderLayer::overriding(
       header::ETAG,
       HeaderValue::from_bytes(index_hash.as_bytes())
