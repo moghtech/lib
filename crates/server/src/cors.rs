@@ -23,10 +23,11 @@ static ANY_ORIGIN: LazyLock<String> =
 /// - Credentials are only allowed if `cors_allow_credentials` is true
 pub fn cors_layer(config: impl CorsConfig) -> CorsLayer {
   let allowed_origins = config.allowed_origins();
+  let allow_credentials = config.allow_credentials();
   let mut cors = CorsLayer::new()
     .allow_methods(tower_http::cors::AllowMethods::mirror_request())
     .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
-    .allow_credentials(config.allow_credentials());
+    .allow_credentials(allow_credentials);
   if allowed_origins.is_empty() {
     info!("CORS using no additional allowed origins.");
   } else if allowed_origins.contains(&ANY_ORIGIN) {
@@ -46,5 +47,8 @@ pub fn cors_layer(config: impl CorsConfig) -> CorsLayer {
     info!("CORS using allowed origin/s: {allowed_origins:?}");
     cors = cors.allow_origin(allowed_origins);
   };
+  if allow_credentials {
+    info!("CORS allowing credentials");
+  }
   cors
 }
