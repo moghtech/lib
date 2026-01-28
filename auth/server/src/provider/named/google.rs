@@ -13,12 +13,13 @@ use crate::{
 
 pub fn google_provider(
   host: &str,
+  path: &str,
   config: &NamedOauthConfig,
 ) -> Option<&'static GoogleProvider> {
   static GOOGLE_PROVIDER: OnceLock<Option<GoogleProvider>> =
     OnceLock::new();
   GOOGLE_PROVIDER
-    .get_or_init(|| GoogleProvider::new(host, config))
+    .get_or_init(|| GoogleProvider::new(host, path, config))
     .as_ref()
 }
 
@@ -34,6 +35,7 @@ pub struct GoogleProvider {
 impl GoogleProvider {
   pub fn new(
     host: &str,
+    path: &str,
     NamedOauthConfig {
       enabled,
       client_id,
@@ -71,7 +73,7 @@ impl GoogleProvider {
       http: Default::default(),
       client_id: client_id.clone(),
       client_secret: client_secret.clone(),
-      redirect_uri: format!("{host}/google/callback"),
+      redirect_uri: format!("{host}{path}/google/callback"),
       user_agent: String::from("komodo"),
       scopes,
     }

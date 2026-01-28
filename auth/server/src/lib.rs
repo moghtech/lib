@@ -66,12 +66,17 @@ pub trait AuthImpl: Send + Sync + 'static {
   }
 
   /// Provide the app 'host' config.
-  /// This should include the path to where the auth server is nested,
-  /// Ie if it is nested on /auth, this points to https://example.com/auth
+  /// Example: https://example.com
   fn host(&self) -> &str {
     panic!(
       "Must implement 'AuthImpl::host' in order for external logins and other features to work."
     )
+  }
+
+  /// This should be the path to where the auth server is nested on 'host'.
+  /// Default is "/auth".
+  fn path(&self) -> &str {
+    "/auth"
   }
 
   /// Disable new user registration.

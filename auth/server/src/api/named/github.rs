@@ -48,7 +48,7 @@ pub async fn github_login<I: AuthImpl>(
       );
     }
 
-    let provider = github_provider(auth.host(), config)
+    let provider = github_provider(auth.host(), auth.path(), config)
       .context("Github provider not available")
       .status_code(StatusCode::UNAUTHORIZED)?;
 
@@ -86,7 +86,7 @@ pub async fn github_link<I: AuthImpl>(
     let user = auth.get_user(user_id.clone()).await?;
     auth.check_username_locked(user.username())?;
 
-    let provider = github_provider(auth.host(), config)
+    let provider = github_provider(auth.host(), auth.path(), config)
       .context("Github provider not available")
       .status_code(StatusCode::UNAUTHORIZED)?;
 
@@ -123,7 +123,7 @@ pub async fn github_callback<I: AuthImpl>(
 
     let (client_state, code) = query.open()?;
 
-    let provider = github_provider(auth.host(), config)
+    let provider = github_provider(auth.host(), auth.path(), config)
       .context("Github provider not available")
       .status_code(StatusCode::UNAUTHORIZED)?;
 

@@ -48,7 +48,7 @@ pub async fn google_login<I: AuthImpl>(
       );
     }
 
-    let provider = google_provider(auth.host(), config)
+    let provider = google_provider(auth.host(), auth.path(), config)
       .context("Google provider not available")
       .status_code(StatusCode::UNAUTHORIZED)?;
 
@@ -86,7 +86,7 @@ pub async fn google_link<I: AuthImpl>(
     let user = auth.get_user(user_id.clone()).await?;
     auth.check_username_locked(user.username())?;
 
-    let provider = google_provider(auth.host(), config)
+    let provider = google_provider(auth.host(), auth.path(), config)
       .context("Google provider not available")
       .status_code(StatusCode::UNAUTHORIZED)?;
 
@@ -122,7 +122,7 @@ pub async fn google_callback<I: AuthImpl>(
 
     let (client_state, code) = query.open()?;
 
-    let provider = google_provider(auth.host(), config)
+    let provider = google_provider(auth.host(), auth.path(), config)
       .context("Google provider not available")
       .status_code(StatusCode::UNAUTHORIZED)?;
 

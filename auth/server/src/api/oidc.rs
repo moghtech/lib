@@ -49,10 +49,14 @@ pub async fn oidc_login<I: AuthImpl>(
       );
     }
 
-    let provider =
-      load_oidc_provider(auth.app_name(), auth.host(), config)
-        .await
-        .context("OIDC Provider not available")?;
+    let provider = load_oidc_provider(
+      auth.app_name(),
+      auth.host(),
+      auth.path(),
+      config,
+    )
+    .await
+    .context("OIDC Provider not available")?;
 
     let (pkce_challenge, pkce_verifier) =
       PkceCodeChallenge::new_random_sha256();
@@ -100,11 +104,15 @@ pub async fn oidc_link<I: AuthImpl>(
     let user = auth.get_user(user_id.clone()).await?;
     auth.check_username_locked(user.username())?;
 
-    let provider =
-      load_oidc_provider(auth.app_name(), auth.host(), config)
-        .await
-        .context("OIDC provider not available")
-        .status_code(StatusCode::UNAUTHORIZED)?;
+    let provider = load_oidc_provider(
+      auth.app_name(),
+      auth.host(),
+      auth.path(),
+      config,
+    )
+    .await
+    .context("OIDC provider not available")
+    .status_code(StatusCode::UNAUTHORIZED)?;
 
     let (pkce_challenge, pkce_verifier) =
       PkceCodeChallenge::new_random_sha256();
@@ -177,10 +185,14 @@ pub async fn oidc_callback<I: AuthImpl>(
       );
     }
 
-    let provider =
-      load_oidc_provider(auth.app_name(), auth.host(), config)
-        .await
-        .context("OIDC Provider not available")?;
+    let provider = load_oidc_provider(
+      auth.app_name(),
+      auth.host(),
+      auth.path(),
+      config,
+    )
+    .await
+    .context("OIDC Provider not available")?;
 
     let code = query.code.context("Provider did not return code")?;
     let state = CsrfToken::new(

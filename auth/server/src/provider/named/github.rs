@@ -12,12 +12,13 @@ use crate::{
 
 pub fn github_provider(
   host: &str,
+  path: &str,
   config: &NamedOauthConfig,
 ) -> Option<&'static GithubProvider> {
   static GITHUB_PROVIDER: OnceLock<Option<GithubProvider>> =
     OnceLock::new();
   GITHUB_PROVIDER
-    .get_or_init(|| GithubProvider::new(host, config))
+    .get_or_init(|| GithubProvider::new(host, path, config))
     .as_ref()
 }
 
@@ -33,6 +34,7 @@ pub struct GithubProvider {
 impl GithubProvider {
   pub fn new(
     host: &str,
+    path: &str,
     NamedOauthConfig {
       enabled,
       client_id,
@@ -62,7 +64,7 @@ impl GithubProvider {
       http: reqwest::Client::new(),
       client_id: client_id.clone(),
       client_secret: client_secret.clone(),
-      redirect_uri: format!("{host}/github/callback"),
+      redirect_uri: format!("{host}{path}/github/callback"),
       user_agent: Default::default(),
       scopes: Default::default(),
     }

@@ -81,6 +81,7 @@ fn oidc_provider() -> &'static ArcSwapOption<OidcProvider> {
 pub async fn load_oidc_provider(
   app_user_agent: &'static str,
   host: &str,
+  path: &str,
   config: &OidcConfig,
 ) -> Option<Arc<OidcProvider>> {
   let now = SystemTime::now()
@@ -97,6 +98,7 @@ pub async fn load_oidc_provider(
   let client = match OidcProvider::new(
     app_user_agent,
     host,
+    path,
     config,
     now + PROVIDER_VALID_FOR_MS,
   )
@@ -126,6 +128,7 @@ impl OidcProvider {
   pub async fn new(
     app_user_agent: &'static str,
     host: &str,
+    path: &str,
     config: &OidcConfig,
     valid_until: u128,
   ) -> anyhow::Result<OidcProvider> {
@@ -157,7 +160,7 @@ impl OidcProvider {
     )
     // Set the URL the user will be redirected to after the authorization process.
     .set_redirect_uri(RedirectUrl::new(format!(
-      "{host}/oidc/callback",
+      "{host}{path}/oidc/callback",
     ))?);
 
     Ok(OidcProvider {
