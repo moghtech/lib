@@ -15,7 +15,7 @@ pub trait SessionConfig {
   }
   /// Enable in UI development context for login
   /// to work.
-  fn allow_cross_site_session(&self) -> bool {
+  fn allow_cross_site(&self) -> bool {
     false
   }
 }
@@ -35,7 +35,7 @@ pub fn memory_session_layer(
     .with_secure(host.starts_with("https://"))
     // Needs Lax in order for sessions to work
     // accross oauth redirects.
-    .with_same_site(if config.allow_cross_site_session() {
+    .with_same_site(if config.allow_cross_site() {
       info!("Session allowing cross site usage (SameSite=None).");
       SameSite::None
     } else {
