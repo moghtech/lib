@@ -1,19 +1,23 @@
 use tower_sessions::{
-  Expiry, MemoryStore, SessionManagerLayer,
-  cookie::{SameSite, time::Duration},
+  Expiry, MemoryStore, SessionManagerLayer, cookie::time::Duration,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
-pub use tower_sessions::Session;
+pub use tower_sessions::{Session, cookie::SameSite};
 
 pub trait SessionConfig {
-  fn expiry_seconds(&self) -> i64 {
-    60
-  }
+  fn host(&self) -> &str;
   fn host_env_field(&self) -> &str {
     "HOST"
   }
-  fn host(&self) -> &str;
+  fn expiry_seconds(&self) -> i64 {
+    60
+  }
+  /// Enable in UI development context for login
+  /// to work.
+  fn allow_cross_site_session(&self) -> bool {
+    false
+  }
 }
 
 /// Adds an in memory session manager layer.
@@ -31,7 +35,12 @@ pub fn memory_session_layer(
     .with_secure(host.starts_with("https://"))
     // Needs Lax in order for sessions to work
     // accross oauth redirects.
-    .with_same_site(SameSite::Lax);
+    .with_same_site(if config.allow_cross_site_session() {
+      info!("Session allowing cross site usage (SameSite=None).");
+      SameSite::None
+    } else {
+      SameSite::Lax
+    });
   let host_url = url::Url::parse(host)
     .inspect_err(|e| {
       warn!(
