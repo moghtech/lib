@@ -1,41 +1,36 @@
+use std::sync::LazyLock;
+
 use axum::http::HeaderValue;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
 pub trait CorsConfig {
-  fn allowed_origins_env_field(&self) -> &'static str {
-    "CORS_ALLOWED_ORIGINS"
+  fn allowed_origins(&self) -> &[String] {
+    &[]
   }
   fn allow_credentials(&self) -> bool {
     true
   }
-  fn allowed_origins(&self) -> &[String] {
-    &[]
-  }
 }
+
+static ANY_ORIGIN: LazyLock<String> =
+  LazyLock::new(|| String::from("*"));
 
 /// Creates a CORS layer based on the Core configuration.
 ///
-/// - If `cors_allowed_origins` is empty: Allows all origins (backward compatibility)
-/// - If `cors_allowed_origins` is set: Only allows the specified origins
-/// - Methods and headers are always allowed (Any)
+/// - If the allowed origins contains '*', uses 'Any' allowed origin.
+/// - Methods and headers are always allowed (Mirrored)
 /// - Credentials are only allowed if `cors_allow_credentials` is true
 pub fn cors_layer(config: impl CorsConfig) -> CorsLayer {
   let allowed_origins = config.allowed_origins();
   let mut cors = CorsLayer::new()
     .allow_methods(tower_http::cors::AllowMethods::mirror_request())
     .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
-    // Allow credentials only valid when allowed origins is not *
-    .allow_credentials(if allowed_origins.is_empty() {
-      false
-    } else {
-      config.allow_credentials()
-    });
+    .allow_credentials(config.allow_credentials());
   if allowed_origins.is_empty() {
-    warn!(
-      "CORS using allowed origin 'Any' (*). Use {} to configure specific origins.",
-      config.allowed_origins_env_field()
-    );
+    info!("CORS using no additional allowed origins.");
+  } else if allowed_origins.contains(&ANY_ORIGIN) {
+    warn!("CORS using allowed origin 'Any' (*).",);
     cors = cors.allow_origin(tower_http::cors::Any)
   } else {
     let allowed_origins = allowed_origins
