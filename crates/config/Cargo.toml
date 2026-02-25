@@ -1,7 +1,7 @@
 [package]
 name = "mogh_config"
 description = "Utilities to merge config from multiple files / directories."
-version = "1.0.1"
+version = "1.0.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

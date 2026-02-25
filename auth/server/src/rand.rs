@@ -1,4 +1,4 @@
-use rand::Rng as _;
+use rand::RngExt as _;
 
 pub fn random_string(length: usize) -> String {
   rand::rng()

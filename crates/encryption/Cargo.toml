@@ -1,7 +1,7 @@
 [package]
 name = "mogh_encryption"
 description = "Utilities to encrypt and decrypt data."
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

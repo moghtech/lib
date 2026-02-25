@@ -4,7 +4,7 @@ use chacha20poly1305::{
   aead::{Aead, Payload},
 };
 use data_encoding::BASE64URL;
-use rand::{Rng, rngs::ThreadRng};
+use rand::{RngExt as _, rngs::ThreadRng};
 
 use crate::{AssociatedData, EncryptedData, EnvelopeEncryptedData};
 
