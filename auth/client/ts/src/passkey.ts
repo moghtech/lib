@@ -8,9 +8,9 @@ import { Types } from "./lib";
   .then((credential) => completePasskeyLogin({ credential }))
  ```
  */
-export const prepareRequestChallengeResponse = (
-  challenge: Types.RequestChallengeResponse
-) => {
+export function prepareRequestChallengeResponse(
+  challenge: Types.RequestChallengeResponse,
+) {
   return {
     ...challenge,
     publicKey: {
@@ -20,11 +20,11 @@ export const prepareRequestChallengeResponse = (
         (cred: any) => ({
           ...cred,
           id: base64urlToArrayBuffer(cred.id),
-        })
+        }),
       ),
     },
   };
-};
+}
 
 /**
  ## USAGE:
@@ -34,9 +34,9 @@ export const prepareRequestChallengeResponse = (
   .then((credential) => confirmPasskeyEnrollment({ credential }))
  ```
  */
-export const prepareCreationChallengeResponse = (
-  challenge: Types.CreationChallengeResponse
-) => {
+export function prepareCreationChallengeResponse(
+  challenge: Types.CreationChallengeResponse,
+) {
   return {
     ...challenge,
     publicKey: {
@@ -47,13 +47,13 @@ export const prepareCreationChallengeResponse = (
         id: base64urlToArrayBuffer(challenge.publicKey.user.id),
       },
       excludeCredentials: challenge.publicKey.excludeCredentials?.map(
-        (cred: any) => ({ ...cred, id: base64urlToArrayBuffer(cred.id) })
+        (cred: any) => ({ ...cred, id: base64urlToArrayBuffer(cred.id) }),
       ),
     },
   };
-};
+}
 
-export const base64urlToArrayBuffer = (base64url: any) => {
+export function base64urlToArrayBuffer(base64url: any) {
   // Convert from URL-safe base64 to normal base64
   const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
   const pad =
@@ -64,9 +64,9 @@ export const base64urlToArrayBuffer = (base64url: any) => {
     bytes[i] = bstr.charCodeAt(i);
   }
   return bytes.buffer;
-};
+}
 
-export const arrayBufferToBase64url = (buffer: any) => {
+export function arrayBufferToBase64url(buffer: any) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
   for (let i = 0; i < bytes.length; i++) {
@@ -74,4 +74,9 @@ export const arrayBufferToBase64url = (buffer: any) => {
   }
   const base64 = btoa(binary);
   return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-};
+}
+
+export function base64UrlDecode(str: string) {
+  const base64 = str.replace(/-/g, "+").replace(/_/g, "/");
+  return atob(base64);
+}
