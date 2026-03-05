@@ -3,6 +3,7 @@ use mogh_auth_client::api::{
   manage::{UpdatePassword, UpdateUsername},
 };
 use mogh_resolver::Resolve;
+use tracing::instrument;
 
 use crate::{AuthImpl, api::manage::ManageArgs};
 
@@ -19,6 +20,15 @@ pub async fn update_username<I: AuthImpl + ?Sized>(
 }
 
 impl Resolve<ManageArgs> for UpdateUsername {
+  #[instrument(
+    "UpdateUsername",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      from = user.username(),
+      to = self.username
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,
@@ -49,6 +59,13 @@ pub async fn update_password<I: AuthImpl + ?Sized>(
 }
 
 impl Resolve<ManageArgs> for UpdatePassword {
+  #[instrument(
+    "UpdatePassword",
+    skip_all,
+    fields(
+      user_id = user.id(),
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,

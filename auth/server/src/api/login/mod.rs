@@ -71,7 +71,11 @@ async fn handler<I: AuthImpl>(
   let req_id = Uuid::new_v4();
   let method: LoginRequestMethod = (&request).into();
 
-  debug!("AUTH LOGIN {req_id} | METHOD: {method}",);
+  debug!(
+    api = "Auth Login",
+    req_id = req_id.to_string(),
+    method = method.to_string(),
+  );
 
   let args = LoginArgs {
     auth: Box::new(I::new()),
@@ -83,7 +87,10 @@ async fn handler<I: AuthImpl>(
 
   if let Err(e) = &res {
     debug!(
-      "AUTH LOGIN {req_id} | METHOD: {method} | ERROR: {:#}",
+      api = "Auth Login",
+      req_id = req_id.to_string(),
+      method = method.to_string(),
+      "ERROR: {:#}",
       e.error
     );
   }
@@ -122,14 +129,7 @@ impl Resolve<LoginArgs> for GetLoginOptions {
 }
 
 impl Resolve<LoginArgs> for ExchangeForJwt {
-  #[instrument(
-    "ExchangeForJwt",
-    skip_all,
-    fields(
-      session = session.id().map(|id| id.to_string()),
-      ip,
-    )
-  )]
+  #[instrument("ExchangeForJwt", skip_all, fields(ip = ip.to_string()))]
   async fn resolve(
     self,
     LoginArgs { auth, session, ip }: &LoginArgs,

@@ -10,7 +10,6 @@ use tracing::{info, instrument};
 
 use crate::{AuthImpl, api::login::LoginArgs, session::Session};
 
-#[instrument("SignUpLocalUserInner", skip_all, fields(username))]
 pub async fn sign_up_local_user<I: AuthImpl + ?Sized>(
   auth: &I,
   username: String,
@@ -46,13 +45,13 @@ pub async fn sign_up_local_user<I: AuthImpl + ?Sized>(
     )
     .await?;
 
-  info!(user_id, username, "New user registration");
+  info!(user_id, username, "New user registration (Local)");
 
   auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
 }
 
 impl Resolve<LoginArgs> for SignUpLocalUser {
-  #[instrument("SignUpLocalUser", skip_all, fields(ip))]
+  #[instrument("SignUpLocalUser", skip_all, fields(ip = ip.to_string()))]
   async fn resolve(
     self,
     LoginArgs { auth, ip, .. }: &LoginArgs,
@@ -66,7 +65,6 @@ impl Resolve<LoginArgs> for SignUpLocalUser {
   }
 }
 
-#[instrument("LoginLocalUserInner", skip_all, fields(username))]
 pub async fn login_local_user<I: AuthImpl + ?Sized>(
   auth: &I,
   session: &Session,
@@ -154,8 +152,7 @@ impl Resolve<LoginArgs> for LoginLocalUser {
     "LoginLocalUser",
     skip_all,
     fields(
-      session = session.id().map(|id| id.to_string()),
-      ip,
+      ip = ip.to_string(),
     )
   )]
   async fn resolve(

@@ -14,8 +14,7 @@ impl Resolve<LoginArgs> for CompleteTotpLogin {
     "CompleteTotpLogin",
     skip_all,
     fields(
-      session = session.id().map(|id| id.to_string()),
-      ip,
+      ip = ip.to_string(),
     )
   )]
   async fn resolve(

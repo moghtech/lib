@@ -7,6 +7,7 @@ use mogh_error::{AddStatusCode as _, AddStatusCodeError as _};
 use mogh_rate_limit::WithFailureRateLimit as _;
 use mogh_request_ip::RequestIp;
 use reqwest::StatusCode;
+use tracing::info;
 
 use crate::{
   AuthImpl,
@@ -94,6 +95,12 @@ pub async fn google_link<I: AuthImpl>(
       provider.get_state_and_login_redirect_url(None).await;
 
     session.insert_google_link(&user_id, &state).await?;
+
+    info!(
+      user_id = user.id(),
+      username = user.username(),
+      "Google link flow initiated"
+    );
 
     Ok(Redirect::to(&uri))
   }
@@ -192,12 +199,14 @@ pub async fn google_callback<I: AuthImpl>(
 
         let user_id = auth
           .sign_up_google_user(
-            username,
+            username.clone(),
             google_id,
             avatar_url,
             no_users_exist,
           )
           .await?;
+
+        info!(user_id, username, "New user registration (Google)");
 
         session.insert_authenticated_user_id(&user_id).await?;
 
@@ -251,8 +260,10 @@ async fn link_google_callback<I: AuthImpl>(
   }
 
   auth
-    .link_google_login(user_id, google_id, avatar_url)
+    .link_google_login(user_id.clone(), google_id, avatar_url)
     .await?;
+
+  info!(user_id, "Google login linked");
 
   Ok(Redirect::to(auth.post_link_redirect()))
 }

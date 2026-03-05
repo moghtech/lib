@@ -7,6 +7,7 @@ use mogh_error::{AddStatusCode, AddStatusCodeError as _};
 use mogh_rate_limit::WithFailureRateLimit as _;
 use mogh_request_ip::RequestIp;
 use reqwest::StatusCode;
+use tracing::info;
 
 use crate::{
   AuthImpl,
@@ -94,6 +95,12 @@ pub async fn github_link<I: AuthImpl>(
       provider.get_state_and_login_redirect_url(None).await;
 
     session.insert_github_link(&user_id, &state).await?;
+
+    info!(
+      user_id = user.id(),
+      username = user.username(),
+      "Github link flow initiated"
+    );
 
     Ok(Redirect::to(&uri))
   }
@@ -188,12 +195,14 @@ pub async fn github_callback<I: AuthImpl>(
 
         let user_id = auth
           .sign_up_github_user(
-            username,
+            username.clone(),
             github_id,
             avatar_url,
             no_users_exist,
           )
           .await?;
+
+        info!(user_id, username, "New user registration (Github)");
 
         session.insert_authenticated_user_id(&user_id).await?;
 
@@ -248,8 +257,10 @@ async fn link_github_callback<I: AuthImpl>(
   }
 
   auth
-    .link_github_login(user_id, github_id, avatar_url)
+    .link_github_login(user_id.clone(), github_id, avatar_url)
     .await?;
+
+  info!(user_id, "Github login linked");
 
   Ok(Redirect::to(auth.post_link_redirect()))
 }

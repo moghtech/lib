@@ -13,7 +13,14 @@ use crate::{AuthImpl, api::manage::ManageArgs};
 //
 
 impl Resolve<ManageArgs> for BeginExternalLoginLink {
-  #[instrument("BeginExternalLoginLink", skip_all)]
+  #[instrument(
+    "BeginExternalLoginLink",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      username = user.username(),
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs {
@@ -32,7 +39,6 @@ impl Resolve<ManageArgs> for BeginExternalLoginLink {
 
 //
 
-#[instrument("UnlinkLogin", skip(auth))]
 pub async fn unlink_login<I: AuthImpl + ?Sized>(
   auth: &I,
   username: &str,
@@ -45,6 +51,15 @@ pub async fn unlink_login<I: AuthImpl + ?Sized>(
 }
 
 impl Resolve<ManageArgs> for UnlinkLogin {
+  #[instrument(
+    "UnlinkLogin",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      username = user.username(),
+      provider = self.provider.to_string()
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,

@@ -8,6 +8,7 @@ use mogh_auth_client::api::manage::{
 };
 use mogh_error::AddStatusCodeError as _;
 use mogh_resolver::Resolve;
+use tracing::{info, instrument};
 
 use crate::{
   AuthImpl,
@@ -21,6 +22,14 @@ const TOTP_ENROLLMENT_SECRET_LENGTH: usize = 40;
 //
 
 impl Resolve<ManageArgs> for BeginTotpEnrollment {
+  #[instrument(
+    "BeginTotpEnrollment",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      username = user.username(),
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs {
@@ -44,6 +53,8 @@ impl Resolve<ManageArgs> for BeginTotpEnrollment {
 
     session.insert_totp_enrollment(&totp).await?;
 
+    info!("Totp 2FA enrollment flow initiated");
+
     Ok(BeginTotpEnrollmentResponse { uri, png })
   }
 }
@@ -51,6 +62,14 @@ impl Resolve<ManageArgs> for BeginTotpEnrollment {
 //
 
 impl Resolve<ManageArgs> for ConfirmTotpEnrollment {
+  #[instrument(
+    "ConfirmTotpEnrollment",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      username = user.username(),
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs {
@@ -90,6 +109,8 @@ impl Resolve<ManageArgs> for ConfirmTotpEnrollment {
       )
       .await?;
 
+    info!("TOTP 2FA enrollment complete");
+
     Ok(ConfirmTotpEnrollmentResponse { recovery_codes })
   }
 }
@@ -107,6 +128,14 @@ pub async fn unenroll_totp<I: AuthImpl + ?Sized>(
 }
 
 impl Resolve<ManageArgs> for UnenrollTotp {
+  #[instrument(
+    "UnenrollTotp",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      username = user.username(),
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,
@@ -117,6 +146,9 @@ impl Resolve<ManageArgs> for UnenrollTotp {
       user.id().to_string(),
     )
     .await?;
+
+    info!("User unenrolled TOTP 2FA");
+
     Ok(UnenrollTotpResponse {})
   }
 }

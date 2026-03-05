@@ -7,21 +7,12 @@ use mogh_auth_client::api::manage::{
 use mogh_error::AddStatusCodeError as _;
 use mogh_resolver::Resolve;
 use reqwest::StatusCode;
-use tracing::instrument;
+use tracing::{info, instrument};
 
 use crate::{AuthImpl, api::manage::ManageArgs, rand::random_string};
 
 //
 
-#[instrument(
-  "CreateApiKey",
-  skip_all,
-  fields(
-    user_id,
-    name = &body.name,
-    expires = &body.expires
-  )
-)]
 pub async fn create_api_key<I: AuthImpl + ?Sized>(
   auth: &I,
   user_id: String,
@@ -38,13 +29,25 @@ pub async fn create_api_key<I: AuthImpl + ?Sized>(
       .context("Failed at hashing secret string")?;
 
   auth
-    .create_api_key(user_id, body, key.clone(), hashed_secret)
+    .create_api_key(user_id.clone(), body, key.clone(), hashed_secret)
     .await?;
+
+  info!(user_id, key, "Api key created");
 
   Ok(CreateApiKeyResponse { key, secret })
 }
 
 impl Resolve<ManageArgs> for CreateApiKey {
+  #[instrument(
+  "CreateApiKey",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      username = user.username(),
+      name = &self.name,
+      expires = &self.expires
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,
@@ -55,7 +58,6 @@ impl Resolve<ManageArgs> for CreateApiKey {
 
 //
 
-#[instrument("DeleteApiKey", skip_all, fields(user_id, key))]
 pub async fn delete_api_key<I: AuthImpl + ?Sized>(
   auth: &I,
   user_id: &str,
@@ -77,6 +79,15 @@ pub async fn delete_api_key<I: AuthImpl + ?Sized>(
 }
 
 impl Resolve<ManageArgs> for DeleteApiKey {
+  #[instrument(
+    "DeleteApiKey",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      username = user.username(),
+      self.key
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,
@@ -88,15 +99,6 @@ impl Resolve<ManageArgs> for DeleteApiKey {
 
 //
 
-#[instrument(
-  "CreateApiKeyV2",
-  skip_all,
-  fields(
-    user_id,
-    name = &body.name,
-    expires = &body.expires
-  )
-)]
 pub async fn create_api_key_v2<I: AuthImpl + ?Sized>(
   auth: &I,
   user_id: String,
@@ -132,6 +134,16 @@ pub async fn create_api_key_v2<I: AuthImpl + ?Sized>(
 }
 
 impl Resolve<ManageArgs> for CreateApiKeyV2 {
+  #[instrument(
+  "CreateApiKeyV2",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      username = user.username(),
+      name = &self.name,
+      expires = &self.expires
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,

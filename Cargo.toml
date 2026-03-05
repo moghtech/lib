@@ -45,12 +45,12 @@ mogh_request_ip = "1.0.1"
 mogh_resolver = "1.0.0"
 mogh_resolver_derive = "1.0.0"
 mogh_secret_file = "1.0.1"
-mogh_server = "1.4.4"
+mogh_server = "1.4.5"
 mogh_validations = "1.0.1"
 
 # ASYNC
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "query", "form", "rustls"] }
-tokio = { version = "1.49.0", features = ["full"] }
+tokio = { version = "1.50.0", features = ["full"] }
 arc-swap = "1.8.2"
 
 # SERVER
@@ -68,7 +68,7 @@ serde_yaml_ng = "0.10.0"
 serde_json = "1.0.149"
 serde_qs = "1.0.0"
 bson = "3.1.0"
-toml = "0.9.11+spec-1.1.0"
+toml = "1.0.4+spec-1.1.0"
 url = "2.5.8"
 
 # CRYPTO
@@ -82,7 +82,7 @@ webauthn-rs = { version = "0.5.4", features = ["danger-allow-state-serialisation
 openidconnect = { version = "4.0.1", features = ["accept-rfc3339-timestamps"] }
 jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
 totp-rs = { version = "5.7.0", features = ["qr", "serde_support"] }
-bcrypt = "0.18.0"
+bcrypt = "0.19.0"
 
 # PKI
 pem-rfc7468 = { version = "1.0.0", features = ["alloc"] }
@@ -106,7 +106,7 @@ opentelemetry = "0.31.0"
 tracing = "0.1.44"
 
 # MACRO
-quote = "1.0.44"
+quote = "1.0.45"
 proc-macro2 = "1.0.106"
 syn = "2.0.117"
 

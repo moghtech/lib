@@ -5,12 +5,21 @@ use mogh_auth_client::api::manage::{
   UnenrollPasskeyResponse,
 };
 use mogh_resolver::Resolve;
+use tracing::{info, instrument};
 
 use crate::{AuthImpl, api::manage::ManageArgs};
 
 //
 
 impl Resolve<ManageArgs> for BeginPasskeyEnrollment {
+  #[instrument(
+    "BeginPasskeyEnrollment",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      username = user.username(),
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs {
@@ -34,6 +43,8 @@ impl Resolve<ManageArgs> for BeginPasskeyEnrollment {
 
     session.insert_passkey_enrollment(&state).await?;
 
+    info!("Passkey 2FA enrollment flow initiated");
+
     Ok(challenge)
   }
 }
@@ -41,6 +52,14 @@ impl Resolve<ManageArgs> for BeginPasskeyEnrollment {
 //
 
 impl Resolve<ManageArgs> for ConfirmPasskeyEnrollment {
+  #[instrument(
+    "ConfirmPasskeyEnrollment",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      username = user.username(),
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs {
@@ -65,6 +84,8 @@ impl Resolve<ManageArgs> for ConfirmPasskeyEnrollment {
       )
       .await?;
 
+    info!("Passkey 2FA enrollment complete");
+
     Ok(ConfirmPasskeyEnrollmentResponse {})
   }
 }
@@ -82,6 +103,14 @@ pub async fn unenroll_passkey<I: AuthImpl + ?Sized>(
 }
 
 impl Resolve<ManageArgs> for UnenrollPasskey {
+  #[instrument(
+    "UnenrollPasskey",
+    skip_all,
+    fields(
+      user_id = user.id(),
+      username = user.username(),
+    )
+  )]
   async fn resolve(
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,
@@ -92,6 +121,9 @@ impl Resolve<ManageArgs> for UnenrollPasskey {
       user.id().to_string(),
     )
     .await?;
+
+    info!("User unenrolled passkey 2FA");
+
     Ok(UnenrollPasskeyResponse {})
   }
 }

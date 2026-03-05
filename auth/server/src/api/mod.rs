@@ -4,6 +4,7 @@ use mogh_auth_client::api::login::UserIdOrTwoFactor;
 use mogh_error::{AddStatusCode as _, AddStatusCodeError as _};
 use reqwest::StatusCode;
 use serde::Deserialize;
+use tracing::info;
 use utoipa::ToSchema;
 
 use crate::{AuthImpl, session::Session, user::BoxAuthUser};
@@ -100,6 +101,13 @@ async fn get_user_id_or_two_factor<I: AuthImpl>(
     // Skip / No 2FA
     (true, _, _) | (false, None, None) => {
       session.insert_authenticated_user_id(user.id()).await?;
+
+      info!(
+        user_id = user.id(),
+        username = user.username(),
+        "User logged in"
+      );
+
       UserIdOrTwoFactor::UserId(user.id().to_string())
     }
     // WebAuthn Passkey 2FA
@@ -111,11 +119,25 @@ async fn get_user_id_or_two_factor<I: AuthImpl>(
         .start_passkey_authentication(passkey)
         .context("Failed to start passkey authentication flow")?;
       session.insert_passkey_login(user.id(), &state).await?;
+
+      info!(
+        user_id = user.id(),
+        username = user.username(),
+        "Passkey 2FA flow initiated"
+      );
+
       UserIdOrTwoFactor::Passkey(response)
     }
     // TOTP 2FA
     (false, None, Some(_)) => {
       session.insert_totp_login_user_id(user.id()).await?;
+
+      info!(
+        user_id = user.id(),
+        username = user.username(),
+        "TOTP 2FA flow initiated"
+      );
+
       UserIdOrTwoFactor::Totp {}
     }
   };

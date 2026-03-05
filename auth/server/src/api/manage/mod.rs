@@ -97,7 +97,11 @@ async fn handler<I: AuthImpl>(
   let user_id = user.id();
 
   debug!(
-    "AUTH MANAGE REQUEST {req_id} | METHOD: {method} | USER: {username} ({user_id})",
+    api = "Auth Management",
+    req_id = req_id.to_string(),
+    method = method.to_string(),
+    user_id,
+    username,
   );
 
   let args = ManageArgs {
@@ -110,7 +114,10 @@ async fn handler<I: AuthImpl>(
 
   if let Err(e) = &res {
     debug!(
-      "AUTH MANAGE REQUEST {req_id} | METHOD: {method} | error: {:#}",
+      api = "Auth Management",
+      req_id = req_id.to_string(),
+      method = method.to_string(),
+      "ERROR: {:#}",
       e.error
     );
   }

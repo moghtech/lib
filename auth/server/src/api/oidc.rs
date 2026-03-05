@@ -8,6 +8,7 @@ use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::WithFailureRateLimit;
 use mogh_request_ip::RequestIp;
 use openidconnect::{CsrfToken, PkceCodeChallenge};
+use tracing::{debug, info, instrument};
 
 use crate::{
   AuthImpl,
@@ -130,6 +131,12 @@ pub async fn oidc_link<I: AuthImpl>(
       })
       .await?;
 
+    info!(
+      user_id = user.id(),
+      username = user.username(),
+      "OIDC link flow initiated"
+    );
+
     auth_redirect(auth_url.as_str(), &config.redirect_host)
   }
   .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), &ip)
@@ -159,6 +166,7 @@ fn auth_redirect(
   Ok(redirect)
 }
 
+#[instrument("OidcCallback", skip_all, fields(ip = ip.to_string()))]
 pub async fn oidc_callback<I: AuthImpl>(
   RequestIp(ip): RequestIp,
   session: Session,
@@ -246,25 +254,31 @@ pub async fn oidc_callback<I: AuthImpl>(
         let user_info =
           provider.fetch_user_info(token, subject.clone()).await?;
 
-        // Will use preferred_username, then email, then user_id if it isn't available.
-        let mut username = user_info
-          .preferred_username()
-          .map(|username| username.to_string())
-          .unwrap_or_else(|| {
-            let email = user_info
-              .email()
-              .map(|email| email.as_str())
-              .unwrap_or(subject.as_str());
-            if config.use_full_email {
-              email
-            } else {
+        debug!("OIDC USER INFO: {user_info:?}");
+
+        let mut username = if config.use_full_email {
+          // Uses email, falling back to subject.
+          user_info
+            .email()
+            .map(|email| email.as_str())
+            .unwrap_or(subject.as_str())
+            .to_string()
+        } else {
+          user_info
+            .preferred_username()
+            .map(|username| username.to_string())
+            .unwrap_or_else(|| {
+              let email = user_info
+                .email()
+                .map(|email| email.as_str())
+                .unwrap_or(subject.as_str());
               email
                 .split_once('@')
                 .map(|(username, _)| username)
                 .unwrap_or(email)
-            }
-            .to_string()
-          });
+                .to_string()
+            })
+        };
 
         // Modify username if it already exists
         if auth
@@ -277,8 +291,14 @@ pub async fn oidc_callback<I: AuthImpl>(
         }
 
         let user_id = auth
-          .sign_up_oidc_user(username, subject, no_users_exist)
+          .sign_up_oidc_user(
+            username.clone(),
+            subject,
+            no_users_exist,
+          )
           .await?;
+
+        info!(user_id, username, "New user registration (OIDC)");
 
         session.insert_authenticated_user_id(&user_id).await?;
 
@@ -339,7 +359,9 @@ async fn link_oidc_callback<I: AuthImpl>(
     }
   }
 
-  auth.link_oidc_login(user_id, subject).await?;
+  auth.link_oidc_login(user_id.clone(), subject).await?;
+
+  info!(user_id, "OIDC login linked");
 
   Ok(Redirect::to(auth.post_link_redirect()))
 }
