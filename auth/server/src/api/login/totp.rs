@@ -5,10 +5,19 @@ use mogh_auth_client::api::login::CompleteTotpLogin;
 use mogh_error::AddStatusCodeError as _;
 use mogh_rate_limit::WithFailureRateLimit;
 use mogh_resolver::Resolve;
+use tracing::{info, instrument};
 
 use crate::api::login::LoginArgs;
 
 impl Resolve<LoginArgs> for CompleteTotpLogin {
+  #[instrument(
+    "CompleteTotpLogin",
+    skip_all,
+    fields(
+      session = session.id().map(|id| id.to_string()),
+      ip,
+    )
+  )]
   async fn resolve(
     self,
     LoginArgs { auth, session, ip }: &LoginArgs,
@@ -37,7 +46,15 @@ impl Resolve<LoginArgs> for CompleteTotpLogin {
         );
       }
 
-      auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
+      let res = auth.jwt_provider().encode_sub(&user_id)?;
+
+      info!(
+        user_id = user.id(),
+        username = user.username(),
+        "TOTP 2FA flow complete, user logged in."
+      );
+
+      Ok(res)
     }
     .with_failure_rate_limit_using_ip(
       auth.general_rate_limiter(),

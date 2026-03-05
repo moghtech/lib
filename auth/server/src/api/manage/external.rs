@@ -6,12 +6,14 @@ use mogh_auth_client::api::{
   },
 };
 use mogh_resolver::Resolve;
+use tracing::instrument;
 
 use crate::{AuthImpl, api::manage::ManageArgs};
 
 //
 
 impl Resolve<ManageArgs> for BeginExternalLoginLink {
+  #[instrument("BeginExternalLoginLink", skip_all)]
   async fn resolve(
     self,
     ManageArgs {
@@ -30,6 +32,7 @@ impl Resolve<ManageArgs> for BeginExternalLoginLink {
 
 //
 
+#[instrument("UnlinkLogin", skip(auth))]
 pub async fn unlink_login<I: AuthImpl + ?Sized>(
   auth: &I,
   username: &str,

@@ -34,6 +34,10 @@ impl Session {
 
   const AUTHENTICATED_USER_ID: &str = "authenticated-user-id";
 
+  pub fn id(&self) -> Option<tower_sessions::session::Id> {
+    self.0.id()
+  }
+
   pub async fn insert_authenticated_user_id(
     &self,
     user_id: &str,

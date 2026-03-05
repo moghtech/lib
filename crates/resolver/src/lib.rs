@@ -12,5 +12,8 @@ pub trait HasResponse {
 }
 
 pub trait Resolve<Args = ()>: HasResponse {
-  fn resolve(self, args: &Args) -> impl Future<Output = Result<Self::Response, Self::Error>>;
+  fn resolve(
+    self,
+    args: &Args,
+  ) -> impl Future<Output = Result<Self::Response, Self::Error>>;
 }

@@ -7,11 +7,21 @@ use mogh_auth_client::api::manage::{
 use mogh_error::AddStatusCodeError as _;
 use mogh_resolver::Resolve;
 use reqwest::StatusCode;
+use tracing::instrument;
 
 use crate::{AuthImpl, api::manage::ManageArgs, rand::random_string};
 
 //
 
+#[instrument(
+  "CreateApiKey",
+  skip_all,
+  fields(
+    user_id,
+    name = &body.name,
+    expires = &body.expires
+  )
+)]
 pub async fn create_api_key<I: AuthImpl + ?Sized>(
   auth: &I,
   user_id: String,
@@ -45,6 +55,7 @@ impl Resolve<ManageArgs> for CreateApiKey {
 
 //
 
+#[instrument("DeleteApiKey", skip_all, fields(user_id, key))]
 pub async fn delete_api_key<I: AuthImpl + ?Sized>(
   auth: &I,
   user_id: &str,
@@ -77,6 +88,15 @@ impl Resolve<ManageArgs> for DeleteApiKey {
 
 //
 
+#[instrument(
+  "CreateApiKeyV2",
+  skip_all,
+  fields(
+    user_id,
+    name = &body.name,
+    expires = &body.expires
+  )
+)]
 pub async fn create_api_key_v2<I: AuthImpl + ?Sized>(
   auth: &I,
   user_id: String,
@@ -123,6 +143,7 @@ impl Resolve<ManageArgs> for CreateApiKeyV2 {
 
 //
 
+#[instrument("DeleteApiKeyV2", skip_all, fields(user_id, public_key))]
 pub async fn delete_api_key_v2<I: AuthImpl + ?Sized>(
   auth: &I,
   user_id: &str,

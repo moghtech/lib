@@ -6,9 +6,11 @@ use mogh_auth_client::api::login::{
 use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::WithFailureRateLimit;
 use mogh_resolver::Resolve;
+use tracing::{info, instrument};
 
 use crate::{AuthImpl, api::login::LoginArgs, session::Session};
 
+#[instrument("SignUpLocalUserInner", skip_all, fields(username))]
 pub async fn sign_up_local_user<I: AuthImpl + ?Sized>(
   auth: &I,
   username: String,
@@ -37,13 +39,20 @@ pub async fn sign_up_local_user<I: AuthImpl + ?Sized>(
     bcrypt::hash(password.as_bytes(), auth.local_auth_bcrypt_cost())?;
 
   let user_id = auth
-    .sign_up_local_user(username, hashed_password, no_users_exist)
+    .sign_up_local_user(
+      username.clone(),
+      hashed_password,
+      no_users_exist,
+    )
     .await?;
+
+  info!(user_id, username, "New user registration.");
 
   auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
 }
 
 impl Resolve<LoginArgs> for SignUpLocalUser {
+  #[instrument("SignUpLocalUser", skip_all, fields(ip))]
   async fn resolve(
     self,
     LoginArgs { auth, ip, .. }: &LoginArgs,
@@ -57,6 +66,7 @@ impl Resolve<LoginArgs> for SignUpLocalUser {
   }
 }
 
+#[instrument("LoginLocalUserInner", skip_all, fields(username))]
 pub async fn login_local_user<I: AuthImpl + ?Sized>(
   auth: &I,
   session: &Session,
@@ -104,14 +114,34 @@ pub async fn login_local_user<I: AuthImpl + ?Sized>(
         .start_passkey_authentication(passkey)
         .context("Failed to start passkey authentication flow")?;
       session.insert_passkey_login(user.id(), &state).await?;
+
+      info!(
+        user_id = user.id(),
+        username = user.username(),
+        "Passkey 2FA flow initiated."
+      );
+
       JwtOrTwoFactor::Passkey(response)
     }
     // TOTP 2FA
     (None, Some(_)) => {
       session.insert_totp_login_user_id(user.id()).await?;
+
+      info!(
+        user_id = user.id(),
+        username = user.username(),
+        "TOTP 2FA flow initiated."
+      );
+
       JwtOrTwoFactor::Totp {}
     }
     (None, None) => {
+      info!(
+        user_id = user.id(),
+        username = user.username(),
+        "User logged in."
+      );
+
       JwtOrTwoFactor::Jwt(auth.jwt_provider().encode_sub(user.id())?)
     }
   };
@@ -120,6 +150,14 @@ pub async fn login_local_user<I: AuthImpl + ?Sized>(
 }
 
 impl Resolve<LoginArgs> for LoginLocalUser {
+  #[instrument(
+    "LoginLocalUser",
+    skip_all,
+    fields(
+      session = session.id().map(|id| id.to_string()),
+      ip,
+    )
+  )]
   async fn resolve(
     self,
     LoginArgs { auth, session, ip }: &LoginArgs,

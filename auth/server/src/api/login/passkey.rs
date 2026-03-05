@@ -4,10 +4,19 @@ use mogh_auth_client::api::login::CompletePasskeyLogin;
 use mogh_error::AddStatusCode;
 use mogh_rate_limit::WithFailureRateLimit;
 use mogh_resolver::Resolve;
+use tracing::{info, instrument};
 
 use crate::api::login::LoginArgs;
 
 impl Resolve<LoginArgs> for CompletePasskeyLogin {
+  #[instrument(
+    "CompletePasskeyLogin",
+    skip_all,
+    fields(
+      session = session.id().map(|id| id.to_string()),
+      ip,
+    )
+  )]
   async fn resolve(
     self,
     LoginArgs { auth, session, ip }: &LoginArgs,
@@ -29,9 +38,11 @@ impl Resolve<LoginArgs> for CompletePasskeyLogin {
         .context("Failed to validate passkey")
         .status_code(StatusCode::UNAUTHORIZED)?;
 
-      let mut passkey = auth
+      let user = auth
         .get_user(user_id.clone())
-        .await?
+        .await?;
+
+      let mut passkey = user
         .passkey()
         .context("User is not enrolled in Passkey 2FA")?;
 
@@ -40,7 +51,13 @@ impl Resolve<LoginArgs> for CompletePasskeyLogin {
       let response =  auth.jwt_provider().encode_sub(&user_id)?;
 
       // Update the stored passkey on the database
-      auth.update_user_stored_passkey(user_id, Some(passkey)).await?;
+      auth.update_user_stored_passkey(user_id.clone(), Some(passkey)).await?;
+
+      info!(
+        user_id = user.id(),
+        username = user.username(),
+        "Passkey 2FA flow complete, user logged in."
+      );
 
       Ok(response)
     }

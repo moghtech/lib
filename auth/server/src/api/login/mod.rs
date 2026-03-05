@@ -9,7 +9,7 @@ use mogh_resolver::Resolve;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strum::{Display, EnumDiscriminants};
-use tracing::debug;
+use tracing::{debug, instrument};
 use typeshare::typeshare;
 use uuid::Uuid;
 
@@ -122,6 +122,14 @@ impl Resolve<LoginArgs> for GetLoginOptions {
 }
 
 impl Resolve<LoginArgs> for ExchangeForJwt {
+  #[instrument(
+    "ExchangeForJwt",
+    skip_all,
+    fields(
+      session = session.id().map(|id| id.to_string()),
+      ip,
+    )
+  )]
   async fn resolve(
     self,
     LoginArgs { auth, session, ip }: &LoginArgs,
