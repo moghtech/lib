@@ -7,18 +7,30 @@ use anyhow::{Context, anyhow};
 use arc_swap::ArcSwapOption;
 use mogh_auth_client::config::OidcConfig;
 use openidconnect::{
-  AccessToken, AccessTokenHash, AuthorizationCode, Client, ClientId,
-  ClientSecret, CsrfToken, EmptyAdditionalClaims, EndpointMaybeSet,
-  EndpointNotSet, EndpointSet, IssuerUrl, Nonce, OAuth2TokenResponse,
-  PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
-  StandardErrorResponse, TokenResponse as _, UserInfoClaims,
+  AccessTokenHash, AuthorizationCode, Client, ClientId, ClientSecret,
+  CsrfToken, EmptyAdditionalClaims, EmptyExtraTokenFields,
+  EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields,
+  IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
+  PkceCodeVerifier, RedirectUrl, Scope, StandardErrorResponse,
+  StandardTokenResponse, TokenResponse as _,
   core::*,
   reqwest::{self, Url},
 };
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{debug, error};
 
 pub use openidconnect::SubjectIdentifier;
+
+pub type TokenResponse = StandardTokenResponse<
+  IdTokenFields<
+    EmptyAdditionalClaims,
+    EmptyExtraTokenFields,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm,
+  >,
+  CoreTokenType,
+>;
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionOidcLogin {
@@ -120,6 +132,7 @@ pub struct OidcProvider {
   app_user_agent: &'static str,
   client: InnerOidcProvider,
   valid_until: u128,
+  use_full_email: bool,
 }
 
 impl OidcProvider {
@@ -167,6 +180,7 @@ impl OidcProvider {
       client,
       valid_until,
       app_user_agent,
+      use_full_email: config.use_full_email,
     })
   }
 
@@ -196,8 +210,8 @@ impl OidcProvider {
     (client, server): (CsrfToken, String),
     code: String,
     pkce_verifier: PkceCodeVerifier,
-    nonce: Nonce,
-  ) -> anyhow::Result<(SubjectIdentifier, AccessToken)> {
+    nonce: &Nonce,
+  ) -> anyhow::Result<(SubjectIdentifier, TokenResponse)> {
     // Validate CSRF tokens match
     if client.secret() != &server {
       return Err(anyhow!("CSRF token invalid"));
@@ -231,7 +245,7 @@ impl OidcProvider {
     };
 
     let claims = id_token
-      .claims(&verifier, &nonce)
+      .claims(&verifier, nonce)
       .context("Failed to verify token claims. This issue may be temporary (60 seconds max).")?;
 
     // Verify the access token hash to ensure that the access token hasn't been substituted for
@@ -249,27 +263,166 @@ impl OidcProvider {
       }
     }
 
-    Ok((
-      claims.subject().clone(),
-      token_response.access_token().clone(),
-    ))
+    Ok((claims.subject().clone(), token_response))
   }
 
-  pub async fn fetch_user_info(
+  pub async fn get_username(
     &self,
-    access_token: AccessToken,
-    subject: SubjectIdentifier,
-  ) -> anyhow::Result<
-    UserInfoClaims<EmptyAdditionalClaims, CoreGenderClaim>,
-  > {
-    self
-      .client
-      .user_info(access_token, Some(subject))
-      .context("Invalid user info request")?
-      .request_async::<EmptyAdditionalClaims, _, CoreGenderClaim>(
-        reqwest(self.app_user_agent),
-      )
-      .await
-      .context("Failed to fetch OIDC user info")
+    subject: &SubjectIdentifier,
+    token: &TokenResponse,
+    nonce: &Nonce,
+  ) -> String {
+    if self.use_full_email {
+      return self
+        .get_username_prioritize_email(subject, token, nonce)
+        .await;
+    }
+
+    let id_claims = token.id_token().and_then(|token| {
+      token
+        .claims(&self.client.id_token_verifier(), nonce)
+        .inspect(|claims| debug!("OIDC ID TOKEN CLAIMS: {claims:?}"))
+        .ok()
+    });
+
+    // Priority 1: preferred_username from id_token.
+    if let Some(username) = id_claims.as_ref().and_then(|claims| {
+      claims.preferred_username()?.to_string().into()
+    }) {
+      return username;
+    }
+
+    // Get networked user info
+    let user_info = async {
+      self
+        .client
+        .user_info(
+          token.access_token().clone(),
+          Some(subject.clone()),
+        )
+        .ok()?
+        .request_async::<EmptyAdditionalClaims, _, CoreGenderClaim>(
+          reqwest(self.app_user_agent),
+        )
+        .await
+        .inspect(|user_info| debug!("OIDC USER INFO: {user_info:?}"))
+        .ok()
+    }
+    .await;
+
+    // Priority 2: preferred_username from user_info
+    if let Some(username) = user_info.as_ref().and_then(|user_info| {
+      user_info.preferred_username()?.to_string().into()
+    }) {
+      return username;
+    }
+
+    // Priority 3: name from id claims, then user info
+    if let Some(username) = id_claims
+      .as_ref()
+      .and_then(|id_claims| {
+        id_claims.name()?.get(None)?.to_string().into()
+      })
+      .or_else(|| {
+        user_info.as_ref()?.name()?.get(None)?.to_string().into()
+      })
+    {
+      return username;
+    }
+
+    // Priority 4: username part of email from id claims, then user info
+    if let Some(email) = id_claims
+      .as_ref()
+      .and_then(|id_claims| id_claims.email()?.to_string().into())
+      .or_else(|| user_info.as_ref()?.email()?.to_string().into())
+    {
+      let username = email
+        .split_once('@')
+        .map(|(username, _)| username)
+        .unwrap_or(email.as_str())
+        .to_string();
+      return username;
+    }
+
+    // Priority 5 (fallback): use the subject if no others available
+    subject.to_string()
+  }
+
+  /// Used with 'use_full_email' option
+  pub async fn get_username_prioritize_email(
+    &self,
+    subject: &SubjectIdentifier,
+    token: &TokenResponse,
+    nonce: &Nonce,
+  ) -> String {
+    let id_claims = token.id_token().and_then(|token| {
+      token
+        .claims(&self.client.id_token_verifier(), nonce)
+        .inspect(|claims| debug!("OIDC ID TOKEN CLAIMS: {claims:?}"))
+        .ok()
+    });
+
+    // Priority 1: email from id_token.
+    if let Some(email) = id_claims
+      .as_ref()
+      .and_then(|claims| claims.email()?.to_string().into())
+    {
+      return email;
+    }
+
+    // Get networked user info
+    let user_info = async {
+      self
+        .client
+        .user_info(
+          token.access_token().clone(),
+          Some(subject.clone()),
+        )
+        .ok()?
+        .request_async::<EmptyAdditionalClaims, _, CoreGenderClaim>(
+          reqwest(self.app_user_agent),
+        )
+        .await
+        .inspect(|user_info| debug!("OIDC USER INFO: {user_info:?}"))
+        .ok()
+    }
+    .await;
+
+    // Priority 2: email from user_info
+    if let Some(username) = user_info
+      .as_ref()
+      .and_then(|user_info| user_info.email()?.to_string().into())
+    {
+      return username;
+    }
+
+    // Priority 3: preferred_username from id claims, then user info
+    if let Some(username) = id_claims
+      .as_ref()
+      .and_then(|id_claims| {
+        id_claims.preferred_username()?.to_string().into()
+      })
+      .or_else(|| {
+        user_info.as_ref()?.preferred_username()?.to_string().into()
+      })
+    {
+      return username;
+    }
+
+    // Priority 4: name from id claims, then user info
+    if let Some(username) = id_claims
+      .as_ref()
+      .and_then(|id_claims| {
+        id_claims.name()?.get(None)?.to_string().into()
+      })
+      .or_else(|| {
+        user_info.as_ref()?.name()?.get(None)?.to_string().into()
+      })
+    {
+      return username;
+    }
+
+    // Priority 5 (fallback): use the subject if no others available
+    subject.to_string()
   }
 }

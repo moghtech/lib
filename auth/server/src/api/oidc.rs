@@ -8,7 +8,7 @@ use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::WithFailureRateLimit;
 use mogh_request_ip::RequestIp;
 use openidconnect::{CsrfToken, PkceCodeChallenge};
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
 use crate::{
   AuthImpl,
@@ -227,7 +227,7 @@ pub async fn oidc_callback<I: AuthImpl>(
         (state, csrf_token),
         code,
         pkce_verifier,
-        nonce,
+        &nonce,
       )
       .await?;
 
@@ -250,48 +250,8 @@ pub async fn oidc_callback<I: AuthImpl>(
           );
         }
 
-        // Fetch user info
-        let user_info =
-          provider.fetch_user_info(token, subject.clone()).await?;
-
-        debug!("OIDC USER INFO: {user_info:?}");
-
-        let mut username = if config.use_full_email {
-          user_info
-            .email()
-            .map(|email| email.as_str())
-            .or_else(|| {
-              user_info
-                .preferred_username()
-                .map(|username| username.as_str())
-            })
-            .or_else(|| {
-              user_info.name().and_then(|name| {
-                name.get(None).map(|name| name.as_str())
-              })
-            })
-            .unwrap_or(subject.as_str())
-        } else {
-          user_info
-            .preferred_username()
-            .map(|username| username.as_str())
-            .or_else(|| {
-              user_info.name().and_then(|name| {
-                name.get(None).map(|name| name.as_str())
-              })
-            })
-            .unwrap_or_else(|| {
-              let email = user_info
-                .email()
-                .map(|email| email.as_str())
-                .unwrap_or(subject.as_str());
-              email
-                .split_once('@')
-                .map(|(username, _)| username)
-                .unwrap_or(email)
-            })
-        }
-        .to_string();
+        let mut username =
+          provider.get_username(&subject, &token, &nonce).await;
 
         // Modify username if it already exists
         if auth
@@ -354,7 +314,7 @@ async fn link_oidc_callback<I: AuthImpl>(
       (state, csrf_token),
       code,
       pkce_verifier,
-      nonce,
+      &nonce,
     )
     .await?;
 
