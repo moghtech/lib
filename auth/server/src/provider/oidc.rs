@@ -7,8 +7,8 @@ use anyhow::{Context, anyhow};
 use arc_swap::ArcSwapOption;
 use mogh_auth_client::config::OidcConfig;
 use openidconnect::{
-  AccessTokenHash, AuthorizationCode, Client, ClientId, ClientSecret,
-  CsrfToken, EmptyAdditionalClaims, EmptyExtraTokenFields,
+  AccessTokenHash, AdditionalClaims, AuthorizationCode, Client,
+  ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
   EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields,
   IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
   PkceCodeVerifier, RedirectUrl, Scope, StandardErrorResponse,
@@ -21,9 +21,18 @@ use tracing::{debug, error};
 
 pub use openidconnect::SubjectIdentifier;
 
+/// Some OIDC providers use 'username' additional claim
+/// rather than the standard 'preferred_username'
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsernameAdditionalClaims {
+  pub username: Option<String>,
+}
+
+impl AdditionalClaims for UsernameAdditionalClaims {}
+
 pub type TokenResponse = StandardTokenResponse<
   IdTokenFields<
-    EmptyAdditionalClaims,
+    UsernameAdditionalClaims,
     EmptyExtraTokenFields,
     CoreGenderClaim,
     CoreJweContentEncryptionAlgorithm,
@@ -62,14 +71,14 @@ fn reqwest(app_user_agent: &str) -> &'static reqwest::Client {
 }
 
 pub type InnerOidcProvider = Client<
-  EmptyAdditionalClaims,
+  UsernameAdditionalClaims,
   CoreAuthDisplay,
   CoreGenderClaim,
   CoreJweContentEncryptionAlgorithm,
   CoreJsonWebKey,
   CoreAuthPrompt,
   StandardErrorResponse<CoreErrorResponseType>,
-  CoreTokenResponse,
+  TokenResponse,
   CoreTokenIntrospectionResponse,
   CoreRevocableToken,
   CoreRevocationErrorResponse,
@@ -161,7 +170,7 @@ impl OidcProvider {
       "Failed to get OIDC /.well-known/openid-configuration",
     )?;
 
-    let client = CoreClient::from_provider_metadata(
+    let client = InnerOidcProvider::from_provider_metadata(
       provider_metadata,
       ClientId::new(config.client_id.to_string()),
       // The secret may be empty / ommitted if auth provider supports PKCE
@@ -301,7 +310,7 @@ impl OidcProvider {
           Some(subject.clone()),
         )
         .ok()?
-        .request_async::<EmptyAdditionalClaims, _, CoreGenderClaim>(
+        .request_async::<UsernameAdditionalClaims, _, CoreGenderClaim>(
           reqwest(self.app_user_agent),
         )
         .await
@@ -317,7 +326,20 @@ impl OidcProvider {
       return username;
     }
 
-    // Priority 3: name from id claims, then user info
+    // Priority 3: username additional claim from id claims, then user info
+    if let Some(username) = id_claims
+      .as_ref()
+      .and_then(|id_claims| {
+        id_claims.additional_claims().username.clone()
+      })
+      .or_else(|| {
+        user_info.as_ref()?.additional_claims().username.clone()
+      })
+    {
+      return username;
+    }
+
+    // Priority 4: name from id claims, then user info
     if let Some(username) = id_claims
       .as_ref()
       .and_then(|id_claims| {
@@ -330,7 +352,7 @@ impl OidcProvider {
       return username;
     }
 
-    // Priority 4: username part of email from id claims, then user info
+    // Priority 5: username part of email from id claims, then user info
     if let Some(email) = id_claims
       .as_ref()
       .and_then(|id_claims| id_claims.email()?.to_string().into())
@@ -344,7 +366,7 @@ impl OidcProvider {
       return username;
     }
 
-    // Priority 5 (fallback): use the subject if no others available
+    // Priority 6 (fallback): use the subject if no others available
     subject.to_string()
   }
 
@@ -379,7 +401,7 @@ impl OidcProvider {
           Some(subject.clone()),
         )
         .ok()?
-        .request_async::<EmptyAdditionalClaims, _, CoreGenderClaim>(
+        .request_async::<UsernameAdditionalClaims, _, CoreGenderClaim>(
           reqwest(self.app_user_agent),
         )
         .await
@@ -409,7 +431,20 @@ impl OidcProvider {
       return username;
     }
 
-    // Priority 4: name from id claims, then user info
+    // Priority 4: username additional claim from id claims, then user info
+    if let Some(username) = id_claims
+      .as_ref()
+      .and_then(|id_claims| {
+        id_claims.additional_claims().username.clone()
+      })
+      .or_else(|| {
+        user_info.as_ref()?.additional_claims().username.clone()
+      })
+    {
+      return username;
+    }
+
+    // Priority 5: name from id claims, then user info
     if let Some(username) = id_claims
       .as_ref()
       .and_then(|id_claims| {
@@ -422,7 +457,7 @@ impl OidcProvider {
       return username;
     }
 
-    // Priority 5 (fallback): use the subject if no others available
+    // Priority 6 (fallback): use the subject if no others available
     subject.to_string()
   }
 }
