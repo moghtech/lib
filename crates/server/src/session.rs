@@ -10,8 +10,9 @@ pub trait SessionConfig {
   fn host_env_field(&self) -> &str {
     "HOST"
   }
+  /// How long session stays valid
   fn expiry_seconds(&self) -> i64 {
-    60
+    60 * 3
   }
   /// Enable in UI development context for login
   /// to work.
