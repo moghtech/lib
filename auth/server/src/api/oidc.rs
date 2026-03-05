@@ -257,16 +257,29 @@ pub async fn oidc_callback<I: AuthImpl>(
         debug!("OIDC USER INFO: {user_info:?}");
 
         let mut username = if config.use_full_email {
-          // Uses email, falling back to subject.
           user_info
             .email()
             .map(|email| email.as_str())
+            .or_else(|| {
+              user_info
+                .preferred_username()
+                .map(|username| username.as_str())
+            })
+            .or_else(|| {
+              user_info.name().and_then(|name| {
+                name.get(None).map(|name| name.as_str())
+              })
+            })
             .unwrap_or(subject.as_str())
-            .to_string()
         } else {
           user_info
             .preferred_username()
-            .map(|username| username.to_string())
+            .map(|username| username.as_str())
+            .or_else(|| {
+              user_info.name().and_then(|name| {
+                name.get(None).map(|name| name.as_str())
+              })
+            })
             .unwrap_or_else(|| {
               let email = user_info
                 .email()
@@ -276,9 +289,9 @@ pub async fn oidc_callback<I: AuthImpl>(
                 .split_once('@')
                 .map(|(username, _)| username)
                 .unwrap_or(email)
-                .to_string()
             })
-        };
+        }
+        .to_string();
 
         // Modify username if it already exists
         if auth
