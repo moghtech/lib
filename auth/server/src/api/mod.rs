@@ -1,5 +1,6 @@
 use anyhow::{Context as _, anyhow};
 use axum::{Router, response::Redirect, routing::get};
+use data_encoding::BASE64URL;
 use mogh_auth_client::api::login::UserIdOrTwoFactor;
 use mogh_error::{AddStatusCode as _, AddStatusCodeError as _};
 use reqwest::StatusCode;
@@ -157,9 +158,9 @@ fn user_id_or_two_factor_redirect<I: AuthImpl>(
       Ok(format_redirect(auth.host(), redirect, "totp=true"))
     }
     UserIdOrTwoFactor::Passkey(passkey) => {
-      let passkey = serde_json::to_string(&passkey)
+      let passkey = serde_json::to_vec(&passkey)
         .context("Failed to serialize passkey response")?;
-      let passkey = urlencoding::encode(&passkey);
+      let passkey = BASE64URL.encode(&passkey);
       Ok(format_redirect(
         auth.host(),
         redirect,
