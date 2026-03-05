@@ -51,7 +51,7 @@ impl Resolve<LoginArgs> for CompleteTotpLogin {
       info!(
         user_id = user.id(),
         username = user.username(),
-        "TOTP 2FA flow complete, user logged in."
+        "TOTP 2FA flow complete, user logged in"
       );
 
       Ok(res)

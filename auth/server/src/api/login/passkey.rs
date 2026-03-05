@@ -56,7 +56,7 @@ impl Resolve<LoginArgs> for CompletePasskeyLogin {
       info!(
         user_id = user.id(),
         username = user.username(),
-        "Passkey 2FA flow complete, user logged in."
+        "Passkey 2FA flow complete, user logged in"
       );
 
       Ok(response)

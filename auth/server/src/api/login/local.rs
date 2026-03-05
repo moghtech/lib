@@ -46,7 +46,7 @@ pub async fn sign_up_local_user<I: AuthImpl + ?Sized>(
     )
     .await?;
 
-  info!(user_id, username, "New user registration.");
+  info!(user_id, username, "New user registration");
 
   auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
 }
@@ -108,8 +108,8 @@ pub async fn login_local_user<I: AuthImpl + ?Sized>(
     // Passkey 2FA
     (Some(passkey), _) => {
       let provider = auth.passkey_provider().context(
-            "No passkey provider available, possibly invalid 'host' config.",
-          )?;
+        "No passkey provider available, possibly invalid 'host' config.",
+      )?;
       let (response, state) = provider
         .start_passkey_authentication(passkey)
         .context("Failed to start passkey authentication flow")?;
@@ -118,7 +118,7 @@ pub async fn login_local_user<I: AuthImpl + ?Sized>(
       info!(
         user_id = user.id(),
         username = user.username(),
-        "Passkey 2FA flow initiated."
+        "Passkey 2FA flow initiated"
       );
 
       JwtOrTwoFactor::Passkey(response)
@@ -130,7 +130,7 @@ pub async fn login_local_user<I: AuthImpl + ?Sized>(
       info!(
         user_id = user.id(),
         username = user.username(),
-        "TOTP 2FA flow initiated."
+        "TOTP 2FA flow initiated"
       );
 
       JwtOrTwoFactor::Totp {}
@@ -139,7 +139,7 @@ pub async fn login_local_user<I: AuthImpl + ?Sized>(
       info!(
         user_id = user.id(),
         username = user.username(),
-        "User logged in."
+        "User logged in"
       );
 
       JwtOrTwoFactor::Jwt(auth.jwt_provider().encode_sub(user.id())?)
