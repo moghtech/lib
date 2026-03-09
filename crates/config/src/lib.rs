@@ -70,7 +70,7 @@ impl ConfigLoader<'_, '_> {
       match wildcard::Wildcard::new(wc.as_bytes()) {
         Ok(wc) => wildcards.push(wc),
         Err(e) => {
-          eprintln!(
+          println!(
             "{}: Keyword '{}' is invalid wildcard | {e:?}",
             "ERROR".red(),
             wc.bold(),

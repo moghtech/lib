@@ -111,7 +111,7 @@ pub fn load_parse_config_files<T: DeserializeOwned>(
     let source = match load_parse_config_file(file) {
       Ok(source) => source,
       Err(e) => {
-        eprintln!("{}: {e}", "WARN".yellow());
+        println!("{}: {e}", "WARN".yellow());
         continue;
       }
     };

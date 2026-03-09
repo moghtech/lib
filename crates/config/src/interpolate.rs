@@ -49,7 +49,7 @@ fn try_get_env_extended(var_name: &str, shell: &str) -> String {
   };
   String::from_utf8(output.stdout)
     .map(|value| value.trim().to_string())
-    .inspect_err(|e| eprintln!("{}: Failed to parse shell stdout for ${var_name} as utf-8: {e}", "WARN".yellow()))
+    .inspect_err(|e| println!("{}: Failed to parse shell stdout for ${var_name} as utf-8: {e}", "WARN".yellow()))
     .unwrap_or_default()
 }
 
@@ -65,13 +65,13 @@ pub fn interpolate_shell(input: &str, shell: &str) -> String {
         .arg("-c")
         .arg(command)
         .output()
-        .inspect_err(|e| eprintln!("{}: Failed to get output for $({command}): {e}", "WARN".yellow()))
+        .inspect_err(|e| println!("{}: Failed to get output for $({command}): {e}", "WARN".yellow()))
       else {
         return String::new();
       };
       String::from_utf8(output.stdout)
         .map(|value| value.trim().to_string())
-        .inspect_err(|e| eprintln!("{}: Failed to parse shell stdout for $({command}) as utf-8: {e}", "WARN".yellow()))
+        .inspect_err(|e| println!("{}: Failed to parse shell stdout for $({command}) as utf-8: {e}", "WARN".yellow()))
         .unwrap_or_default()
     })
     .into_owned()
