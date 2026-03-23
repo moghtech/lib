@@ -176,7 +176,8 @@ impl Pkcs8PrivateKey {
       Self::raw_bytes(maybe_pkcs8_private_key.as_bytes())
     } else if len <= 32 {
       let mut res = [0u8; 32];
-      res.copy_from_slice(maybe_pkcs8_private_key.as_bytes());
+      res[..maybe_pkcs8_private_key.len()]
+        .copy_from_slice(maybe_pkcs8_private_key.as_bytes());
       Ok(res)
     } else {
       Err(anyhow!(
@@ -196,10 +197,11 @@ impl Pkcs8PrivateKey {
     }
     let octet = OctetStringRef::from_der(pki.private_key)
       .map_err(anyhow::Error::msg)
-      .context("Failed to get octet string ref from private key")?;
+      .context("Failed to get octet string ref from private key")?
+      .as_bytes();
 
     let mut res = [0u8; 32];
-    res.copy_from_slice(octet.as_bytes());
+    res[..octet.len()].copy_from_slice(octet);
     Ok(res)
   }
 
