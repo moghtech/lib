@@ -31,15 +31,15 @@ mogh_validations = { path = "crates/validations" }
 [workspace.dependencies]
 # MOGH API
 mogh_auth_client = "1.2.2"
-mogh_auth_server = "1.2.12"
+mogh_auth_server = "1.2.13"
 
 # MOGH
 mogh_cache = "1.1.2"
-mogh_config = "1.0.3"
+mogh_config = "1.0.4"
 mogh_encryption = "0.1.1"
 mogh_error = "1.0.4"
-mogh_logger = "1.3.1"
-mogh_pki = "1.1.1"
+mogh_logger = "1.3.2"
+mogh_pki = "1.1.2"
 mogh_rate_limit = "1.0.1"
 mogh_request_ip = "1.0.1"
 mogh_resolver = "1.0.0"
@@ -51,7 +51,7 @@ mogh_validations = "1.0.1"
 # ASYNC
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "query", "form", "rustls"] }
 tokio = { version = "1.50.0", features = ["full"] }
-arc-swap = "1.8.2"
+arc-swap = "1.9.0"
 
 # SERVER
 tower-http = { version = "0.6.8", features = ["fs", "cors", "set-header"] }
@@ -68,7 +68,7 @@ serde_yaml_ng = "0.10.0"
 serde_json = "1.0.149"
 serde_qs = "1.0.0"
 bson = "3.1.0"
-toml = "1.0.4+spec-1.1.0"
+toml = "1.1.0+spec-1.1.0"
 url = "2.5.8"
 
 # CRYPTO
@@ -81,7 +81,7 @@ rand = "0.10.0"
 webauthn-rs = { version = "0.5.4", features = ["danger-allow-state-serialisation"] }
 openidconnect = { version = "4.0.1", features = ["accept-rfc3339-timestamps"] }
 jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
-totp-rs = { version = "5.7.0", features = ["qr", "serde_support"] }
+totp-rs = { version = "5.7.1", features = ["qr", "serde_support"] }
 bcrypt = "0.19.0"
 
 # PKI
@@ -97,9 +97,9 @@ anyhow = "1.0.102"
 thiserror = "2.0.18"
 
 # LOGGING
-opentelemetry-otlp = { version = "0.31.0", features = ["tls-roots", "reqwest-rustls"] }
+opentelemetry-otlp = { version = "0.31.1", features = ["tls-roots", "reqwest-rustls"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
-tracing-subscriber = { version = "0.3.22", features = ["json"] }
+tracing-subscriber = { version = "0.3.23", features = ["json"] }
 opentelemetry-semantic-conventions = "0.31.0"
 tracing-opentelemetry = "0.32.1"
 opentelemetry = "0.31.0"
@@ -111,8 +111,8 @@ proc-macro2 = "1.0.106"
 syn = "2.0.117"
 
 # MISC
-clap = { version = "4.5.60", features = ["derive"] }
-uuid = { version = "1.21.0", features = ["v4"] }
+clap = { version = "4.6.0", features = ["derive"] }
+uuid = { version = "1.22.0", features = ["v4"] }
 typeshare = "1.0.5"
 wildcard = "0.3.0"
 colored = "3.1.1"
