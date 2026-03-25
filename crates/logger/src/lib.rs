@@ -22,8 +22,13 @@ pub fn init(config: impl config::LogConfig) -> anyhow::Result<()> {
 
   let use_otel = !config.otlp_endpoint().is_empty();
 
-  match (config.stdio(), use_otel, config.pretty()) {
-    (StdioLogMode::Standard, true, true) => registry
+  match (
+    config.stdio(),
+    use_otel,
+    config.pretty(),
+    config.timestamps(),
+  ) {
+    (StdioLogMode::Standard, true, true, true) => registry
       .with(
         tracing_subscriber::fmt::layer()
           .pretty()
@@ -34,7 +39,19 @@ pub fn init(config: impl config::LogConfig) -> anyhow::Result<()> {
       )
       .with(otel::layer(config))
       .try_init(),
-    (StdioLogMode::Standard, true, false) => registry
+    (StdioLogMode::Standard, true, true, false) => registry
+      .with(
+        tracing_subscriber::fmt::layer()
+          .pretty()
+          .with_file(false)
+          .with_line_number(false)
+          .with_target(config.location())
+          .with_ansi(config.ansi())
+          .without_time(),
+      )
+      .with(otel::layer(config))
+      .try_init(),
+    (StdioLogMode::Standard, true, false, true) => registry
       .with(
         tracing_subscriber::fmt::layer()
           .with_file(false)
@@ -44,13 +61,28 @@ pub fn init(config: impl config::LogConfig) -> anyhow::Result<()> {
       )
       .with(otel::layer(config))
       .try_init(),
-
-    (StdioLogMode::Json, true, _) => registry
-      .with(tracing_subscriber::fmt::layer().json())
+    (StdioLogMode::Standard, true, false, false) => registry
+      .with(
+        tracing_subscriber::fmt::layer()
+          .with_file(false)
+          .with_line_number(false)
+          .with_target(config.location())
+          .with_ansi(config.ansi())
+          .without_time(),
+      )
       .with(otel::layer(config))
       .try_init(),
 
-    (StdioLogMode::Standard, false, true) => registry
+    (StdioLogMode::Json, true, _, true) => registry
+      .with(tracing_subscriber::fmt::layer().json())
+      .with(otel::layer(config))
+      .try_init(),
+    (StdioLogMode::Json, true, _, false) => registry
+      .with(tracing_subscriber::fmt::layer().json().without_time())
+      .with(otel::layer(config))
+      .try_init(),
+
+    (StdioLogMode::Standard, false, true, true) => registry
       .with(
         tracing_subscriber::fmt::layer()
           .pretty()
@@ -60,7 +92,18 @@ pub fn init(config: impl config::LogConfig) -> anyhow::Result<()> {
           .with_ansi(config.ansi()),
       )
       .try_init(),
-    (StdioLogMode::Standard, false, false) => registry
+    (StdioLogMode::Standard, false, true, false) => registry
+      .with(
+        tracing_subscriber::fmt::layer()
+          .pretty()
+          .with_file(false)
+          .with_line_number(false)
+          .with_target(config.location())
+          .with_ansi(config.ansi())
+          .without_time(),
+      )
+      .try_init(),
+    (StdioLogMode::Standard, false, false, true) => registry
       .with(
         tracing_subscriber::fmt::layer()
           .with_file(false)
@@ -69,15 +112,28 @@ pub fn init(config: impl config::LogConfig) -> anyhow::Result<()> {
           .with_ansi(config.ansi()),
       )
       .try_init(),
-
-    (StdioLogMode::Json, false, _) => registry
-      .with(tracing_subscriber::fmt::layer().json())
+    (StdioLogMode::Standard, false, false, false) => registry
+      .with(
+        tracing_subscriber::fmt::layer()
+          .with_file(false)
+          .with_line_number(false)
+          .with_target(config.location())
+          .with_ansi(config.ansi())
+          .without_time(),
+      )
       .try_init(),
 
-    (StdioLogMode::None, true, _) => {
+    (StdioLogMode::Json, false, _, true) => registry
+      .with(tracing_subscriber::fmt::layer().json())
+      .try_init(),
+    (StdioLogMode::Json, false, _, false) => registry
+      .with(tracing_subscriber::fmt::layer().json().without_time())
+      .try_init(),
+
+    (StdioLogMode::None, true, _, _) => {
       registry.with(otel::layer(config)).try_init()
     }
-    (StdioLogMode::None, false, _) => Ok(()),
+    (StdioLogMode::None, false, _, _) => Ok(()),
   }
   .context("failed to init logger")
 }

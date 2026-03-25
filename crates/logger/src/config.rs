@@ -33,6 +33,11 @@ pub trait LogConfig {
     true
   }
 
+  /// Include timestamps with logs
+  fn timestamps(&self) -> bool {
+    true
+  }
+
   /// Enable opentelemetry exporting.
   /// Empty string disables exporting.
   fn otlp_endpoint(&self) -> &str {
