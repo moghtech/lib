@@ -267,6 +267,8 @@ export interface GetLoginOptionsResponse {
 	google: boolean;
 	/** Whether user registration (Sign Up) has been disabled */
 	registration_disabled: boolean;
+	/** Whether the login page should auto-redirect to the OIDC provider */
+	oidc_auto_redirect: boolean;
 }
 
 /** Login as a local user. */
