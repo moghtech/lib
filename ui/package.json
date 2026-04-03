@@ -23,13 +23,14 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup && cp src/index.scss dist/index.scss",
+    "build": "tsup && cd src && find . -name '*.scss' -exec cp --parents {} ../dist \\;",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
     "@mantine/core": "^9.0.0",
     "@mantine/hooks": "^9.0.0",
+    "lucide-react": "^1.7.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -38,6 +39,7 @@
     "@mantine/hooks": "^9.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "lucide-react": "^1.7.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tsup": "^8.5.1",

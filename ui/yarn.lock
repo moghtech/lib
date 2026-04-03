@@ -494,6 +494,11 @@ load-tsconfig@^0.2.3:
   resolved "https://registry.yarnpkg.com/load-tsconfig/-/load-tsconfig-0.2.5.tgz#453b8cd8961bfb912dea77eb6c168fe8cca3d3a1"
   integrity sha512-IXO6OCs9yg8tMKzfPZ1YmheJbZCiEsnBdcB03l0OcfK9prKnJb96siuHCr5Fl37/yo9DnKU+TLpxzTUspw9shg==
 
+lucide-react@^1.7.0:
+  version "1.7.0"
+  resolved "https://registry.yarnpkg.com/lucide-react/-/lucide-react-1.7.0.tgz#ad72fe48ebe1e5631a9cffdc94fc99dd853aa247"
+  integrity sha512-yI7BeItCLZJTXikmK4KNUGCKoGzSvbKlfCvw44bU4fXAL6v3gYS4uHD1jzsLkfwODYwI6Drw5Tu9Z5ulDe0TSg==
+
 magic-string@^0.30.17:
   version "0.30.21"
   resolved "https://registry.yarnpkg.com/magic-string/-/magic-string-0.30.21.tgz#56763ec09a0fa8091df27879fd94d19078c00d91"
