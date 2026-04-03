@@ -1,0 +1,11 @@
+[install-ui]
+alias = "iu"
+cmd = """
+yarn
+"""
+
+[build-ui]
+alias = "bu"
+cmd = """
+yarn build
+"""
