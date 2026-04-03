@@ -34,7 +34,8 @@
     "@tanstack/react-table": "^8.21.3",
     "lucide-react": "^1.7.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.14.0"
   },
   "devDependencies": {
     "@mantine/core": "^9.0.0",
@@ -46,6 +47,7 @@
     "lucide-react": "^1.7.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-router-dom": "^7.14.0",
     "tsup": "^8.5.1",
     "typescript": "^6.0.2"
   }
