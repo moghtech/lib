@@ -61,7 +61,7 @@ tower-sessions = "0.15.0"
 urlencoding = "2.1.3"
 
 # SER/DE
-indexmap = { version = "2.13.0", features = ["serde"] }
+indexmap = { version = "2.13.1", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 strum = { version = "0.28.0", features = ["derive"] }
 serde_yaml_ng = "0.10.0"
@@ -74,8 +74,9 @@ url = "2.5.8"
 # CRYPTO
 chacha20poly1305 = "0.10.1"
 data-encoding = "2.10.0"
-sha2 = "0.10.9"
 rand = "0.10.0"
+ # Held back for oauth2 crate
+sha2 = "0.10.9"
 
 # AUTH
 webauthn-rs = { version = "0.5.4", features = ["danger-allow-state-serialisation"] }
@@ -89,7 +90,7 @@ pem-rfc7468 = { version = "1.0.0", features = ["alloc"] }
 pkcs8 = "0.10.2"
 snow = "0.10.0"
 spki = "0.7.3"
-# Held back for 'pem-rfc7468'
+# Held back for 'spki'
 der = "0.7.10"
 
 # ERROR
