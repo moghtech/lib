@@ -24,7 +24,7 @@ pub async fn sign_up_local_user<I: AuthImpl + ?Sized>(
 
   let no_users_exist = auth.no_users_exist().await?;
 
-  if auth.registration_disabled() && !no_users_exist {
+  if auth.local_registration_disabled() && !no_users_exist {
     return Err(
       anyhow!("User registration is disabled")
         .status_code(StatusCode::UNAUTHORIZED),
