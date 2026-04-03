@@ -27,7 +27,7 @@ export interface MobileFriendlyTabsProps extends MobileFriendlyTabsSelectorProps
   tabsProps?: Omit<TabsProps, "value">;
 }
 
-export default function MobileFriendlyTabs(props: MobileFriendlyTabsProps) {
+export function MobileFriendlyTabs(props: MobileFriendlyTabsProps) {
   return (
     <MobileFriendlyTabsWrapper
       Selector={<MobileFriendlyTabsSelector {...props} />}

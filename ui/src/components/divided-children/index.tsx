@@ -4,7 +4,7 @@ import classes from "./index.module.scss";
 
 // https://mantine.dev/guides/polymorphic/#create-your-own-polymorphic-components
 
-const DividedChildren = createPolymorphicComponent<"div", GroupProps>(
+export const DividedChildren = createPolymorphicComponent<"div", GroupProps>(
   forwardRef<HTMLDivElement, GroupProps>(({ className, ...props }, ref) => (
     <Group
       className={
@@ -18,5 +18,3 @@ const DividedChildren = createPolymorphicComponent<"div", GroupProps>(
     />
   )),
 );
-
-export default DividedChildren;

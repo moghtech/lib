@@ -37,7 +37,7 @@ export const DARK_BODY = "#0f1115";
 
 const DEFAULT_COLOR_SCHEME: MantineColorScheme = "auto";
 
-export function Provider({
+export function ThemeProvider({
   children,
   additionalColors,
 }: {
