@@ -1,0 +1,11 @@
+[install-monaco]
+alias = "im"
+cmd = """
+yarn
+"""
+
+[build-monaco]
+alias = "bm"
+cmd = """
+yarn build
+"""
