@@ -112,6 +112,8 @@ pub struct GetLoginOptionsResponse {
   pub google: bool,
   /// Whether user registration (Sign Up) has been disabled
   pub registration_disabled: bool,
+  /// Whether the login page should auto-redirect to the OIDC provider
+  pub oidc_auto_redirect: bool,
 }
 
 //

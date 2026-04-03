@@ -116,6 +116,10 @@ pub fn get_login_options<I: AuthImpl + ?Sized>(
       .map(|config| config.enabled())
       .unwrap_or_default(),
     registration_disabled: auth.registration_disabled(),
+    oidc_auto_redirect: auth
+      .oidc_config()
+      .map(|config| config.enabled() && config.auto_redirect)
+      .unwrap_or_default(),
   }
 }
 
@@ -125,6 +129,145 @@ impl Resolve<LoginArgs> for GetLoginOptions {
     LoginArgs { auth, .. }: &LoginArgs,
   ) -> Result<Self::Response, Self::Error> {
     Ok(get_login_options(auth.as_ref()))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::AuthImpl;
+  use mogh_auth_client::config::OidcConfig;
+
+  /// Minimal AuthImpl for testing get_login_options
+  struct TestAuth {
+    local: bool,
+    oidc: Option<OidcConfig>,
+    registration_disabled: bool,
+  }
+
+  impl TestAuth {
+    fn default_test() -> Self {
+      Self {
+        local: true,
+        oidc: None,
+        registration_disabled: false,
+      }
+    }
+  }
+
+  impl AuthImpl for TestAuth {
+    fn new() -> Self {
+      Self::default_test()
+    }
+
+    fn local_auth_enabled(&self) -> bool {
+      self.local
+    }
+
+    fn oidc_config(&self) -> Option<&OidcConfig> {
+      self.oidc.as_ref()
+    }
+
+    fn registration_disabled(&self) -> bool {
+      self.registration_disabled
+    }
+
+    fn get_user(
+      &self,
+      _user_id: String,
+    ) -> crate::DynFuture<mogh_error::Result<crate::user::BoxAuthUser>>
+    {
+      Box::pin(async {
+        Err(anyhow::anyhow!("not implemented").into())
+      })
+    }
+
+    fn handle_request_authentication(
+      &self,
+      _auth: crate::RequestAuthentication,
+      _require_user_enabled: bool,
+      _req: axum::extract::Request,
+    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
+    {
+      Box::pin(async {
+        Err(anyhow::anyhow!("not implemented").into())
+      })
+    }
+
+    fn jwt_provider(
+      &self,
+    ) -> &crate::provider::jwt::JwtProvider {
+      panic!("not needed for login options tests")
+    }
+  }
+
+  #[test]
+  fn test_oidc_auto_redirect_defaults_false() {
+    let auth = TestAuth::default_test();
+    let opts = get_login_options(&auth);
+    assert!(!opts.oidc_auto_redirect);
+  }
+
+  #[test]
+  fn test_oidc_auto_redirect_false_when_disabled() {
+    let auth = TestAuth {
+      oidc: Some(OidcConfig {
+        enabled: true,
+        provider: "https://idp.example.com".into(),
+        client_id: "test-id".into(),
+        auto_redirect: false,
+        ..Default::default()
+      }),
+      ..TestAuth::default_test()
+    };
+    let opts = get_login_options(&auth);
+    assert!(opts.oidc);
+    assert!(!opts.oidc_auto_redirect);
+  }
+
+  #[test]
+  fn test_oidc_auto_redirect_true_when_enabled() {
+    let auth = TestAuth {
+      oidc: Some(OidcConfig {
+        enabled: true,
+        provider: "https://idp.example.com".into(),
+        client_id: "test-id".into(),
+        auto_redirect: true,
+        ..Default::default()
+      }),
+      ..TestAuth::default_test()
+    };
+    let opts = get_login_options(&auth);
+    assert!(opts.oidc);
+    assert!(opts.oidc_auto_redirect);
+  }
+
+  #[test]
+  fn test_oidc_auto_redirect_false_when_oidc_not_fully_enabled() {
+    // auto_redirect is true but OIDC is not fully enabled (missing client_id)
+    let auth = TestAuth {
+      oidc: Some(OidcConfig {
+        enabled: true,
+        provider: "https://idp.example.com".into(),
+        client_id: String::new(), // empty = not fully enabled
+        auto_redirect: true,
+        ..Default::default()
+      }),
+      ..TestAuth::default_test()
+    };
+    let opts = get_login_options(&auth);
+    assert!(!opts.oidc);
+    assert!(!opts.oidc_auto_redirect);
+  }
+
+  #[test]
+  fn test_oidc_auto_redirect_false_when_no_oidc_config() {
+    let auth = TestAuth {
+      oidc: None,
+      ..TestAuth::default_test()
+    };
+    let opts = get_login_options(&auth);
+    assert!(!opts.oidc_auto_redirect);
   }
 }
 
