@@ -35,4 +35,5 @@ export * from "./components/stat-cell";
 export * from "./components/status-badge";
 export * from "./components/tabbed-page";
 export * from "./components/table-skeleton";
+export * from "./components/text-update-modal";
 export * from "./components/theme-toggle";
