@@ -30,6 +30,7 @@ import {
   virtualColor,
 } from "@mantine/core";
 import { ReactNode } from "react";
+import { hexColorByIntention } from "./color";
 
 // Match in ./index.css
 export const LIGHT_BODY = "#f8f9fa";
@@ -105,6 +106,13 @@ function theme(additionalColors?: AdditionalColors) {
         light: "lightBw",
         dark: "darkBw",
       }),
+      // Intention colors
+      Good: colorsTuple(hexColorByIntention("Good")!),
+      Neutral: colorsTuple(hexColorByIntention("Neutral")!),
+      Warning: colorsTuple(hexColorByIntention("Warning")!),
+      Critical: colorsTuple(hexColorByIntention("Critical")!),
+      Unknown: colorsTuple(hexColorByIntention("Unknown")!),
+      // Additional colors (eg tags)
       ...additionalColors,
     },
     components: {
