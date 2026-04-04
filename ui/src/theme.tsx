@@ -278,6 +278,11 @@ function theme(additionalColors?: AdditionalColors) {
         classNames: { root: "bordered-heavy" },
       }),
       Progress: Progress.extend({
+        vars: (theme) => ({
+          root: {
+            "--progress-radius": theme.radius.md,
+          },
+        }),
         styles: (theme) => ({
           root: {
             backgroundColor: theme.colors.accent[4],
