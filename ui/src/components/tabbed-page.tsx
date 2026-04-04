@@ -1,4 +1,11 @@
-import { Center, Group, Tabs, Text } from "@mantine/core";
+import {
+  Center,
+  DefaultMantineColor,
+  Group,
+  Tabs,
+  TabsProps,
+  Text,
+} from "@mantine/core";
 import { useLocalStorage } from "@mantine/hooks";
 import { FC } from "react";
 import { Page } from "./page";
@@ -10,15 +17,16 @@ export type TabbedPageItem<Tab extends string> = {
   content?: FC;
 };
 
-export type TabbedPageProps<Tab extends string> = {
+export interface TabbedPageProps<Tab extends string> extends TabsProps {
   /** Store current tab on localStorage */
   storageKey: string;
   tabs: TabbedPageItem<Tab>[];
-};
+}
 
 export function TabbedPage<Tab extends string>({
   storageKey,
   tabs,
+  ...tabsProps
 }: TabbedPageProps<Tab>) {
   const defaultTab = tabs[0]?.tab;
   const [selectedTab, setSelectedTab] = useLocalStorage<Tab>({
@@ -36,6 +44,7 @@ export function TabbedPage<Tab extends string>({
     <Tabs
       value={selectedTab}
       onChange={(tab) => setSelectedTab((tab as Tab) ?? defaultTab)}
+      {...tabsProps}
     >
       <Page
         customTitle={
