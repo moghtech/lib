@@ -1,6 +1,6 @@
 {
   "name": "mogh_ui",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Common UI components and styling used across Mogh apps.",
   "type": "module",
   "main": "./dist/index.cjs",

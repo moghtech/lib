@@ -43,3 +43,39 @@ export function deepCompare(a: any, b: any) {
 
   return a === b;
 }
+
+export function filterBySplit<T>(
+  items: T[] | undefined,
+  search: string,
+  extract: (item: T) => string,
+) {
+  const split = search.toLowerCase().split(" ");
+  return (
+    (split.length
+      ? items?.filter((item) => {
+          const target = extract(item).toLowerCase();
+          return split.every((term) => target.includes(term));
+        })
+      : items) ?? []
+  );
+}
+
+export function filterMultitermBySplit<T>(
+  items: T[] | undefined,
+  search: string,
+  extract: (item: T) => (string | undefined)[],
+) {
+  const split = search.toLowerCase().split(" ");
+  return (
+    (split.length
+      ? items?.filter((item) => {
+          const target = extract(item)
+            .filter((str) => str)
+            .map((str) => str!.toLowerCase());
+          return split.every(
+            (term) => target.findIndex((t) => t.includes(term)) !== -1,
+          );
+        })
+      : items) ?? []
+  );
+}

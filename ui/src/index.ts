@@ -3,6 +3,7 @@ export * from "./color";
 export * from "./formatting";
 export * from "./hooks";
 export * from "./theme";
+export * from "./utils";
 export * from "./components/config";
 export * from "./components/divided-children";
 export * from "./components/fancy-card";
