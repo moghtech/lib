@@ -38,16 +38,24 @@ export const DARK_BODY = "#0f1115";
 
 const DEFAULT_COLOR_SCHEME: MantineColorScheme = "auto";
 
+export type AdditionalColors =
+  | Partial<Record<DefaultMantineColor, MantineColorsTuple>>
+  | undefined;
+
+export interface ThemeProviderProps {
+  primaryColor?: DefaultMantineColor;
+  additionalColors?: AdditionalColors;
+}
+
 export function ThemeProvider({
   children,
-  additionalColors,
-}: {
+  ...props
+}: ThemeProviderProps & {
   children: ReactNode;
-  additionalColors?: AdditionalColors;
 }) {
   return (
     <MantineProvider
-      theme={theme(additionalColors)}
+      theme={theme(props)}
       cssVariablesResolver={cssVariablesResolver}
       defaultColorScheme={DEFAULT_COLOR_SCHEME}
     >
@@ -56,14 +64,13 @@ export function ThemeProvider({
   );
 }
 
-export type AdditionalColors =
-  | Partial<Record<DefaultMantineColor, MantineColorsTuple>>
-  | undefined;
-
-function theme(additionalColors?: AdditionalColors) {
+function theme({
+  primaryColor = "accent",
+  additionalColors,
+}: ThemeProviderProps) {
   return createTheme({
     cursorType: "pointer",
-    primaryColor: "accent",
+    primaryColor,
     breakpoints: {
       xs: "36em",
       sm: "48em",
