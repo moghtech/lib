@@ -5,7 +5,7 @@ export interface ButtonLinkProps extends ButtonProps {
   to: string;
 }
 
-export default function ButtonLink({ to, ...props }: ButtonLinkProps) {
+export function ButtonLink({ to, ...props }: ButtonLinkProps) {
   return (
     <Button
       variant="subtle"
