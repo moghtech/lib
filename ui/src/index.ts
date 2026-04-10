@@ -9,6 +9,7 @@ export * from "./components/divided-children";
 export * from "./components/fancy-card";
 export * from "./components/monaco";
 export * from "./components/back-button";
+export * from "./components/button-link";
 export * from "./components/confirm-button";
 export * from "./components/confirm-icon";
 export * from "./components/confirm-modal";
