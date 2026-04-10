@@ -12,9 +12,9 @@ import { useForm } from "@mantine/form";
 import { notifications } from "@mantine/notifications";
 import * as MoghAuth from "mogh_auth_client";
 import { AlertTriangle, KeyRound } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import LoginHeader from "./header";
-import { sanitizeQuery, useLogin, useLoginOptions } from "../..";
+import { authClient, sanitizeQuery, useLogin, useLoginOptions } from "../..";
 
 export interface LoginBrandingProps {
   appName: string;
@@ -40,6 +40,23 @@ export function LoginPage({
   );
   const [totpIsPending, setTotpPending] = useState(_totpIsPending ?? false);
   const secondFactorPending = passkeyIsPending || totpIsPending;
+
+  // Auto-redirect to OIDC provider if configured and disableAutoLogin is not set
+  const autoRedirectTriggered = useRef(false);
+  useEffect(() => {
+    if (
+      options?.oidc_auto_redirect &&
+      options?.oidc &&
+      !autoRedirectTriggered.current &&
+      !secondFactorPending
+    ) {
+      const params = new URLSearchParams(location.search);
+      if (!params.has("disableAutoLogin")) {
+        autoRedirectTriggered.current = true;
+        authClient().externalLogin("Oidc");
+      }
+    }
+  }, [options, secondFactorPending]);
 
   // If signing in another user, need to redirect away from /login manually
   const maybeNavigate = location.pathname.startsWith("/login")
