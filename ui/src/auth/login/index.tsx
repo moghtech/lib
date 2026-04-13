@@ -56,7 +56,7 @@ export function LoginPage({
         authClient().externalLogin("Oidc");
       }
     }
-  }, [options, secondFactorPending]);
+  }, [options?.oidc_auto_redirect, options?.oidc, secondFactorPending]);
 
   // If signing in another user, need to redirect away from /login manually
   const maybeNavigate = location.pathname.startsWith("/login")
