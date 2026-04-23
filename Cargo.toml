@@ -50,7 +50,7 @@ mogh_validations = "1.0.1"
 
 # ASYNC
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "query", "form", "rustls"] }
-tokio = { version = "1.52.0", features = ["full"] }
+tokio = { version = "1.52.1", features = ["full"] }
 arc-swap = "1.9.1"
 
 # SERVER
@@ -114,7 +114,7 @@ syn = "2.0.117"
 
 # MISC
 clap = { version = "4.6.0", features = ["derive"] }
-uuid = { version = "1.23.0", features = ["v4"] }
+uuid = { version = "1.23.1", features = ["v4"] }
 typeshare = "1.0.5"
 wildcard = "0.3.0"
 colored = "3.1.1"
