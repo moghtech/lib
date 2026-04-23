@@ -99,7 +99,11 @@ pub fn load_config_files(
   }
 }
 
-/// loads multiple config files
+/// loads multiple config files.
+///
+/// If cicada feature is enabled, the files
+/// can be cicada paths (`cicada://filesystem/config.yaml`),
+/// provided user configures `CICADA_...` env vars.
 pub fn load_parse_config_files<T: DeserializeOwned>(
   files: &[PathBuf],
   merge_nested: bool,
@@ -108,13 +112,35 @@ pub fn load_parse_config_files<T: DeserializeOwned>(
   let mut target = serde_json::Map::new();
 
   for file in files {
-    let source = match load_parse_config_file(file) {
+    #[cfg(feature = "cicada")]
+    let source = if let Ok(file) = file.strip_prefix("cicada:") {
+      let contents = match cicada_loader::load(file) {
+        Ok(contents) => contents,
+        Err(e) => {
+          println!(
+            "{}: Cicada configuration at '{}' failed to load | {e:?}",
+            "ERROR".red(),
+            file.display(),
+          );
+          continue;
+        }
+      };
+      parse_config_contents(file, &contents)
+    } else {
+      load_parse_config_file(file)
+    };
+
+    #[cfg(not(feature = "cicada"))]
+    let source = load_parse_config_file(file);
+
+    let source = match source {
       Ok(source) => source,
       Err(e) => {
         println!("{}: {e}", "WARN".yellow());
         continue;
       }
     };
+
     target = match merge_objects(
       target.clone(),
       source,
@@ -153,6 +179,14 @@ pub fn load_parse_config_file<T: DeserializeOwned>(
       path: file.to_path_buf(),
     }
   })?;
+  parse_config_contents(&file, &contents)
+}
+
+/// Parses config contents
+pub fn parse_config_contents<T: DeserializeOwned>(
+  file: &Path,
+  contents: &str,
+) -> Result<T> {
   let config = match file.extension().and_then(|e| e.to_str()) {
     Some("toml") => {
       toml::from_str(&contents).map_err(|e| Error::ParseToml {

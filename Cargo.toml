@@ -48,6 +48,9 @@ mogh_secret_file = "1.0.1"
 mogh_server = "1.4.5"
 mogh_validations = "1.0.1"
 
+# CICADA
+cicada_loader = "0.5.1"
+
 # ASYNC
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "query", "form", "rustls"] }
 tokio = { version = "1.52.1", features = ["full"] }
