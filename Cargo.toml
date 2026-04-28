@@ -45,7 +45,7 @@ mogh_request_ip = "1.0.1"
 mogh_resolver = "1.0.0"
 mogh_resolver_derive = "1.0.0"
 mogh_secret_file = "1.0.1"
-mogh_server = "1.4.5"
+mogh_server = "1.5.0"
 mogh_validations = "1.0.1"
 
 # CICADA
@@ -76,7 +76,7 @@ url = "2.5.8"
 
 # CRYPTO
 chacha20poly1305 = "0.10.1"
-data-encoding = "2.10.0"
+data-encoding = "2.11.0"
 rand = "0.10.1"
 # Held back for 'openidconnect'
 sha2 = "0.10.9"
