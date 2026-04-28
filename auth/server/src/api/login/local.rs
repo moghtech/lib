@@ -32,7 +32,7 @@ pub async fn sign_up_local_user<I: AuthImpl + ?Sized>(
   }
 
   auth.validate_username(&username)?;
-  auth.validate_password(&password)?;
+  auth.validate_password(password)?;
 
   let hashed_password =
     bcrypt::hash(password.as_bytes(), auth.local_auth_bcrypt_cost())?;
@@ -59,7 +59,7 @@ impl Resolve<LoginArgs> for SignUpLocalUser {
     sign_up_local_user(auth.as_ref(), self.username, &self.password)
       .with_failure_rate_limit_using_ip(
         auth.general_rate_limiter(),
-        &ip,
+        ip,
       )
       .await
   }
@@ -161,13 +161,13 @@ impl Resolve<LoginArgs> for LoginLocalUser {
   ) -> Result<Self::Response, Self::Error> {
     login_local_user(
       auth.as_ref(),
-      &session,
+      session,
       self.username,
       &self.password,
     )
     .with_failure_rate_limit_using_ip(
       auth.local_login_rate_limiter(),
-      &ip,
+      ip,
     )
     .await
   }

@@ -55,10 +55,7 @@ impl Resolve<LoginArgs> for CompleteTotpLogin {
 
       Ok(res)
     }
-    .with_failure_rate_limit_using_ip(
-      auth.general_rate_limiter(),
-      &ip,
-    )
+    .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), ip)
     .await
   }
 }

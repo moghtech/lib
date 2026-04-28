@@ -194,9 +194,7 @@ mod tests {
       })
     }
 
-    fn jwt_provider(
-      &self,
-    ) -> &crate::provider::jwt::JwtProvider {
+    fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
       panic!("not needed for login options tests")
     }
   }
@@ -281,10 +279,7 @@ impl Resolve<LoginArgs> for ExchangeForJwt {
       let user_id = session.retrieve_authenticated_user_id().await?;
       auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
     }
-    .with_failure_rate_limit_using_ip(
-      auth.general_rate_limiter(),
-      &ip,
-    )
+    .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), ip)
     .await
   }
 }

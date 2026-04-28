@@ -179,7 +179,7 @@ pub fn load_parse_config_file<T: DeserializeOwned>(
       path: file.to_path_buf(),
     }
   })?;
-  parse_config_contents(&file, &contents)
+  parse_config_contents(file, &contents)
 }
 
 /// Parses config contents
@@ -189,17 +189,17 @@ pub fn parse_config_contents<T: DeserializeOwned>(
 ) -> Result<T> {
   let config = match file.extension().and_then(|e| e.to_str()) {
     Some("toml") => {
-      toml::from_str(&contents).map_err(|e| Error::ParseToml {
+      toml::from_str(contents).map_err(|e| Error::ParseToml {
         e,
         path: file.to_path_buf(),
       })?
     }
-    Some("yaml") | Some("yml") => serde_yaml_ng::from_str(&contents)
+    Some("yaml") | Some("yml") => serde_yaml_ng::from_str(contents)
       .map_err(|e| Error::ParseYaml {
-        e,
-        path: file.to_path_buf(),
-      })?,
-    Some("json") => serde_json::from_str(&contents).map_err(|e| {
+      e,
+      path: file.to_path_buf(),
+    })?,
+    Some("json") => serde_json::from_str(contents).map_err(|e| {
       Error::ParseJson {
         e,
         path: file.to_path_buf(),

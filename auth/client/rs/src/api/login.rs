@@ -74,7 +74,6 @@ pub trait MoghAuthLoginRequest: HasResponse {}
 //
 
 #[allow(unused)]
-#[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
