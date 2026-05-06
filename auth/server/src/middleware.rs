@@ -119,7 +119,7 @@ pub fn extract_request_key_and_secret(
     .context("X-API-KEY is not valid UTF-8")?
     .trim()
     .to_string();
-  return Ok(Some((key, secret)));
+  Ok(Some((key, secret)))
 }
 
 pub fn extract_request_public_key<I: AuthImpl>(

@@ -52,6 +52,10 @@ pub struct OidcConfig {
   /// they must be added here to make claims verification work.
   #[serde(default)]
   pub additional_audiences: Vec<String>,
+  /// Automatically redirect unauthenticated users to the OIDC provider
+  /// instead of showing the login page.
+  #[serde(default)]
+  pub auto_redirect: bool,
 }
 
 impl OidcConfig {
@@ -86,6 +90,42 @@ pub struct NamedOauthConfig {
   #[serde(default)]
   #[serde(alias = "secret")]
   pub client_secret: String,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_oidc_config_default_auto_redirect_false() {
+    let config = OidcConfig::default();
+    assert!(!config.auto_redirect);
+  }
+
+  #[test]
+  fn test_oidc_config_serde_roundtrip_with_auto_redirect() {
+    let config = OidcConfig {
+      enabled: true,
+      provider: "https://idp.example.com".into(),
+      client_id: "test-id".into(),
+      client_secret: "test-secret".into(),
+      auto_redirect: true,
+      ..Default::default()
+    };
+    let json = serde_json::to_string(&config).unwrap();
+    let deserialized: OidcConfig =
+      serde_json::from_str(&json).unwrap();
+    assert!(deserialized.auto_redirect);
+    assert!(deserialized.enabled());
+  }
+
+  #[test]
+  fn test_oidc_config_deserialize_without_auto_redirect() {
+    // Backwards compatibility: old configs without auto_redirect
+    let json = r#"{"enabled":true,"provider":"https://idp.example.com","client_id":"test-id","client_secret":"s","use_full_email":false,"additional_audiences":[]}"#;
+    let config: OidcConfig = serde_json::from_str(json).unwrap();
+    assert!(!config.auto_redirect);
+  }
 }
 
 impl NamedOauthConfig {

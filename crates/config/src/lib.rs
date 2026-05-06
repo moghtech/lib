@@ -1,4 +1,4 @@
-//! # Komodo Config
+//! # Mogh Config
 //!
 //! This library is used to parse Core, Periphery, and CLI config files.
 //! It supports interpolating in environment variables (only '${VAR}' syntax),
@@ -65,7 +65,9 @@ impl ConfigLoader<'_, '_> {
       extend_array,
       debug_print,
     } = self;
+
     let mut wildcards = Vec::with_capacity(match_wildcards.len());
+
     for &wc in match_wildcards {
       match wildcard::Wildcard::new(wc.as_bytes()) {
         Ok(wc) => wildcards.push(wc),
@@ -78,8 +80,20 @@ impl ConfigLoader<'_, '_> {
         }
       }
     }
+
     let mut all_files = IndexSet::new();
+
     for &path in paths {
+      // Cicada paths shortcut to all_files
+      #[cfg(feature = "cicada")]
+      if path.starts_with("cicada:") {
+        let path = path.to_path_buf();
+        // If the same path comes up again later on, it should be removed and
+        // reinserted so it maintains higher priority.
+        all_files.shift_remove(&path);
+        all_files.insert(path);
+      }
+
       let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(e) => {
@@ -93,6 +107,7 @@ impl ConfigLoader<'_, '_> {
           continue;
         }
       };
+
       if metadata.is_dir() {
         let mut files = Vec::new();
         load::load_config_files(

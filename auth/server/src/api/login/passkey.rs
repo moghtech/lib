@@ -62,7 +62,7 @@ impl Resolve<LoginArgs> for CompletePasskeyLogin {
     }
     .with_failure_rate_limit_using_ip(
       auth.general_rate_limiter(),
-      &ip,
+      ip,
     )
     .await
   }
