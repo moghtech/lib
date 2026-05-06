@@ -115,15 +115,11 @@ pub fn get_login_options<I: AuthImpl + ?Sized>(
       .google_config()
       .map(|config| config.enabled())
       .unwrap_or_default(),
-<<<<<<< granular-registration-control
     registration_disabled: auth.local_registration_disabled(),
-=======
-    registration_disabled: auth.registration_disabled(),
     oidc_auto_redirect: auth
       .oidc_config()
       .map(|config| config.enabled() && config.auto_redirect)
       .unwrap_or_default(),
->>>>>>> main
   }
 }
 
@@ -136,26 +132,34 @@ impl Resolve<LoginArgs> for GetLoginOptions {
   }
 }
 
+impl Resolve<LoginArgs> for ExchangeForJwt {
+  #[instrument("ExchangeForJwt", skip_all, fields(ip = ip.to_string()))]
+  async fn resolve(
+    self,
+    LoginArgs { auth, session, ip }: &LoginArgs,
+  ) -> Result<Self::Response, Self::Error> {
+    async {
+      let user_id = session.retrieve_authenticated_user_id().await?;
+      auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
+    }
+    .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), ip)
+    .await
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
   use crate::AuthImpl;
   use mogh_auth_client::config::OidcConfig;
 
-<<<<<<< granular-registration-control
   /// Minimal AuthImpl for testing
-=======
-  /// Minimal AuthImpl for testing get_login_options
->>>>>>> main
   struct TestAuth {
     local: bool,
     oidc: Option<OidcConfig>,
     registration_disabled: bool,
-<<<<<<< granular-registration-control
     local_registration_disabled: Option<bool>,
     oidc_registration_disabled: Option<bool>,
-=======
->>>>>>> main
   }
 
   impl TestAuth {
@@ -164,11 +168,8 @@ mod tests {
         local: true,
         oidc: None,
         registration_disabled: false,
-<<<<<<< granular-registration-control
         local_registration_disabled: None,
         oidc_registration_disabled: None,
-=======
->>>>>>> main
       }
     }
   }
@@ -190,7 +191,6 @@ mod tests {
       self.registration_disabled
     }
 
-<<<<<<< granular-registration-control
     fn local_registration_disabled(&self) -> bool {
       self
         .local_registration_disabled
@@ -203,8 +203,6 @@ mod tests {
         .unwrap_or_else(|| self.registration_disabled())
     }
 
-=======
->>>>>>> main
     fn get_user(
       &self,
       _user_id: String,
@@ -227,20 +225,12 @@ mod tests {
       })
     }
 
-<<<<<<< granular-registration-control
-    fn jwt_provider(
-      &self,
-    ) -> &crate::provider::jwt::JwtProvider {
-      panic!("not needed for these tests")
-=======
     fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
-      panic!("not needed for login options tests")
->>>>>>> main
+      panic!("not needed for these tests")
     }
   }
 
   #[test]
-<<<<<<< granular-registration-control
   fn test_default_granular_methods_delegate_to_registration_disabled()
   {
     // When granular overrides are None, they should
@@ -316,7 +306,9 @@ mod tests {
     };
     let opts = get_login_options(&auth);
     assert!(!opts.registration_disabled);
-=======
+  }
+
+  #[test]
   fn test_oidc_auto_redirect_defaults_false() {
     let auth = TestAuth::default_test();
     let opts = get_login_options(&auth);
@@ -383,21 +375,5 @@ mod tests {
     };
     let opts = get_login_options(&auth);
     assert!(!opts.oidc_auto_redirect);
->>>>>>> main
-  }
-}
-
-impl Resolve<LoginArgs> for ExchangeForJwt {
-  #[instrument("ExchangeForJwt", skip_all, fields(ip = ip.to_string()))]
-  async fn resolve(
-    self,
-    LoginArgs { auth, session, ip }: &LoginArgs,
-  ) -> Result<Self::Response, Self::Error> {
-    async {
-      let user_id = session.retrieve_authenticated_user_id().await?;
-      auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
-    }
-    .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), ip)
-    .await
   }
 }
