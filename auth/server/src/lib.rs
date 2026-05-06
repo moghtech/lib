@@ -79,9 +79,33 @@ pub trait AuthImpl: Send + Sync + 'static {
     "/auth"
   }
 
-  /// Disable new user registration.
+  /// Disable new user registration (all providers).
   fn registration_disabled(&self) -> bool {
     false
+  }
+
+  /// Disable new user registration for local (username/password) signups only.
+  /// Defaults to [Self::registration_disabled].
+  fn local_registration_disabled(&self) -> bool {
+    self.registration_disabled()
+  }
+
+  /// Disable new user registration via OIDC only.
+  /// Defaults to [Self::registration_disabled].
+  fn oidc_registration_disabled(&self) -> bool {
+    self.registration_disabled()
+  }
+
+  /// Disable new user registration via GitHub only.
+  /// Defaults to [Self::registration_disabled].
+  fn github_registration_disabled(&self) -> bool {
+    self.registration_disabled()
+  }
+
+  /// Disable new user registration via Google only.
+  /// Defaults to [Self::registration_disabled].
+  fn google_registration_disabled(&self) -> bool {
+    self.registration_disabled()
   }
 
   /// Provide usernames to lock credential updates for,

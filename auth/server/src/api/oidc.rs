@@ -243,7 +243,7 @@ pub async fn oidc_callback<I: AuthImpl>(
       None => {
         let no_users_exist = auth.no_users_exist().await?;
 
-        if auth.registration_disabled() && !no_users_exist {
+        if auth.oidc_registration_disabled() && !no_users_exist {
           return Err(
             anyhow!("User registration is disabled")
               .status_code(StatusCode::UNAUTHORIZED),
