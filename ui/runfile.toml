@@ -12,6 +12,7 @@ yarn build
 
 [publish-ui]
 alias = "pu"
+after = "build-ui"
 cmd = """
 npm publish
 """
