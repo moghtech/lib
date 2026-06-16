@@ -347,6 +347,19 @@ pub trait AuthImpl: Send + Sync + 'static {
     })
   }
 
+  /// Sync external OIDC claims onto the user on every login, once the
+  /// id token has been validated. `groups` come from `groups_claim`,
+  /// and `is_admin` is `None` when no admin claim / group is
+  /// configured. Defaults to a no-op.
+  fn sync_oidc_user_claims(
+    &self,
+    _user_id: String,
+    _groups: Vec<String>,
+    _is_admin: Option<bool>,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async { Ok(()) })
+  }
+
   // ==============
   // = NAMED AUTH =
   // ==============

@@ -56,6 +56,35 @@ pub struct OidcConfig {
   /// instead of showing the login page.
   #[serde(default)]
   pub auto_redirect: bool,
+  /// Claim that holds the user's group memberships (eg `groups`).
+  /// When set, the user's group memberships are synced on each
+  /// OIDC login. Empty (default) disables group syncing.
+  ///
+  /// The claim value may be an array of strings or a single string.
+  #[serde(default)]
+  pub groups_claim: String,
+  /// Claim that signals whether the user is an admin.
+  /// When set, the user's admin status is synced on each OIDC login.
+  /// Empty (default) disables admin syncing via claim.
+  ///
+  /// The claim value may be a boolean, or a string / number
+  /// interpreted as truthy (`"true"`, `"1"`, non-zero).
+  #[serde(default)]
+  pub admin_claim: String,
+  /// Group whose members are granted admin status.
+  /// When set, a user is treated as admin if this group is present
+  /// in their `groups_claim`. Empty (default) disables this.
+  ///
+  /// Combined with `admin_claim` via OR: admin when either the
+  /// claim is truthy or the user is a member of this group.
+  /// Requires `groups_claim` to be configured.
+  #[serde(default)]
+  pub admin_group: String,
+  /// Additional OAuth scopes to request beyond `openid`, `profile`
+  /// and `email`. Some providers only include the groups claim when
+  /// its scope (eg `groups`) is explicitly requested.
+  #[serde(default)]
+  pub additional_scopes: Vec<String>,
 }
 
 impl OidcConfig {
@@ -125,6 +154,38 @@ mod tests {
     let json = r#"{"enabled":true,"provider":"https://idp.example.com","client_id":"test-id","client_secret":"s","use_full_email":false,"additional_audiences":[]}"#;
     let config: OidcConfig = serde_json::from_str(json).unwrap();
     assert!(!config.auto_redirect);
+  }
+
+  #[test]
+  fn test_oidc_config_claim_sync_defaults_disabled() {
+    // Group / admin syncing is opt-in: defaults are empty.
+    let config = OidcConfig::default();
+    assert!(config.groups_claim.is_empty());
+    assert!(config.admin_claim.is_empty());
+    assert!(config.admin_group.is_empty());
+    assert!(config.additional_scopes.is_empty());
+  }
+
+  #[test]
+  fn test_oidc_config_deserialize_without_claim_sync_fields() {
+    // Backwards compatibility: old configs without the new
+    // group / admin claim fields still deserialize.
+    let json = r#"{"enabled":true,"provider":"https://idp.example.com","client_id":"test-id","client_secret":"s","use_full_email":false,"additional_audiences":[],"auto_redirect":true}"#;
+    let config: OidcConfig = serde_json::from_str(json).unwrap();
+    assert!(config.groups_claim.is_empty());
+    assert!(config.admin_claim.is_empty());
+    assert!(config.admin_group.is_empty());
+    assert!(config.additional_scopes.is_empty());
+  }
+
+  #[test]
+  fn test_oidc_config_deserialize_with_claim_sync_fields() {
+    let json = r#"{"enabled":true,"provider":"https://idp.example.com","client_id":"test-id","groups_claim":"groups","admin_claim":"komodo_admin","admin_group":"komodo-admins","additional_scopes":["groups"]}"#;
+    let config: OidcConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(config.groups_claim, "groups");
+    assert_eq!(config.admin_claim, "komodo_admin");
+    assert_eq!(config.admin_group, "komodo-admins");
+    assert_eq!(config.additional_scopes, vec!["groups".to_string()]);
   }
 }
 
