@@ -53,10 +53,10 @@ pub async fn google_login<I: AuthImpl>(
       .context("Google provider not available")
       .status_code(StatusCode::UNAUTHORIZED)?;
 
-    let (state, uri) =
+    let (state, nonce, uri) =
       provider.get_state_and_login_redirect_url(redirect).await;
 
-    session.insert_google_login(&state).await?;
+    session.insert_google_login(&state, &nonce).await?;
 
     Ok(Redirect::to(&uri))
   }
@@ -91,10 +91,10 @@ pub async fn google_link<I: AuthImpl>(
       .context("Google provider not available")
       .status_code(StatusCode::UNAUTHORIZED)?;
 
-    let (state, uri) =
+    let (state, nonce, uri) =
       provider.get_state_and_login_redirect_url(None).await;
 
-    session.insert_google_link(&user_id, &state).await?;
+    session.insert_google_link(&user_id, &state, &nonce).await?;
 
     info!(
       user_id = user.id(),
@@ -146,7 +146,7 @@ pub async fn google_callback<I: AuthImpl>(
       .await;
     }
 
-    let state = session.retrieve_google_login().await?;
+    let (state, nonce) = session.retrieve_google_login().await?;
 
     if client_state != state {
       return Err(
@@ -155,8 +155,7 @@ pub async fn google_callback<I: AuthImpl>(
       );
     }
 
-    let token = provider.get_access_token(&code).await?;
-    let google_user = provider.get_google_user(&token.id_token)?;
+    let google_user = provider.get_google_user(&code, &nonce).await?;
     let google_id = google_user.id;
     let avatar_url = google_user.picture;
 
@@ -229,7 +228,7 @@ pub async fn google_callback<I: AuthImpl>(
 async fn link_google_callback<I: AuthImpl>(
   auth: &I,
   provider: &GoogleProvider,
-  (user_id, state): (String, String),
+  (user_id, state, nonce): (String, String, String),
   client_state: String,
   code: String,
 ) -> mogh_error::Result<Redirect> {
@@ -239,9 +238,7 @@ async fn link_google_callback<I: AuthImpl>(
     );
   }
 
-  let token = provider.get_access_token(&code).await?;
-
-  let google_user = provider.get_google_user(&token.id_token)?;
+  let google_user = provider.get_google_user(&code, &nonce).await?;
   let google_id = google_user.id;
   let avatar_url = google_user.picture;
 
