@@ -37,3 +37,6 @@ strum.workspace = true
 rand.workspace = true
 axum.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
