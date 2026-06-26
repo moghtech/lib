@@ -10,7 +10,7 @@ use openidconnect::{
   AccessTokenHash, AdditionalClaims, AuthorizationCode, Client,
   ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
   EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields,
-  IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
+  IssuerUrl, Nonce, NonceVerifier, OAuth2TokenResponse, PkceCodeChallenge,
   PkceCodeVerifier, RedirectUrl, Scope, StandardErrorResponse,
   StandardTokenResponse, TokenResponse as _,
   core::*,
@@ -145,6 +145,40 @@ pub struct OidcProvider {
 }
 
 impl OidcProvider {
+  fn validate_id_token_claims<N: NonceVerifier>(
+    &self,
+    config: &OidcConfig,
+    id_token: &openidconnect::IdToken<
+      UsernameAdditionalClaims,
+      CoreGenderClaim,
+      CoreJweContentEncryptionAlgorithm,
+      CoreJwsSigningAlgorithm,
+    >,
+    nonce_verifier: N,
+  ) -> anyhow::Result<
+    openidconnect::IdTokenClaims<
+      UsernameAdditionalClaims,
+      CoreGenderClaim,
+    >,
+  > {
+    let verifier = self.client.id_token_verifier();
+    let additional_audiences = &config.additional_audiences;
+    let verifier = if additional_audiences.is_empty() {
+      verifier
+    } else {
+      verifier.set_other_audience_verifier_fn(|aud| {
+        additional_audiences.contains(aud)
+      })
+    };
+
+    id_token
+      .claims(&verifier, nonce_verifier)
+      .cloned()
+      .context(
+        "Failed to verify token claims. This issue may be temporary (60 seconds max).",
+      )
+  }
+
   /// Initialize a new OIDC provider using the configured provider's
   /// discovery endpoint.
   pub async fn new(
@@ -241,21 +275,10 @@ impl OidcProvider {
       .id_token()
       .context("OIDC Server did not return an ID token")?;
 
-    // Some providers attach additional audiences, they must be added here
-    // so token verification succeeds.
     let verifier = self.client.id_token_verifier();
-    let additional_audiences = &config.additional_audiences;
-    let verifier = if additional_audiences.is_empty() {
-      verifier
-    } else {
-      verifier.set_other_audience_verifier_fn(|aud| {
-        additional_audiences.contains(aud)
-      })
-    };
 
-    let claims = id_token
-      .claims(&verifier, nonce)
-      .context("Failed to verify token claims. This issue may be temporary (60 seconds max).")?;
+    let claims = self
+      .validate_id_token_claims(config, id_token, nonce)?;
 
     // Verify the access token hash to ensure that the access token hasn't been substituted for
     // another user's.
@@ -459,5 +482,39 @@ impl OidcProvider {
 
     // Priority 6 (fallback): use the subject if no others available
     subject.to_string()
+  }
+
+  /// Validate a raw OIDC ID Token string without a code exchange or nonce check.
+  ///
+  /// Validates: JWT signature, issuer, audience, and token expiry.
+  /// Skips: nonce (not applicable for token exchange), access_token_hash.
+  ///
+  /// Returns the validated subject identifier on success.
+  pub fn validate_id_token_and_extract_subject(
+    &self,
+    config: &mogh_auth_client::config::OidcConfig,
+    id_token_str: &str,
+  ) -> anyhow::Result<SubjectIdentifier> {
+    let id_token: openidconnect::IdToken<
+      UsernameAdditionalClaims,
+      CoreGenderClaim,
+      CoreJweContentEncryptionAlgorithm,
+      CoreJwsSigningAlgorithm,
+    > = id_token_str
+      .parse()
+      .context("Failed to parse OIDC ID token")?;
+
+    // No nonce — this is a direct token exchange, not an authorization code flow
+    let claims = self
+      .validate_id_token_claims(
+        config,
+        &id_token,
+        |_nonce: Option<&openidconnect::Nonce>| Ok(()),
+      )
+      .context(
+        "OIDC ID token validation failed — invalid signature, audience, issuer, or expiry",
+      )?;
+
+    Ok(claims.subject().clone())
   }
 }
