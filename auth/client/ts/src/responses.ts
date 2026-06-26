@@ -5,6 +5,7 @@ export type LoginResponses = {
   SignUpLocalUser: Types.SignUpLocalUserResponse;
   LoginLocalUser: Types.LoginLocalUserResponse;
   ExchangeForJwt: Types.ExchangeForJwtResponse;
+  ExchangeProviderTokenForJwt: Types.ExchangeProviderTokenForJwtResponse;
   CompleteTotpLogin: Types.CompleteTotpLoginResponse;
   CompletePasskeyLogin: Types.CompletePasskeyLoginResponse;
 };

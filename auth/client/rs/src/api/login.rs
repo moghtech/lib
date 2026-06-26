@@ -148,6 +148,58 @@ pub type ExchangeForJwtResponse = JwtResponse;
 
 //
 
+/// The OAuth 2.0 subject token type (RFC 8693).
+/// Identifies the security token presented for exchange.
+#[typeshare]
+#[derive(
+  Debug, Clone, Serialize, Deserialize, Display, EnumString,
+)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum SubjectTokenType {
+  /// OIDC ID Token (`urn:ietf:params:oauth:token-type:id_token`)
+  OidcIdToken,
+  /// Google ID Token (`urn:ietf:params:oauth:token-type:id_token`, Google issuer)
+  GoogleIdToken,
+  /// GitHub Access Token (`urn:ietf:params:oauth:token-type:access_token`)
+  GitHubAccessToken,
+}
+
+#[allow(unused)]
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
+  path = "/login/ExchangeProviderTokenForJwt",
+  description = "Exchange an OAuth provider token (OIDC ID Token, Google ID Token, or GitHub Access Token) for a Komodo JWT. Follows RFC 8693 token exchange semantics.",
+  request_body(content = ExchangeProviderTokenForJwt),
+  responses(
+    (status = 200, description = "Authentication JWT", body = ExchangeProviderTokenForJwtResponse),
+    (status = 401, description = "Unauthorized — token invalid or provider not configured", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+fn exchange_provider_token_for_jwt() {}
+
+/// Exchange an OAuth provider token for a JWT (RFC 8693 Token Exchange).
+/// Response: [ExchangeProviderTokenForJwtResponse].
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[empty_traits(MoghAuthLoginRequest)]
+#[response(ExchangeProviderTokenForJwtResponse)]
+#[error(mogh_error::Error)]
+pub struct ExchangeProviderTokenForJwt {
+  /// The type of the presented token (RFC 8693 `subject_token_type`).
+  pub subject_token_type: SubjectTokenType,
+  /// The token to exchange (RFC 8693 `subject_token`).
+  pub subject_token: String,
+}
+
+/// Response for [ExchangeProviderTokenForJwt].
+#[typeshare]
+pub type ExchangeProviderTokenForJwtResponse = JwtResponse;
+
+//
+
 #[allow(unused)]
 #[cfg(feature = "utoipa")]
 #[utoipa::path(

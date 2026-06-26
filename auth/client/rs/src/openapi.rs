@@ -13,6 +13,7 @@ mod auth {
     // =========
     auth::get_login_options,
     auth::exchange_for_jwt,
+    auth::exchange_provider_token_for_jwt,
     auth::complete_passkey_login,
     auth::complete_totp_login,
     // ==========
