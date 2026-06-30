@@ -3,7 +3,6 @@ name = "mogh_server"
 description = "Configurable axum server including TLS, Session, CORS, common security headers, and static file hosting."
 version = "1.5.0"
 edition.workspace = true
-authors.workspace = true
 license.workspace = true
 repository.workspace = true
 

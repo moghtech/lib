@@ -4,7 +4,6 @@ members = ["auth/client/rs", "auth/server", "crates/*", "crates/resolver/derive"
 
 [workspace.package]
 edition = "2024"
-authors = ["moghtech <contact@mogh.tech>"]
 license = "MPL-2.0"
 repository = "https://github.com/moghtech/lib"
 
@@ -32,12 +31,12 @@ mogh_validations = "1.0.1"
 cicada_loader = "0.5.1"
 
 # ASYNC
-reqwest = { version = "0.13.3", default-features = false, features = ["json", "query", "form", "rustls"] }
-tokio = { version = "1.52.2", features = ["full"] }
-arc-swap = "1.9.1"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "form", "rustls"] }
+tokio = { version = "1.52.3", features = ["full"] }
+arc-swap = "1.9.2"
 
 # SERVER
-tower-http = { version = "0.6.10", features = ["fs", "cors", "set-header"] }
+tower-http = { version = "0.7.0", features = ["fs", "cors", "set-header"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 axum = { version = "0.8.9", features = ["macros"] }
 tower-sessions = "0.15.0"
@@ -48,13 +47,14 @@ indexmap = { version = "2.14.0", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 strum = { version = "0.28.0", features = ["derive"] }
 serde_yaml_ng = "0.10.0"
-serde_json = "1.0.149"
+serde_json = "1.0.150"
 serde_qs = "1.0.0"
 bson = "3.1.0"
-toml = "1.1.2+spec-1.1.0"
+toml = "1.1.2"
 url = "2.5.8"
 
 # CRYPTO
+# Held back for 'snow'
 chacha20poly1305 = "0.10.1"
 data-encoding = "2.11.0"
 rand = "0.10.1"
@@ -62,11 +62,11 @@ rand = "0.10.1"
 sha2 = "0.10.9"
 
 # AUTH
-webauthn-rs = { version = "0.5.4", features = ["danger-allow-state-serialisation"] }
+webauthn-rs = { version = "0.5.5", features = ["danger-allow-state-serialisation"] }
 openidconnect = { version = "4.0.1", features = ["accept-rfc3339-timestamps"] }
-jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
-totp-rs = { version = "5.7.1", features = ["qr", "serde_support"] }
-bcrypt = "0.19.1"
+jsonwebtoken = { version = "10.4.0", features = ["aws_lc_rs"] }
+totp-rs = { version = "5.7.2", features = ["qr", "serde_support"] }
+bcrypt = "0.19.2"
 
 # PKI
 pem-rfc7468 = { version = "1.0.0", features = ["alloc"] }
@@ -78,31 +78,31 @@ spki = "0.7.3"
 der = "0.7.10"
 
 # ERROR
-anyhow = "1.0.102"
+anyhow = "1.0.103"
 thiserror = "2.0.18"
 
 # LOGGING
-opentelemetry-otlp = { version = "0.31.1", features = ["tls-roots", "reqwest-rustls"] }
-opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32.0", features = ["tls-roots", "reqwest-rustls"] }
+opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 tracing-subscriber = { version = "0.3.23", features = ["json"] }
-opentelemetry-semantic-conventions = "0.31.0"
-tracing-opentelemetry = "0.32.1"
-opentelemetry = "0.31.0"
+opentelemetry-semantic-conventions = "0.32.1"
+tracing-opentelemetry = "0.33.0"
+opentelemetry = "0.32.0"
 tracing = "0.1.44"
 
 # MACRO
-quote = "1.0.45"
+quote = "1.0.46"
 proc-macro2 = "1.0.106"
-syn = "2.0.117"
+syn = "2.0.118"
 
 # MISC
-clap = { version = "4.6.0", features = ["derive"] }
-uuid = { version = "1.23.1", features = ["v4"] }
+clap = { version = "4.6.1", features = ["derive"] }
+uuid = { version = "1.23.4", features = ["v4"] }
 typeshare = "1.0.5"
 wildcard = "0.3.0"
 colored = "3.1.1"
 utoipa = "5.5.0"
-regex = "1.12.3"
+regex = "1.12.4"
 
 [patch.crates-io]
 # MOGH API

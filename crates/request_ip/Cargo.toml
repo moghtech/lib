@@ -3,7 +3,6 @@ name = "mogh_request_ip"
 description = "Axum extractor for client request IP"
 version = "1.0.1"
 edition.workspace = true
-authors.workspace = true
 license.workspace = true
 repository.workspace = true
 

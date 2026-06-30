@@ -3,7 +3,6 @@ name = "mogh_config"
 description = "Utilities to merge config from multiple files / directories."
 version = "1.1.0"
 edition.workspace = true
-authors.workspace = true
 license.workspace = true
 repository.workspace = true
 

@@ -3,7 +3,6 @@ name = "mogh_validations"
 description = "Utilities to validate incoming strings."
 version = "1.0.1"
 edition.workspace = true
-authors.workspace = true
 license.workspace = true
 repository.workspace = true
 

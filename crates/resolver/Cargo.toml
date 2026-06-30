@@ -3,7 +3,6 @@ name = "mogh_resolver"
 description = "Traits to link Request / Response types, forming 'resolver' relationships"
 version = "1.0.0"
 edition.workspace = true
-authors.workspace = true
 license.workspace = true
 repository.workspace = true
 

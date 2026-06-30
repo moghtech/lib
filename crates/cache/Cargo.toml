@@ -3,7 +3,6 @@ name = "mogh_cache"
 description = "Async caching utilities handling concurrent / parallel access"
 version = "1.1.2"
 edition.workspace = true
-authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
