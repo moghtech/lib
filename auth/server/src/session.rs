@@ -122,10 +122,11 @@ impl Session {
   pub async fn insert_google_login(
     &self,
     state: &str,
+    nonce: &str,
   ) -> mogh_error::Result<()> {
     self
       .0
-      .insert(Self::GOOGLE_LOGIN, state)
+      .insert(Self::GOOGLE_LOGIN, (state, nonce))
       .await
       .context("Failed to serialize session data")
       .map_err(Into::into)
@@ -134,7 +135,7 @@ impl Session {
   /// Returns the CSRF state for validation
   pub async fn retrieve_google_login(
     &self,
-  ) -> mogh_error::Result<String> {
+  ) -> mogh_error::Result<(String, String)> {
     self
       .0
       .remove(Self::GOOGLE_LOGIN)
@@ -359,10 +360,11 @@ impl Session {
     &self,
     user_id: &str,
     state: &str,
+    nonce: &str,
   ) -> mogh_error::Result<()> {
     self
       .0
-      .insert(Self::GOOGLE_LINK, (user_id, state))
+      .insert(Self::GOOGLE_LINK, (user_id, state, nonce))
       .await
       .context("Failed to serialize session data")
       .map_err(Into::into)
@@ -371,7 +373,7 @@ impl Session {
   /// Returns (user_id, state)
   pub async fn retrieve_google_link(
     &self,
-  ) -> mogh_error::Result<Option<(String, String)>> {
+  ) -> mogh_error::Result<Option<(String, String, String)>> {
     self
       .0
       .remove(Self::GOOGLE_LINK)
