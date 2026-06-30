@@ -143,7 +143,7 @@ impl GoogleProvider {
   pub async fn get_state_and_login_redirect_url(
     &self,
     redirect: Option<String>,
-  ) -> (String, String, String) {
+  ) -> (String, Nonce, String) {
     let state_prefix = random_string(STATE_PREFIX_LENGTH);
     let state = match redirect {
       Some(redirect) => state_prefix + &redirect,
@@ -157,7 +157,7 @@ impl GoogleProvider {
       self.redirect_uri,
       self.scopes
     );
-    (state, nonce.secret().clone(), redirect_url)
+    (state, nonce, redirect_url)
   }
 
   pub async fn get_google_user(

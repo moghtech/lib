@@ -62,7 +62,7 @@ pub async fn google_login<I: AuthImpl>(
     let (state, nonce, uri) =
       provider.get_state_and_login_redirect_url(redirect).await;
 
-    session.insert_google_login(&state, &nonce).await?;
+    session.insert_google_login(&state, nonce.secret()).await?;
 
     Ok(Redirect::to(&uri))
   }
@@ -106,7 +106,9 @@ pub async fn google_link<I: AuthImpl>(
     let (state, nonce, uri) =
       provider.get_state_and_login_redirect_url(None).await;
 
-    session.insert_google_link(&user_id, &state, &nonce).await?;
+    session
+      .insert_google_link(&user_id, &state, nonce.secret())
+      .await?;
 
     info!(
       user_id = user.id(),
