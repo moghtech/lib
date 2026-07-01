@@ -43,6 +43,7 @@ pub struct ManageArgs {
 #[serde(tag = "type", content = "params")]
 #[allow(clippy::enum_variant_names, clippy::large_enum_variant)]
 pub enum ManageRequest {
+  GetUserId(GetUserId),
   // Local
   UpdateUsername(UpdateUsername),
   UpdatePassword(UpdatePassword),
@@ -123,6 +124,17 @@ async fn handler<I: AuthImpl>(
   }
 
   res.map(|res| res.0)
+}
+
+impl Resolve<ManageArgs> for GetUserId {
+  async fn resolve(
+    self,
+    ManageArgs { user, .. }: &ManageArgs,
+  ) -> Result<Self::Response, Self::Error> {
+    Ok(GetUserIdResponse {
+      id: user.id().to_string(),
+    })
+  }
 }
 
 impl Resolve<ManageArgs> for UpdateExternalSkip2fa {

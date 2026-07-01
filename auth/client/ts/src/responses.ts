@@ -10,6 +10,7 @@ export type LoginResponses = {
 };
 
 export type ManageResponses = {
+  GetUserId: Types.GetUserIdResponse;
   // Local
   UpdateUsername: Types.UpdateUsernameResponse;
   UpdatePassword: Types.UpdatePasswordResponse;

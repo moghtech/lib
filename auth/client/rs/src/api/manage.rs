@@ -24,6 +24,40 @@ pub trait MoghAuthManageRequest: HasResponse {}
 #[cfg(feature = "utoipa")]
 #[utoipa::path(
   post,
+  path = "/manage/GetUserId",
+  description = "Get the calling user's ID.",
+  request_body(content = GetUserId),
+  responses(
+    (status = 200, description = "The calling user's ID", body = GetUserIdResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 500, description = "Request failed", body = mogh_error::Serror)
+  ),
+)]
+fn get_user_id() {}
+
+/// Get the calling user's ID.
+/// Response: [GetUserIdResponse].
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize, Resolve)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[empty_traits(MoghAuthManageRequest)]
+#[response(GetUserIdResponse)]
+#[error(mogh_error::Error)]
+pub struct GetUserId {}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct GetUserIdResponse {
+  pub id: String,
+}
+
+//
+
+#[allow(unused)]
+#[cfg(feature = "utoipa")]
+#[utoipa::path(
+  post,
   path = "/manage/UpdateUsername",
   description = "Update the calling user's username.",
   request_body(content = UpdateUsername),

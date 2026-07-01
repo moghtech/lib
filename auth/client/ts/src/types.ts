@@ -271,6 +271,17 @@ export interface GetLoginOptionsResponse {
 	oidc_auto_redirect: boolean;
 }
 
+/**
+ * Get the calling user's ID.
+ * Response: [GetUserIdResponse].
+ */
+export interface GetUserId {
+}
+
+export interface GetUserIdResponse {
+	id: string;
+}
+
 /** Login as a local user. */
 export interface LoginLocalUser {
 	/** The user's username */
@@ -366,6 +377,7 @@ export type LoginRequest =
 	| { type: "CompleteTotpLogin", params: CompleteTotpLogin };
 
 export type ManageRequest = 
+	| { type: "GetUserId", params: GetUserId }
 	| { type: "UpdateUsername", params: UpdateUsername }
 	| { type: "UpdatePassword", params: UpdatePassword }
 	| { type: "BeginExternalLoginLink", params: BeginExternalLoginLink }

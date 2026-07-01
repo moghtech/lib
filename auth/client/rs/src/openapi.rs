@@ -18,6 +18,7 @@ mod auth {
     // ==========
     // = MANAGE =
     // ==========
+    auth::get_user_id,
     // Local
     auth::update_username,
     auth::update_password,
