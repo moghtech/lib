@@ -1,4 +1,5 @@
 use std::{
+  collections::HashMap,
   sync::{Arc, OnceLock},
   time::{SystemTime, UNIX_EPOCH},
 };
@@ -26,9 +27,65 @@ pub use openidconnect::SubjectIdentifier;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsernameAdditionalClaims {
   pub username: Option<String>,
+  /// Additional non-standard claims (eg `groups`), captured for syncing.
+  #[serde(flatten)]
+  pub other: HashMap<String, serde_json::Value>,
 }
 
 impl AdditionalClaims for UsernameAdditionalClaims {}
+
+/// Group names from a flattened claim, either an array of strings
+/// or a single string.
+fn extract_groups(
+  claims: &UsernameAdditionalClaims,
+  claim: &str,
+) -> Vec<String> {
+  match claims.other.get(claim) {
+    Some(serde_json::Value::Array(arr)) => arr
+      .iter()
+      .filter_map(|v| v.as_str().map(ToString::to_string))
+      .collect(),
+    Some(serde_json::Value::String(s)) => vec![s.clone()],
+    _ => Vec::new(),
+  }
+}
+
+/// Admin signal from a flattened claim, or `None` if absent. Strings
+/// (`"true"`, `"1"`) and non-zero numbers are treated as truthy.
+fn extract_admin(
+  claims: &UsernameAdditionalClaims,
+  claim: &str,
+) -> Option<bool> {
+  match claims.other.get(claim)? {
+    serde_json::Value::Bool(b) => Some(*b),
+    serde_json::Value::String(s) => {
+      Some(s.eq_ignore_ascii_case("true") || s == "1")
+    }
+    serde_json::Value::Number(n) => {
+      Some(n.as_i64().map(|i| i != 0).unwrap_or(false))
+    }
+    _ => None,
+  }
+}
+
+/// Admin when the claim is truthy or the user is in `admin_group`.
+/// `None` when neither is configured, so admin is left untouched.
+fn resolve_admin(
+  admin_claim_signal: Option<bool>,
+  groups: &[String],
+  admin_claim: &str,
+  admin_group: &str,
+) -> Option<bool> {
+  let want_claim = !admin_claim.is_empty();
+  let want_group = !admin_group.is_empty();
+  if !want_claim && !want_group {
+    return None;
+  }
+  let from_claim = admin_claim_signal.unwrap_or(false);
+  let from_group =
+    want_group && groups.iter().any(|group| group == admin_group);
+  Some(from_claim || from_group)
+}
 
 pub type TokenResponse = StandardTokenResponse<
   IdTokenFields<
@@ -142,6 +199,7 @@ pub struct OidcProvider {
   client: InnerOidcProvider,
   valid_until: u128,
   use_full_email: bool,
+  additional_scopes: Vec<String>,
 }
 
 impl OidcProvider {
@@ -190,6 +248,7 @@ impl OidcProvider {
       valid_until,
       app_user_agent,
       use_full_email: config.use_full_email,
+      additional_scopes: config.additional_scopes.clone(),
     })
   }
 
@@ -197,7 +256,7 @@ impl OidcProvider {
     &self,
     pkce_challenge: PkceCodeChallenge,
   ) -> (Url, CsrfToken, Nonce) {
-    self
+    let mut request = self
       .client
       .authorize_url(
         CoreAuthenticationFlow::AuthorizationCode,
@@ -207,8 +266,12 @@ impl OidcProvider {
       .set_pkce_challenge(pkce_challenge)
       .add_scope(Scope::new("openid".to_string()))
       .add_scope(Scope::new("profile".to_string()))
-      .add_scope(Scope::new("email".to_string()))
-      .url()
+      .add_scope(Scope::new("email".to_string()));
+    // eg `groups`, if the provider requires it for that claim.
+    for scope in &self.additional_scopes {
+      request = request.add_scope(Scope::new(scope.clone()));
+    }
+    request.url()
   }
 
   /// Applied security validations and extracts the
@@ -459,5 +522,227 @@ impl OidcProvider {
 
     // Priority 6 (fallback): use the subject if no others available
     subject.to_string()
+  }
+
+  /// Reads the configured group memberships and admin signal from the
+  /// claims, preferring the id token and falling back to userinfo only
+  /// for what is missing. `is_admin` is `None` when neither
+  /// `admin_claim` nor `admin_group` is configured.
+  pub async fn get_groups_and_admin(
+    &self,
+    config: &OidcConfig,
+    subject: &SubjectIdentifier,
+    token: &TokenResponse,
+    nonce: &Nonce,
+  ) -> (Vec<String>, Option<bool>) {
+    let want_groups = !config.groups_claim.is_empty();
+    let want_admin_claim = !config.admin_claim.is_empty();
+    let want_admin =
+      want_admin_claim || !config.admin_group.is_empty();
+    if !want_groups && !want_admin {
+      return (Vec::new(), None);
+    }
+
+    let id_claims = token.id_token().and_then(|token| {
+      token.claims(&self.client.id_token_verifier(), nonce).ok()
+    });
+    let id_extra =
+      id_claims.as_ref().map(|claims| claims.additional_claims());
+
+    let mut groups = if want_groups {
+      id_extra
+        .map(|extra| extract_groups(extra, &config.groups_claim))
+        .unwrap_or_default()
+    } else {
+      Vec::new()
+    };
+    let mut admin_claim_signal = id_extra
+      .and_then(|extra| extract_admin(extra, &config.admin_claim));
+
+    // Some providers omit these from the id token.
+    let need_userinfo = (want_groups && groups.is_empty())
+      || (want_admin_claim && admin_claim_signal.is_none());
+    if need_userinfo {
+      let user_info = async {
+        self
+          .client
+          .user_info(token.access_token().clone(), Some(subject.clone()))
+          .ok()?
+          .request_async::<UsernameAdditionalClaims, _, CoreGenderClaim>(
+            reqwest(self.app_user_agent),
+          )
+          .await
+          .inspect(|user_info| debug!("OIDC USER INFO: {user_info:?}"))
+          .ok()
+      }
+      .await;
+
+      if let Some(info) = user_info.as_ref() {
+        let extra = info.additional_claims();
+        if want_groups && groups.is_empty() {
+          groups = extract_groups(extra, &config.groups_claim);
+        }
+        if want_admin_claim && admin_claim_signal.is_none() {
+          admin_claim_signal =
+            extract_admin(extra, &config.admin_claim);
+        }
+      }
+    }
+
+    let admin = resolve_admin(
+      admin_claim_signal,
+      &groups,
+      &config.admin_claim,
+      &config.admin_group,
+    );
+
+    (groups, admin)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use serde_json::json;
+
+  fn claims(value: serde_json::Value) -> UsernameAdditionalClaims {
+    let other = match value {
+      serde_json::Value::Object(map) => map.into_iter().collect(),
+      _ => HashMap::new(),
+    };
+    UsernameAdditionalClaims {
+      username: None,
+      other,
+    }
+  }
+
+  #[test]
+  fn extract_groups_from_array() {
+    let c = claims(json!({ "groups": ["admins", "devs"] }));
+    assert_eq!(
+      extract_groups(&c, "groups"),
+      vec!["admins".to_string(), "devs".to_string()]
+    );
+  }
+
+  #[test]
+  fn extract_groups_from_single_string() {
+    let c = claims(json!({ "groups": "admins" }));
+    assert_eq!(
+      extract_groups(&c, "groups"),
+      vec!["admins".to_string()]
+    );
+  }
+
+  #[test]
+  fn extract_groups_missing_claim_is_empty() {
+    let c = claims(json!({ "roles": ["admins"] }));
+    assert!(extract_groups(&c, "groups").is_empty());
+  }
+
+  #[test]
+  fn extract_groups_ignores_non_string_entries() {
+    let c = claims(json!({ "groups": ["admins", 1, true] }));
+    assert_eq!(
+      extract_groups(&c, "groups"),
+      vec!["admins".to_string()]
+    );
+  }
+
+  #[test]
+  fn extract_admin_bool() {
+    assert_eq!(
+      extract_admin(&claims(json!({ "admin": true })), "admin"),
+      Some(true)
+    );
+    assert_eq!(
+      extract_admin(&claims(json!({ "admin": false })), "admin"),
+      Some(false)
+    );
+  }
+
+  #[test]
+  fn extract_admin_string_and_number() {
+    assert_eq!(
+      extract_admin(&claims(json!({ "admin": "true" })), "admin"),
+      Some(true)
+    );
+    assert_eq!(
+      extract_admin(&claims(json!({ "admin": "TRUE" })), "admin"),
+      Some(true)
+    );
+    assert_eq!(
+      extract_admin(&claims(json!({ "admin": "false" })), "admin"),
+      Some(false)
+    );
+    assert_eq!(
+      extract_admin(&claims(json!({ "admin": 1 })), "admin"),
+      Some(true)
+    );
+    assert_eq!(
+      extract_admin(&claims(json!({ "admin": 0 })), "admin"),
+      Some(false)
+    );
+  }
+
+  #[test]
+  fn extract_admin_missing_claim_is_none() {
+    assert_eq!(
+      extract_admin(&claims(json!({ "other": true })), "admin"),
+      None
+    );
+  }
+
+  #[test]
+  fn resolve_admin_none_when_nothing_configured() {
+    assert_eq!(resolve_admin(None, &["a".to_string()], "", ""), None);
+  }
+
+  #[test]
+  fn resolve_admin_by_claim_only() {
+    assert_eq!(
+      resolve_admin(Some(true), &[], "admin", ""),
+      Some(true)
+    );
+    assert_eq!(
+      resolve_admin(Some(false), &[], "admin", ""),
+      Some(false)
+    );
+    // Configured but claim absent everywhere -> Some(false).
+    assert_eq!(resolve_admin(None, &[], "admin", ""), Some(false));
+  }
+
+  #[test]
+  fn resolve_admin_by_group_only() {
+    let groups =
+      vec!["devs".to_string(), "komodo-admins".to_string()];
+    assert_eq!(
+      resolve_admin(None, &groups, "", "komodo-admins"),
+      Some(true)
+    );
+    assert_eq!(
+      resolve_admin(None, &groups, "", "other-group"),
+      Some(false)
+    );
+  }
+
+  #[test]
+  fn resolve_admin_claim_or_group() {
+    let groups = vec!["komodo-admins".to_string()];
+    // Group matches even when claim is false.
+    assert_eq!(
+      resolve_admin(Some(false), &groups, "admin", "komodo-admins"),
+      Some(true)
+    );
+    // Claim true even when group does not match.
+    assert_eq!(
+      resolve_admin(Some(true), &[], "admin", "komodo-admins"),
+      Some(true)
+    );
+    // Neither matches.
+    assert_eq!(
+      resolve_admin(Some(false), &[], "admin", "komodo-admins"),
+      Some(false)
+    );
   }
 }
