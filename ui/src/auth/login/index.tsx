@@ -14,7 +14,14 @@ import * as MoghAuth from "mogh_auth_client";
 import { AlertTriangle, KeyRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import LoginHeader from "./header";
-import { authClient, sanitizeQuery, useLogin, useLoginOptions } from "../..";
+import {
+  authClient,
+  BackButton,
+  sanitizeQuery,
+  useLogin,
+  useLoginOptions,
+  useUserId,
+} from "../..";
 
 export interface LoginBrandingProps {
   appName: string;
@@ -40,6 +47,8 @@ export function LoginPage({
   );
   const [totpIsPending, setTotpPending] = useState(_totpIsPending ?? false);
   const secondFactorPending = passkeyIsPending || totpIsPending;
+
+  const alreadyLoggedIn = useUserId().data?.id!!;
 
   // Auto-redirect to OIDC provider if configured and disableAutoLogin is not set
   useEffect(() => {
@@ -185,22 +194,37 @@ export function LoginPage({
               autoCorrect="off"
               key={localForm.key("password")}
             />
-            <Group mt="sm" justify="end">
-              {showSignUp && (
-                <Button
-                  variant="outline"
-                  w={110}
-                  onClick={localForm.onSubmit((form) => signup(form)) as any}
-                  loading={signupPending}
-                >
-                  Sign Up
-                </Button>
+            <Group mt="sm" justify="space-between">
+              {alreadyLoggedIn && (
+                <BackButton
+                  to={new URLSearchParams(location.search).get("backto") ?? "/"}
+                />
               )}
-              <Button w={110} type="submit" loading={loginPending}>
-                Log In
-              </Button>
+              <Group justify="end">
+                {showSignUp && (
+                  <Button
+                    variant="outline"
+                    w={110}
+                    onClick={localForm.onSubmit((form) => signup(form)) as any}
+                    loading={signupPending}
+                  >
+                    Sign Up
+                  </Button>
+                )}
+                <Button w={110} type="submit" loading={loginPending}>
+                  Log In
+                </Button>
+              </Group>
             </Group>
           </>
+        )}
+
+        {alreadyLoggedIn && !(options?.local && !secondFactorPending) && (
+          <Group>
+            <BackButton
+              to={new URLSearchParams(location.search).get("backto") ?? "/"}
+            />
+          </Group>
         )}
 
         {passkeyIsPending && (

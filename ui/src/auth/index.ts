@@ -66,6 +66,14 @@ export function useLogin<
   });
 }
 
+export function useUserId() {
+  return useQuery({
+    queryKey: [""],
+    queryFn: () => authClient().manage("GetUserId", {}),
+    enabled: !!MoghAuth.LOGIN_TOKENS.jwt(),
+  });
+}
+
 export function useManageAuth<
   T extends MoghAuth.Types.ManageRequest["type"],
   R extends Extract<MoghAuth.Types.ManageRequest, { type: T }>,
