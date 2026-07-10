@@ -344,8 +344,8 @@ function SortIcon({
   sortDescFirst?: boolean;
 }) {
   if (state === "asc")
-    return sortDescFirst ? <ArrowDown size={14} /> : <ArrowUp size={14} />;
-  if (state === "desc")
     return sortDescFirst ? <ArrowUp size={14} /> : <ArrowDown size={14} />;
+  if (state === "desc")
+    return sortDescFirst ? <ArrowDown size={14} /> : <ArrowUp size={14} />;
   return <Minus size={14} />;
 }
