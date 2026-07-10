@@ -42,6 +42,13 @@ export interface DataTableProps<TData, TValue = unknown> extends BoxProps {
   noResults?: ReactNode;
   defaultSort?: SortingState;
   sortDescFirst?: boolean;
+  /** Sorting is handled externally (eg. server side).
+   * The table still manages / persists the sorting state,
+   * but does not apply it to the rows. */
+  manualSorting?: boolean;
+  /** Called with the sorting state whenever it changes,
+   * including on load from local storage. */
+  onSortingStateChange?: (sorting: SortingState) => void;
   selectOptions?: {
     selectKey: (row: TData) => string;
     onSelect?: (selected: string[]) => void;
@@ -64,6 +71,8 @@ export function DataTable<TData, TValue>({
   noResults = <Text c="dimmed">No results</Text>,
   sortDescFirst = false,
   defaultSort = [],
+  manualSorting,
+  onSortingStateChange,
   selectOptions,
   caption,
   tableProps,
@@ -87,6 +96,7 @@ export function DataTable<TData, TValue>({
     getCoreRowModel: getCoreRowModel(),
     onSortingChange: setSorting,
     getSortedRowModel: getSortedRowModel(),
+    manualSorting,
     state: {
       sorting,
       rowSelection,
@@ -106,6 +116,10 @@ export function DataTable<TData, TValue>({
   useEffect(() => {
     localStorage.setItem("data-table-" + tableKey, JSON.stringify(sorting));
   }, [tableKey, sorting]);
+
+  useEffect(() => {
+    onSortingStateChange?.(sorting);
+  }, [sorting]);
 
   useEffect(() => {
     selectOptions?.onSelect?.(Object.keys(rowSelection));
@@ -271,6 +285,25 @@ export const SortableHeader = <T, V>({
   description?: ReactNode;
   sortDescFirst?: boolean;
 }) => {
+  if (!column.getCanSort()) {
+    return (
+      <Group justify="start" gap="xs" wrap="nowrap" miw="120" w="fit-content">
+        <Text fw={600} size="sm" lineClamp={1}>
+          {title}
+        </Text>
+        {description && (
+          <HoverCard offset={10}>
+            <HoverCard.Target>
+              <Info size="1rem" />
+            </HoverCard.Target>
+            <HoverCard.Dropdown>
+              <Text>{description}</Text>
+            </HoverCard.Dropdown>
+          </HoverCard>
+        )}
+      </Group>
+    );
+  }
   return (
     <UnstyledButton
       onClick={column.getToggleSortingHandler()}
