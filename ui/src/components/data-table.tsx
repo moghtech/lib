@@ -3,6 +3,7 @@ import {
   ReactNode,
   SetStateAction,
   useEffect,
+  useLayoutEffect,
   useState,
 } from "react";
 import {
@@ -32,6 +33,15 @@ import {
 } from "@mantine/core";
 import { ArrowDown, ArrowUp, Info, Minus } from "lucide-react";
 
+function loadStoredSorting(tableKey: string): SortingState | null {
+  try {
+    const stored = localStorage.getItem("data-table-" + tableKey);
+    return stored ? (JSON.parse(stored) as SortingState) : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface DataTableProps<TData, TValue = unknown> extends BoxProps {
   /** Unique key given to table so sorting can be remembered on local storage */
   tableKey: string;
@@ -46,8 +56,9 @@ export interface DataTableProps<TData, TValue = unknown> extends BoxProps {
    * The table still manages / persists the sorting state,
    * but does not apply it to the rows. */
   manualSorting?: boolean;
-  /** Called with the sorting state whenever it changes,
-   * including on load from local storage. */
+  /** Called with the sorting state whenever it changes.
+   * Also called on mount with the initial state
+   * (loaded from local storage when available). */
   onSortingStateChange?: (sorting: SortingState) => void;
   selectOptions?: {
     selectKey: (row: TData) => string;
@@ -81,7 +92,17 @@ export function DataTable<TData, TValue>({
   mah = "max(150px, calc(100vh - 320px))",
   ...boxProps
 }: DataTableProps<TData, TValue>) {
-  const [sorting, setSorting] = useState<SortingState>(defaultSort);
+  // Initialized synchronously from local storage so the first render
+  // (and any server side sorted query) already uses the persisted sort,
+  // instead of flashing through the unsorted state.
+  const [sorting, setSorting] = useState<SortingState>(
+    () => loadStoredSorting(tableKey) ?? defaultSort,
+  );
+  const [prevTableKey, setPrevTableKey] = useState(tableKey);
+  if (prevTableKey !== tableKey) {
+    setPrevTableKey(tableKey);
+    setSorting(loadStoredSorting(tableKey) ?? defaultSort);
+  }
 
   // intentionally not initialized to clear selected values on table mount
   // could add some prop for adding default selected state to preserve between mounts
@@ -108,16 +129,13 @@ export function DataTable<TData, TValue>({
   });
 
   useEffect(() => {
-    const stored = localStorage.getItem("data-table-" + tableKey);
-    const sorting = stored ? (JSON.parse(stored) as SortingState) : null;
-    if (sorting) setSorting(sorting);
-  }, [tableKey]);
-
-  useEffect(() => {
     localStorage.setItem("data-table-" + tableKey, JSON.stringify(sorting));
   }, [tableKey, sorting]);
 
-  useEffect(() => {
+  // Layout effect so the parent receives the initial (persisted) sorting
+  // before any of its own passive effects run, ie before react-query
+  // subscribes a server side sorted query using the pre-sort key.
+  useLayoutEffect(() => {
     onSortingStateChange?.(sorting);
   }, [sorting]);
 

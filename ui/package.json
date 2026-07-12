@@ -1,6 +1,6 @@
 {
   "name": "mogh_ui",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Common UI components and styling used across Mogh apps.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -62,6 +62,6 @@
     "react-dom": "^19.2.7",
     "react-router-dom": "^7.18.1",
     "tsup": "^8.5.1",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   }
 }
