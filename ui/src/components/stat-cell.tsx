@@ -43,7 +43,7 @@ export function StatCell({
     />
   );
   return (
-    <Group gap="xs" justify="space-between" wrap="nowrap" {...groupProps}>
+    <Group gap="xs" wrap="nowrap" {...groupProps}>
       <Text
         w={64}
         c={value === undefined ? "dimmed" : undefined}
