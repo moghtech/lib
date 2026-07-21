@@ -13,7 +13,7 @@
         "default": "./dist/index.js"
       },
       "require": {
-        "types": "./dist/index.d.cts",
+        "types": "./dist/index.d.ts",
         "default": "./dist/index.cjs"
       }
     },
@@ -24,7 +24,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup && cd src && find . -name '*.scss' -exec cp --parents {} ../dist \\;",
+    "build": "tsup && tsc --emitDeclarationOnly && cd src && find . -name '*.scss' -exec cp --parents {} ../dist \\;",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit"
   },
