@@ -297,13 +297,15 @@ export const SortableHeader = <T, V>({
   title,
   description,
   sortDescFirst,
+  disabled,
 }: {
   column: Column<T, V>;
   title: string;
   description?: ReactNode;
   sortDescFirst?: boolean;
+  disabled?: boolean;
 }) => {
-  if (!column.getCanSort()) {
+  if (disabled || !column.getCanSort()) {
     return (
       <Group justify="start" gap="xs" wrap="nowrap" miw="120" w="fit-content">
         <Text fw={600} size="sm" lineClamp={1}>
