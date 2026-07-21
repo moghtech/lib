@@ -1,41 +1,38 @@
 import * as monaco from "monaco-editor";
 
+// The `?worker` import pattern is Vite's officially supported way to load
+// workers from dependencies. The previous `new URL("monaco-editor/...", import.meta.url)`
+// pattern breaks under rolldown-based Vite, which resolves the bare specifier
+// relative to this file instead of through node module resolution.
+//
+// Paths must NOT include the `esm/vs` prefix: monaco-editor's exports map is
+// `"./*.js": "./esm/vs/*.js"`, so legacy `monaco-editor/esm/vs/...` specifiers
+// no longer resolve.
+import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
+import JsonWorker from "monaco-editor/language/json/json.worker.js?worker";
+import CssWorker from "monaco-editor/language/css/css.worker.js?worker";
+import HtmlWorker from "monaco-editor/language/html/html.worker.js?worker";
+import TsWorker from "monaco-editor/language/typescript/ts.worker.js?worker";
+import YamlWorker from "monaco-yaml/yaml.worker.js?worker";
+
 self.MonacoEnvironment = {
   getWorker(_, label) {
     if (label === "json") {
-      return new Worker(
-        new URL("monaco-editor/esm/vs/language/json/json.worker.js", import.meta.url),
-        { type: "module" }
-      );
+      return new JsonWorker();
     }
     if (label === "css" || label === "scss" || label === "less") {
-      return new Worker(
-        new URL("monaco-editor/esm/vs/language/css/css.worker.js", import.meta.url),
-        { type: "module" }
-      );
+      return new CssWorker();
     }
     if (label === "html" || label === "handlebars" || label === "razor") {
-      return new Worker(
-        new URL("monaco-editor/esm/vs/language/html/html.worker.js", import.meta.url),
-        { type: "module" }
-      );
+      return new HtmlWorker();
     }
     if (label === "typescript" || label === "javascript") {
-      return new Worker(
-        new URL("monaco-editor/esm/vs/language/typescript/ts.worker.js", import.meta.url),
-        { type: "module" }
-      );
+      return new TsWorker();
     }
     if (label === "yaml") {
-      return new Worker(
-        new URL("monaco-yaml/yaml.worker.js", import.meta.url),
-        { type: "module" }
-      );
+      return new YamlWorker();
     }
-    return new Worker(
-      new URL("monaco-editor/esm/vs/editor/editor.worker.js", import.meta.url),
-      { type: "module" }
-    );
+    return new EditorWorker();
   },
 };
 
