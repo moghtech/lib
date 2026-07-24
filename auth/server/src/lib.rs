@@ -29,6 +29,8 @@ use crate::{
   },
 };
 
+pub use provider::oidc::OidcClaims;
+
 pub mod request_ip {
   pub use mogh_request_ip::*;
 }
@@ -345,6 +347,36 @@ pub trait AuthImpl: Send + Sync + 'static {
         anyhow!("Must implement 'AuthImpl::link_oidc_login'.").into(),
       )
     })
+  }
+
+  /// Runs after a verified OIDC login has been mapped to an app user id.
+  /// This runs for both existing users and newly-created users. If the user
+  /// has 2FA enabled, this hook runs before the second-factor challenge is
+  /// completed, after the OIDC identity itself has been validated.
+  fn on_oidc_login(
+    &self,
+    _user_id: String,
+    _claims: OidcClaims,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async { Ok(()) })
+  }
+
+  /// Runs after an OIDC user is created, before the login redirect returns.
+  fn on_oidc_signup(
+    &self,
+    _user_id: String,
+    _claims: OidcClaims,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async { Ok(()) })
+  }
+
+  /// Runs after an OIDC login is linked to an existing app user.
+  fn on_oidc_link(
+    &self,
+    _user_id: String,
+    _claims: OidcClaims,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async { Ok(()) })
   }
 
   // ==============
