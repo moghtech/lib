@@ -230,8 +230,8 @@ impl mogh_auth_server::AuthImpl for AppAuthImpl {
   // = OIDC AUTH =
   // =============
 
-  fn oidc_config(&self) -> &OidcConfig {
-    &core_config().oidc
+  fn oidc_config(&self) -> Option<&OidcConfig> {
+    Some(&core_config().oidc)
   }
 
   fn find_user_with_oidc_subject(
@@ -283,6 +283,26 @@ impl mogh_auth_server::AuthImpl for AppAuthImpl {
       .await
       .map(|_| ())
       .map_err(Into::into)
+    })
+  }
+
+  fn on_oidc_login(
+    &self,
+    user_id: String,
+    claims: mogh_auth_server::OidcClaims,
+  ) -> mogh_auth_server::DynFuture<mogh_error::Result<()>> {
+    Box::pin(async move {
+      let groups = claims
+        .claim("groups")
+        .and_then(|groups| groups.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group.as_str().map(ToString::to_string))
+        .collect::<Vec<_>>();
+
+      sync_user_groups_from_oidc(user_id, groups)
+        .await
+        .map_err(Into::into)
     })
   }
 
