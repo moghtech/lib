@@ -231,12 +231,23 @@ pub async fn oidc_callback<I: AuthImpl>(
       )
       .await?;
 
+    let (groups, is_admin) = provider
+      .get_groups_and_admin(config, &subject, &token, &nonce)
+      .await;
+
     let user =
       auth.find_user_with_oidc_subject(subject.clone()).await?;
 
     let user_id_or_two_factor = match user {
       // Log in existing user
       Some(user) => {
+        auth
+          .sync_oidc_user_claims(
+            user.id().to_string(),
+            groups,
+            is_admin,
+          )
+          .await?;
         get_user_id_or_two_factor(&auth, &session, &user).await?
       }
       // Sign up user
@@ -272,6 +283,10 @@ pub async fn oidc_callback<I: AuthImpl>(
           .await?;
 
         info!(user_id, username, "New user registration (OIDC)");
+
+        auth
+          .sync_oidc_user_claims(user_id.clone(), groups, is_admin)
+          .await?;
 
         session.insert_authenticated_user_id(&user_id).await?;
 
