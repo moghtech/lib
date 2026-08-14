@@ -661,4 +661,56 @@ pub trait AuthImpl: Send + Sync + 'static {
       )
     })
   }
+
+  // ===================================
+  // = PROVIDER TOKEN EXCHANGE (OAUTH) =
+  // ===================================
+
+  /// Exchange and validate an OIDC provider ID Token.
+  /// Returns the OIDC subject (user ID).
+  fn exchange_and_validate_oidc_token(
+    &self,
+    _token: &str,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::exchange_and_validate_oidc_token'."
+        )
+        .into(),
+      )
+    })
+  }
+
+  /// Exchange and validate a GitHub access token.
+  /// Calls GitHub User API, finds or creates user, returns user ID.
+  fn exchange_and_validate_github_token(
+    &self,
+    _token: &str,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::exchange_and_validate_github_token'."
+        )
+        .into(),
+      )
+    })
+  }
+
+  /// Exchange and validate a Google ID Token.
+  /// Verifies JWT signature and claims, finds or creates user, returns user ID.
+  fn exchange_and_validate_google_token(
+    &self,
+    _token: &str,
+  ) -> DynFuture<mogh_error::Result<String>> {
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::exchange_and_validate_google_token'."
+        )
+        .into(),
+      )
+    })
+  }
 }

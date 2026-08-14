@@ -37,6 +37,9 @@ export type DeleteApiKeyV2Response = NoData;
 /** Response for [ExchangeForJwt]. */
 export type ExchangeForJwtResponse = JwtResponse;
 
+/** Response for [ExchangeProviderTokenForJwt]. */
+export type ExchangeProviderTokenForJwtResponse = JwtResponse;
+
 export type JsonValue = any;
 
 /** JSON containing either an authentication token or the required 2fa auth check. */
@@ -248,6 +251,27 @@ export interface DeleteApiKeyV2 {
 export interface ExchangeForJwt {
 }
 
+/** The OAuth 2.0 subject token type (RFC 8693). */
+export enum SubjectTokenType {
+	/** OIDC ID Token (`urn:ietf:params:oauth:token-type:id_token`) */
+	OidcIdToken = "OidcIdToken",
+	/** Google ID Token (`urn:ietf:params:oauth:token-type:id_token`, Google issuer) */
+	GoogleIdToken = "GoogleIdToken",
+	/** GitHub Access Token (`urn:ietf:params:oauth:token-type:access_token`) */
+	GitHubAccessToken = "GitHubAccessToken",
+}
+
+/**
+ * Exchange an OAuth provider token for a JWT (RFC 8693 Token Exchange).
+ * Response: [ExchangeProviderTokenForJwtResponse].
+ */
+export interface ExchangeProviderTokenForJwt {
+	/** The type of the presented token (RFC 8693 `subject_token_type`). */
+	subject_token_type: SubjectTokenType;
+	/** The token to exchange (RFC 8693 `subject_token`). */
+	subject_token: string;
+}
+
 /**
  * Get the available options to login, eg. local and external providers.
  * Response: [GetLoginOptionsResponse].
@@ -371,6 +395,7 @@ export enum ExternalLoginProvider {
 export type LoginRequest = 
 	| { type: "GetLoginOptions", params: GetLoginOptions }
 	| { type: "ExchangeForJwt", params: ExchangeForJwt }
+	| { type: "ExchangeProviderTokenForJwt", params: ExchangeProviderTokenForJwt }
 	| { type: "SignUpLocalUser", params: SignUpLocalUser }
 	| { type: "LoginLocalUser", params: LoginLocalUser }
 	| { type: "CompletePasskeyLogin", params: CompletePasskeyLogin }
