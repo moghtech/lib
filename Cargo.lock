@@ -658,9 +658,9 @@ dependencies = [
  "chrono",
  "futures-util",
  "http",
- "mogh_auth_client",
+ "mogh_auth_client 6.0.1",
  "mogh_error",
- "mogh_pki",
+ "mogh_pki 2.0.2",
  "mogh_resolver",
  "rand 0.10.3",
  "reqwest 0.13.5",
@@ -1295,7 +1295,7 @@ name = "example_client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "mogh_auth_client",
+ "mogh_auth_client 7.0.0",
  "mogh_error",
  "mogh_resolver",
  "reqwest 0.13.5",
@@ -1330,14 +1330,14 @@ dependencies = [
  "envy",
  "example_client",
  "example_mock_idp",
- "mogh_auth_client",
+ "mogh_auth_client 7.0.0",
  "mogh_auth_server",
  "mogh_cache",
  "mogh_config",
  "mogh_encryption",
  "mogh_error",
  "mogh_logger",
- "mogh_pki",
+ "mogh_pki 3.0.0",
  "mogh_rate_limit",
  "mogh_request_ip",
  "mogh_resolver",
@@ -2414,11 +2414,31 @@ dependencies = [
 [[package]]
 name = "mogh_auth_client"
 version = "6.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91b664b41ddcaf8664c0adbc89add1bcfd4451d80afa894b2606185815a2560f"
 dependencies = [
  "anyhow",
  "mogh_error",
- "mogh_pki",
  "mogh_resolver",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "strum",
+ "typeshare",
+ "webauthn-rs",
+ "zeroize",
+]
+
+[[package]]
+name = "mogh_auth_client"
+version = "7.0.0"
+dependencies = [
+ "anyhow",
+ "mogh_error",
+ "mogh_pki 3.0.0",
+ "mogh_resolver",
+ "rand 0.10.3",
  "reqwest 0.13.5",
  "serde",
  "serde_json",
@@ -2432,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_server"
-version = "6.1.1"
+version = "7.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2441,9 +2461,9 @@ dependencies = [
  "data-encoding",
  "http-body-util",
  "jsonwebtoken",
- "mogh_auth_client",
+ "mogh_auth_client 7.0.0",
  "mogh_error",
- "mogh_pki",
+ "mogh_pki 3.0.0",
  "mogh_rate_limit",
  "mogh_request_ip",
  "mogh_resolver",
@@ -2537,16 +2557,39 @@ dependencies = [
 [[package]]
 name = "mogh_pki"
 version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a233f40bb4ab34c9aa23053de57c8c22b40003fdcb93b859adb188a86824946"
 dependencies = [
  "anyhow",
  "arc-swap",
- "clap",
- "colored",
  "data-encoding",
  "der",
  "mogh_secret_file",
  "pem-rfc7468 1.0.0",
  "pkcs8",
+ "snow",
+ "spki",
+ "subtle",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "mogh_pki"
+version = "3.0.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "clap",
+ "colored",
+ "curve25519-dalek",
+ "data-encoding",
+ "der",
+ "ed25519-dalek",
+ "mogh_secret_file",
+ "pem-rfc7468 1.0.0",
+ "pkcs8",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "snow",
