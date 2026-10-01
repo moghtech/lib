@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, anyhow};
 use arc_swap::ArcSwap;
 use der::AnyRef;
-use zeroize::Zeroize as _;
+use zeroize::{Zeroize as _, Zeroizing};
 
 mod private;
 mod public;
@@ -20,19 +20,54 @@ mod tests;
 pub use private::Pkcs8PrivateKey;
 pub use public::SpkiPublicKey;
 
-pub(crate) use private::check_raw_private_key;
 pub(crate) use public::check_raw_public_key;
 
-use crate::PkiKind;
+use crate::{KeyAlgorithm, PkiKind, WrongKeyAlgorithm};
 
 const OID_X25519: spki::ObjectIdentifier =
   spki::ObjectIdentifier::new_unwrap("1.3.101.110");
+const OID_ED25519: spki::ObjectIdentifier =
+  spki::ObjectIdentifier::new_unwrap("1.3.101.112");
 
-fn algorithm() -> spki::AlgorithmIdentifier<AnyRef<'static>> {
+/// The algorithm identifier the keys of `pki_kind` are encoded
+/// with (RFC 8410: the same layout for both, without parameters).
+fn algorithm(
+  pki_kind: PkiKind,
+) -> spki::AlgorithmIdentifier<AnyRef<'static>> {
   spki::AlgorithmIdentifier {
-    oid: OID_X25519,
+    oid: match pki_kind.key_algorithm() {
+      KeyAlgorithm::Ed25519 => OID_ED25519,
+      KeyAlgorithm::X25519 => OID_X25519,
+    },
     parameters: None,
   }
+}
+
+/// Checks that an encoded key (`what`: "Private" / "Public") is of
+/// the algorithm `pki_kind` uses. A key of the other algorithm is
+/// [WrongKeyAlgorithm], so callers can tell it from a malformed one.
+fn check_algorithm(
+  pki_kind: PkiKind,
+  oid: &spki::ObjectIdentifier,
+  what: &str,
+) -> anyhow::Result<()> {
+  let expected = pki_kind.key_algorithm();
+  let found = if *oid == OID_ED25519 {
+    KeyAlgorithm::Ed25519
+  } else if *oid == OID_X25519 {
+    KeyAlgorithm::X25519
+  } else {
+    return Err(anyhow!(
+      "{what} key algorithm {oid} is not supported, expected {expected}"
+    ));
+  };
+  if found != expected {
+    return Err(anyhow::Error::new(WrongKeyAlgorithm {
+      expected,
+      found,
+    }));
+  }
+  Ok(())
 }
 
 /// Wraps a base64 body in pem framing,
@@ -64,17 +99,36 @@ pub struct EncodedKeyPair {
 }
 
 impl EncodedKeyPair {
+  /// A new key pair of the algorithm `pki_kind` uses
+  /// ([PkiKind::key_algorithm]).
   pub fn generate(pki_kind: PkiKind) -> anyhow::Result<Self> {
-    let builder =
-      snow::Builder::new(pki_kind.noise_params().parse()?);
-    let mut keypair = builder
-      .generate_keypair()
-      .context("Failed to generate keypair")?;
-    let private = Pkcs8PrivateKey::from_raw_bytes(&keypair.private);
-    keypair.private.zeroize();
-    let private = private?;
-    let public = SpkiPublicKey::from_raw_bytes(&keypair.public)?;
-    Ok(Self { private, public })
+    match pki_kind.key_algorithm() {
+      KeyAlgorithm::X25519 => {
+        let builder = snow::Builder::new(PkiKind::MUTUAL.parse()?);
+        let mut keypair = builder
+          .generate_keypair()
+          .context("Failed to generate keypair")?;
+        let private =
+          Pkcs8PrivateKey::from_raw_bytes(pki_kind, &keypair.private);
+        keypair.private.zeroize();
+        let private = private?;
+        let public =
+          SpkiPublicKey::from_raw_bytes(pki_kind, &keypair.public)?;
+        Ok(Self { private, public })
+      }
+      KeyAlgorithm::Ed25519 => {
+        use rand::TryRng as _;
+        // The seed, read directly from the OS random source.
+        let mut seed = Zeroizing::new([0u8; 32]);
+        rand::rngs::SysRng
+          .try_fill_bytes(&mut *seed)
+          .context("Failed to read from the OS random source")?;
+        let private =
+          Pkcs8PrivateKey::from_raw_bytes(pki_kind, &*seed)?;
+        let public = private.compute_public_key(pki_kind)?;
+        Ok(Self { private, public })
+      }
+    }
   }
 
   pub fn generate_write_sync(
@@ -122,32 +176,39 @@ impl EncodedKeyPair {
       return Self::generate_write_sync(pki_kind, path);
     }
 
-    let private = Pkcs8PrivateKey::from_file(path).map_err(|e| {
-      // Only an empty file is safe to delete: an unreadable file,
-      // or a real key in a form this can't load, is the identity
-      // the node is registered under.
-      if file_is_blank(path) {
-        e.context(format!(
-          "Failed to load the private key at {path:?} (the file is empty: delete it to have a new key generated)"
-        ))
-      } else {
-        e.context(format!(
-          "Failed to load the private key at {path:?}"
-        ))
-      }
-    })?;
-    let public = private.compute_public_key_using_dh(pki_kind)?;
+    let private = Pkcs8PrivateKey::from_file(pki_kind, path)
+      .map_err(|e| {
+        // Only an empty file is safe to delete: an unreadable file,
+        // or a real key in a form this can't load (the key of
+        // another algorithm), is the identity the node is
+        // registered under.
+        if file_is_blank(path) {
+          e.context(format!(
+            "Failed to load the private key at {path:?} (the file is empty: delete it to have a new key generated)"
+          ))
+        } else {
+          e.context(format!(
+            "Failed to load the private key at {path:?}"
+          ))
+        }
+      })?;
+    let public = private.compute_public_key(pki_kind)?;
 
     Ok(Self { private, public })
   }
 
+  /// The pair of a private key in any form
+  /// [Pkcs8PrivateKey::from_maybe_raw_bytes] accepts, deriving the
+  /// public key.
   pub fn from_private_key(
     pki_kind: PkiKind,
     maybe_pkcs8_private_key: &str,
   ) -> anyhow::Result<Self> {
-    let private =
-      Pkcs8PrivateKey::from_maybe_raw_bytes(maybe_pkcs8_private_key)?;
-    let public = private.compute_public_key_using_dh(pki_kind)?;
+    let private = Pkcs8PrivateKey::from_maybe_raw_bytes(
+      pki_kind,
+      maybe_pkcs8_private_key,
+    )?;
+    let public = private.compute_public_key(pki_kind)?;
     Ok(Self { private, public })
   }
 
@@ -157,8 +218,9 @@ impl EncodedKeyPair {
     pki_kind: PkiKind,
     private_key_path: impl AsRef<Path>,
   ) -> anyhow::Result<Self> {
-    let private = Pkcs8PrivateKey::from_file(private_key_path)?;
-    let public = private.compute_public_key_using_dh(pki_kind)?;
+    let private =
+      Pkcs8PrivateKey::from_file(pki_kind, private_key_path)?;
+    let public = private.compute_public_key(pki_kind)?;
     Ok(Self { private, public })
   }
 
@@ -205,6 +267,60 @@ const NEXT_SUFFIX: &str = ".next";
 /// [RotatableKeyPair::finish_rotation].
 const OLD_SUFFIX: &str = ".old";
 
+/// Whether a private key given inline reads as the path of a key
+/// file: taken as the key it would be the raw key (up to 32 bytes
+/// are), one anybody can derive from where key files usually are.
+///
+/// - The `file:` prefix, also in another case or after a space.
+/// - What starts like a path: `./`, `../`, `~/`, a drive (`C:\`),
+///   or `/`. A random raw key may start with `/` too (one in 64 of
+///   those `openssl rand -base64 24` prints), so a `/` is excused
+///   where the rest reads as one: base64 with an uppercase letter,
+///   a lowercase letter and a digit in it, which paths rarely are.
+/// - What ends like a key file: `.key`, `.pem`, `.der`, `.pk8`,
+///   `.p8`, `.priv`.
+///
+/// It goes by the string alone: a key is never looked up as a file.
+/// No pkcs8 key (pem, or base64 der, which starts with `M`) is any
+/// of these, so only a raw key is ever refused for it. Other paths
+/// are still taken as a raw key: a relative one without such an
+/// ending (`keys/device`), one from a variable (`$HOME/key`).
+pub fn looks_like_a_path(private_key: &str) -> bool {
+  let spec = private_key.trim();
+  let bytes = spec.as_bytes();
+  let prefix = spec
+    .get(..5)
+    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:"));
+  let relative = ["./", "../", "~/", ".\\", "..\\", "~\\"]
+    .iter()
+    .any(|start| spec.starts_with(start));
+  let drive = bytes.len() >= 3
+    && bytes[0].is_ascii_alphabetic()
+    && bytes[1] == b':'
+    && matches!(bytes[2], b'\\' | b'/');
+  let ending = [".key", ".pem", ".der", ".pk8", ".p8", ".priv"]
+    .iter()
+    .any(|ending| {
+      bytes.len() > ending.len()
+        && bytes[bytes.len() - ending.len()..]
+          .eq_ignore_ascii_case(ending.as_bytes())
+    });
+  // As random base64 of a raw key's length reads, bar one in
+  // thousands.
+  let random = || {
+    bytes.len().is_multiple_of(4)
+      && data_encoding::BASE64.decode(bytes).is_ok()
+      && bytes.iter().any(u8::is_ascii_uppercase)
+      && bytes.iter().any(u8::is_ascii_lowercase)
+      && bytes.iter().any(u8::is_ascii_digit)
+  };
+  prefix
+    || relative
+    || drive
+    || ending
+    || (spec.starts_with('/') && !random())
+}
+
 /// A key pair loaded from a private key spec, which a file backed
 /// pair can replace while in use: [Self::rotate] in one step, or
 /// [Self::begin_rotation] in two phases.
@@ -215,8 +331,12 @@ const OLD_SUFFIX: &str = ".old";
 /// [Self::rotation_pending]) never count as one. Nothing
 /// coordinates separate processes: only one process may rotate a
 /// given key file.
+///
+/// The pair keeps the [PkiKind] it was loaded as: every key it
+/// rotates to is of that kind's algorithm.
 pub struct RotatableKeyPair {
   keys: ArcSwap<EncodedKeyPair>,
+  pki_kind: PkiKind,
   path: Option<PathBuf>,
   /// Whether a rotation is in flight, see [RotationGuard].
   rotating: AtomicBool,
@@ -227,7 +347,14 @@ impl RotatableKeyPair {
   /// or from file containing raw / der / pem.
   /// Use `file:/path/to/private.key` to specify file: a key is
   /// generated and written there when the file does not exist.
-  /// An empty key, or an existing empty file, is an error.
+  /// An empty key, or an existing empty file, is an error, and so
+  /// is a key of the other algorithm than `pki_kind` uses
+  /// ([WrongKeyAlgorithm]).
+  ///
+  /// A spec which looks like a path but lacks the `file:` prefix (or
+  /// has it misspelled) is an error too ([looks_like_a_path]): up to
+  /// 32 bytes are a raw key, so the path would be taken for the key
+  /// itself, one anybody can derive.
   pub fn from_private_key_spec(
     pki_kind: PkiKind,
     private_key_spec: &str,
@@ -241,6 +368,11 @@ impl RotatableKeyPair {
         Some(path),
       )
     } else {
+      if looks_like_a_path(private_key_spec) {
+        return Err(anyhow!(
+          "The private key looks like a file path, which would be taken for the key itself: use `file:/path/to/key` (lowercase, nothing before it) to load a key file. A raw key which reads like a path is not taken: give the key as pkcs8 (base64 der or pem)"
+        ));
+      }
       (
         EncodedKeyPair::from_private_key(pki_kind, private_key_spec)?,
         None,
@@ -248,9 +380,15 @@ impl RotatableKeyPair {
     };
     Ok(Self {
       keys: ArcSwap::new(Arc::new(keys)),
+      pki_kind,
       path,
       rotating: AtomicBool::new(false),
     })
+  }
+
+  /// The kind the pair was loaded as, which its keys are of.
+  pub fn kind(&self) -> PkiKind {
+    self.pki_kind
   }
 
   /// If 'path' is Some, generates, writes, and stores new key pair.
@@ -267,21 +405,16 @@ impl RotatableKeyPair {
   /// The write is synchronous (no await, so the future can't be
   /// dropped between the switch and the in-memory swap). Errors
   /// while another rotation is in flight.
-  pub async fn rotate(
-    &self,
-    pki_kind: PkiKind,
-  ) -> anyhow::Result<SpkiPublicKey> {
-    self.rotate_with(pki_kind, |private, path| {
-      private.write_pem_sync(path)
-    })
+  pub async fn rotate(&self) -> anyhow::Result<SpkiPublicKey> {
+    self.rotate_with(|private, path| private.write_pem_sync(path))
   }
 
   /// [Self::rotate], writing the private key file with `write`.
   fn rotate_with(
     &self,
-    pki_kind: PkiKind,
     write: impl FnOnce(&Pkcs8PrivateKey, &Path) -> anyhow::Result<()>,
   ) -> anyhow::Result<SpkiPublicKey> {
+    let pki_kind = self.pki_kind;
     let Some(path) = self.path.as_deref() else {
       return Ok(self.keys.load().public.clone());
     };
@@ -342,10 +475,8 @@ impl RotatableKeyPair {
   /// written again by the next commit). A `<path>.next` holding the
   /// live key (a commit interrupted after its switch) is not a
   /// candidate, and is replaced by a new one.
-  pub fn begin_rotation(
-    &self,
-    pki_kind: PkiKind,
-  ) -> anyhow::Result<KeyRotation<'_>> {
+  pub fn begin_rotation(&self) -> anyhow::Result<KeyRotation<'_>> {
+    let pki_kind = self.pki_kind;
     let Some(path) = self.path.as_deref() else {
       anyhow::bail!(
         "The private key is not file backed, so it cannot be rotated"
@@ -359,7 +490,7 @@ impl RotatableKeyPair {
       )
     };
     if self
-      .load_retired(pki_kind, &old_path, true)
+      .load_retired(&old_path, true)
       .with_context(unfinished)?
       .is_some()
     {
@@ -431,27 +562,24 @@ impl RotatableKeyPair {
   ///
   /// Only reads, without the rotation guard: it never makes a
   /// concurrent rotation fail as already in progress.
-  pub fn retired(
-    &self,
-    pki_kind: PkiKind,
-  ) -> anyhow::Result<Option<EncodedKeyPair>> {
+  pub fn retired(&self) -> anyhow::Result<Option<EncodedKeyPair>> {
     let Some(path) = self.path.as_deref() else {
       return Ok(None);
     };
     // Never settles: during a commit `.old` holds the live key
     // until the switch, so only a holder of the guard may remove
     // it.
-    self.load_retired(pki_kind, &sibling(path, OLD_SUFFIX), false)
+    self.load_retired(&sibling(path, OLD_SUFFIX), false)
   }
 
   /// Loads `<path>.old`, see [Self::retired]. `settle` removes one
   /// holding the live key: only under the rotation guard.
   fn load_retired(
     &self,
-    pki_kind: PkiKind,
     old_path: &Path,
     settle: bool,
   ) -> anyhow::Result<Option<EncodedKeyPair>> {
+    let pki_kind = self.pki_kind;
     if !old_path.try_exists()? {
       return Ok(None);
     }
@@ -497,7 +625,7 @@ impl RotatableKeyPair {
     self.path.as_deref().is_some_and(|path| {
       let next = sibling(path, NEXT_SUFFIX);
       (next.exists()
-        && !Pkcs8PrivateKey::from_file(&next)
+        && !Pkcs8PrivateKey::from_file(self.pki_kind, &next)
           .is_ok_and(|next| next == self.keys.load().private))
         || sibling(path, OLD_SUFFIX).exists()
     })
@@ -521,10 +649,9 @@ impl RotatableKeyPair {
     };
     let _rotating = RotationGuard::acquire(&self.rotating)?;
     let old_path = sibling(path, OLD_SUFFIX);
-    // Private keys compare without a [PkiKind], as in
-    // [Self::rotation_pending].
+    // The private keys compare, as in [Self::rotation_pending].
     let holds_key_in_use = |file: &Path| {
-      Pkcs8PrivateKey::from_file(file)
+      Pkcs8PrivateKey::from_file(self.pki_kind, file)
         .is_ok_and(|key| key == self.keys.load().private)
     };
     if holds_key_in_use(&old_path) && !holds_key_in_use(path) {

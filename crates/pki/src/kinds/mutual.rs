@@ -4,6 +4,8 @@ use zeroize::Zeroizing;
 use crate::{PkiKind, key::check_raw_public_key};
 
 /// Wrapper around [snow::HandshakeState] to streamline this implementation
+///
+/// A Noise XX handshake ([PkiKind::Mutual]) over X25519 keys.
 pub struct MutualNoiseHandshake(snow::HandshakeState);
 
 impl MutualNoiseHandshake {
@@ -15,6 +17,7 @@ impl MutualNoiseHandshake {
   ) -> anyhow::Result<MutualNoiseHandshake> {
     let private_key =
       Zeroizing::new(crate::key::Pkcs8PrivateKey::maybe_raw_bytes(
+        PkiKind::Mutual,
         maybe_pkcs8_private_key,
       )?);
     Ok(MutualNoiseHandshake(
@@ -37,6 +40,7 @@ impl MutualNoiseHandshake {
   ) -> anyhow::Result<MutualNoiseHandshake> {
     let private_key =
       Zeroizing::new(crate::key::Pkcs8PrivateKey::maybe_raw_bytes(
+        PkiKind::Mutual,
         maybe_pkcs8_private_key,
       )?);
     Ok(MutualNoiseHandshake(
@@ -75,7 +79,7 @@ impl MutualNoiseHandshake {
       .0
       .get_remote_static()
       .context("Failed to get remote public key")?;
-    check_raw_public_key(remote)?;
+    check_raw_public_key(PkiKind::Mutual, remote)?;
     Ok(remote)
   }
 }

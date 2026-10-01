@@ -142,6 +142,12 @@ fn compute_public_key(
     );
   }
   let trimmed = private_key.trim();
+  // The key of the path's bytes is not the key in the file.
+  if crate::looks_like_a_path(private_key) {
+    anyhow::bail!(
+      "The private key looks like a file path, which would be taken for the key itself: pass `file:/path/to/key` to read a key file"
+    );
+  }
   if !trimmed.is_empty()
     && private_key.len() <= 32
     && !trimmed.starts_with("-----BEGIN")
@@ -151,10 +157,7 @@ fn compute_public_key(
       "NOTE".yellow()
     );
   }
-  crate::SpkiPublicKey::from_private_key_using_dh(
-    pki_kind,
-    private_key,
-  )
+  crate::SpkiPublicKey::from_private_key(pki_kind, private_key)
 }
 
 /// A line read from stdin, without its line ending (as `echo` adds).

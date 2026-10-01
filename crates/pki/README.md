@@ -1,35 +1,73 @@
 # Mogh PKI
 
-Public key identification using [Noise](https://noiseprotocol.org)
-handshakes over X25519 keys.
+Public key identification: Ed25519 signatures, and
+[Noise](https://noiseprotocol.org) handshakes over X25519 keys.
 
 ```rust
 fn main() -> anyhow::Result<()> {
   let mogh_pki::EncodedKeyPair { private, public } =
-    mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::Mutual)?;
+    mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::Signature)?;
   // The private key is secret: it has no `Display` and its `Debug`
   // is redacted. Take its text explicitly with `as_str`.
   println!("Private: {} | Public: {public}", private.as_str());
+
+  // Whoever has the public key verifies what the private key signed.
+  let signature = mogh_pki::signature::sign(&private, b"message")?;
+  mogh_pki::signature::verify(&public, b"message", &signature)?;
   Ok(())
 }
 ```
+
+## Kinds
+
+- `PkiKind::Signature` (Ed25519): the client signs a message both
+  sides know (the request), and whoever has its public key verifies
+  the signature (`signature::sign`, `signature::verify`). The verifier
+  needs no key of its own, and nothing it holds lets it make a
+  signature for a client. A signature verifies wherever the public key
+  is known, and again whenever it is replayed: sign who the message is
+  for, and a timestamp or nonce the verifier enforces a window on.
+  Signing is deterministic, so only a nonce makes two signatures of
+  the same message differ. Each signature has one accepted form
+  (strict verification, a canonical `S`, canonical base64).
+- `PkiKind::Mutual` (Noise XX over X25519): three messages, after
+  which each side knows the other's public key.
+
+The kind decides the algorithm of the keys (`PkiKind::key_algorithm`),
+and a key of one kind is not a key of the other: it is refused with
+`WrongKeyAlgorithm`, which an error can be downcast to
+(`error.downcast_ref::<WrongKeyAlgorithm>()`) to tell such a key from
+a malformed one.
 
 ## Keys
 
 - A private key is stored as base64 pkcs8 der. It is parsed from pem
   (openssl), from base64 pkcs8 der (v1 or v2), or from raw key bytes:
-  input of 32 characters or fewer is used as the X25519 key itself,
-  with no key derivation, so a short value can be brute forced from
-  the public key. Prefer generated keys.
+  input of 32 characters or fewer is used as the key itself (the
+  X25519 key, or the Ed25519 seed), with no key derivation, so a short
+  value can be brute forced from the public key. Prefer generated
+  keys. Raw bytes name no algorithm, so the same input is a different
+  key for each kind.
 - `Pkcs8PrivateKey` has no `Display` and a redacted `Debug`, so it
   can't be formatted into a log or error by accident. Take the key
   text explicitly: `as_str`, `into_inner` or `as_pem`.
 - An empty private key (or an existing empty key file) is an error:
   it would be the same, publicly known key everywhere.
 - Public keys are stored as base64 spki der. Low order points and non
-  canonical encodings are refused.
+  canonical encodings are refused, so a key has one string. Its first
+  16 characters name the algorithm: `MCowBQYDK2VwAyEA` for Ed25519,
+  `MCowBQYDK2VuAyEA` for X25519.
+- Signature keys are plain RFC 8410 Ed25519 keys, as
+  `openssl genpkey -algorithm ed25519` generates them (and
+  `openssl pkey -pubout` derives the public key).
 - `RotatableKeyPair::from_private_key_spec` takes the key inline, or
   `file:/path/to/key` (generated there when the file does not exist).
+  What reads as a path without the prefix (`/path/to/key`,
+  `keys/core.key`, `File:/path`, see `looks_like_a_path`) is an
+  error: up to 32 bytes are a raw key, so it would be taken for the
+  key itself.
+  The pair keeps its kind, every key it rotates to is of the same
+  algorithm.
   A file backed pair can rotate: in one step (`rotate`), or in two
   phases for a key registered elsewhere (`begin_rotation`, register
   the candidate, `commit`, revoke `retired`, `finish_rotation`). One
@@ -42,13 +80,29 @@ fn main() -> anyhow::Result<()> {
   `begin_rotation` and `finish_rotation` then keep, until the live
   file holds that key again or a retried commit switches.
 
-## Handshakes
+## Since 3.0
 
-- `PkiKind::OneWay` (Noise IK): the client has the server public key
-  pinned and proves its own key in one message, which authenticates
-  (does not encrypt) a prologue both sides know. Only the server can
-  validate it, and whoever holds the server private key can forge one
-  for any client key. A message can be replayed: bind a timestamp or
-  nonce into the prologue and enforce a window.
-- `PkiKind::Mutual` (Noise XX): three messages, after which each side
-  knows the other's public key.
+`PkiKind::OneWay` (one message of a Noise IK handshake over X25519
+keys) is replaced by `PkiKind::Signature`. The one way message was
+validated with the server's private key, which could therefore also
+make one for any client key. A signature is verified with the client's
+public key alone.
+
+- Signature keys are Ed25519 keys: the X25519 keys used for
+  `PkiKind::OneWay` are refused (`WrongKeyAlgorithm`), generate new
+  ones. The keys of `PkiKind::Mutual` are unchanged.
+- `one_way::OneWayNoiseHandshake` is gone, use `signature::sign` and
+  `signature::verify`. Neither side needs the other's key to sign, so
+  what the one way message was bound to implicitly (the server it was
+  made for) has to be part of the signed message.
+- Whatever parses or derives a key takes the `PkiKind` it is used as:
+  `Pkcs8PrivateKey::{from_file, from_maybe_raw_bytes, from_raw_bytes,
+  maybe_raw_bytes, raw_bytes, as_raw_bytes}` and
+  `SpkiPublicKey::{from_spec, from_file, from_maybe_pem, from_der,
+  from_raw_bytes, maybe_pem_to_raw_bytes, der_to_raw_bytes}`.
+- `compute_public_key_using_dh` / `from_private_key_using_dh` are
+  `Pkcs8PrivateKey::compute_public_key` /
+  `SpkiPublicKey::from_private_key`.
+- `RotatableKeyPair` keeps its kind (`kind()`): `rotate`,
+  `begin_rotation` and `retired` take none.
+- `PkiKind::noise_params` is gone.

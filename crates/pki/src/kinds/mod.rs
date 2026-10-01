@@ -1,5 +1,5 @@
 pub mod mutual;
-pub mod one_way;
+pub mod signature;
 
 #[cfg(test)]
 mod tests;
