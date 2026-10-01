@@ -1016,9 +1016,9 @@ pub struct CreateSigningKey {
   #[serde(default)]
   pub cidr_whitelist: Vec<String>,
 
-  /// Optionally provide a pre-existing public key.
-  /// Otherwise, a private key will be generated and
-  /// returned in the response
+  /// Optionally provide a pre-existing public key: an Ed25519
+  /// key (spki, base64 or pem). Otherwise, a private key will be
+  /// generated and returned in the response
   #[serde(default)]
   pub public_key: String,
 }
@@ -1029,7 +1029,8 @@ pub struct CreateSigningKey {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CreateSigningKeyResponse {
   /// Used to sign requests for authentication
-  /// without transmitting the key itself.
+  /// without transmitting the key itself: an Ed25519
+  /// key (pkcs8, base64).
   ///
   /// The server will store the associated public key.
   ///

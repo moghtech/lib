@@ -507,9 +507,9 @@ export interface CreateSigningKey {
 	 */
 	cidr_whitelist?: string[];
 	/**
-	 * Optionally provide a pre-existing public key.
-	 * Otherwise, a private key will be generated and
-	 * returned in the response
+	 * Optionally provide a pre-existing public key: an Ed25519
+	 * key (spki, base64 or pem). Otherwise, a private key will be
+	 * generated and returned in the response
 	 */
 	public_key?: string;
 }
@@ -518,7 +518,8 @@ export interface CreateSigningKey {
 export interface CreateSigningKeyResponse {
 	/**
 	 * Used to sign requests for authentication
-	 * without transmitting the key itself.
+	 * without transmitting the key itself: an Ed25519
+	 * key (pkcs8, base64).
 	 * 
 	 * The server will store the associated public key.
 	 * 

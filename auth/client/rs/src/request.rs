@@ -10,11 +10,13 @@
 //!
 //! That only works for a jwt (`Authorization: Bearer <jwt>`) or an api
 //! key (`X-API-KEY` / `X-API-SECRET`). A request with a signing key
-//! is signed on its own, with `signature::signed_request_headers`
-//! (`pki` feature) over its exact path, query and body, so [manage]
-//! can't send it: send `POST {address}/manage` yourself, with the
-//! JSON body `{"type": "<request>", "params": <request>}` and the
-//! headers signed for it.
+//! is signed on its own, with
+//! `signature::signed_request_headers_for_url` (`pki` feature) over
+//! the host of the server and its exact path, query and body, so
+//! [manage] can't send it: send
+//! `POST {address}/manage` yourself, with the JSON body
+//! `{"type": "<request>", "params": <request>}` and the headers
+//! signed for it.
 
 use anyhow::{Context, anyhow};
 use mogh_error::deserialize_error;

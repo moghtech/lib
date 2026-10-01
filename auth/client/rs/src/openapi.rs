@@ -81,7 +81,13 @@ mod auth {
   modifiers(&AddSecurityHeaders),
   security(
     ("api-key" = [], "api-secret" = []),
-    ("api-signature" = [], "api-timestamp" = []),
+    (
+      "api-public-key" = [],
+      "api-host" = [],
+      "api-timestamp" = [],
+      "api-nonce" = [],
+      "api-signature" = []
+    ),
     ("jwt" = [])
   )
 )]
@@ -98,8 +104,11 @@ impl utoipa::Modify for AddSecurityHeaders {
       ("api-key", header_security_scheme("X-Api-Key")),
       ("api-secret", header_security_scheme("X-Api-Secret")),
       // Signing key, see [crate::signature].
-      ("api-signature", header_security_scheme("X-Api-Signature")),
+      ("api-public-key", header_security_scheme("X-Api-Public-Key")),
+      ("api-host", header_security_scheme("X-Api-Host")),
       ("api-timestamp", header_security_scheme("X-Api-Timestamp")),
+      ("api-nonce", header_security_scheme("X-Api-Nonce")),
+      ("api-signature", header_security_scheme("X-Api-Signature")),
       ("jwt", header_security_scheme("Authorization")),
     ]);
   }
@@ -177,8 +186,11 @@ mod tests {
       }
     }
     for (scheme, header) in [
-      ("api-signature", crate::signature::API_SIGNATURE_HEADER),
+      ("api-public-key", crate::signature::API_PUBLIC_KEY_HEADER),
+      ("api-host", crate::signature::API_HOST_HEADER),
       ("api-timestamp", crate::signature::API_TIMESTAMP_HEADER),
+      ("api-nonce", crate::signature::API_NONCE_HEADER),
+      ("api-signature", crate::signature::API_SIGNATURE_HEADER),
     ] {
       let name = schemes[scheme]["name"].as_str().unwrap();
       assert!(name.eq_ignore_ascii_case(header), "{name}");
