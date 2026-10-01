@@ -22,7 +22,7 @@ mogh_auth_server = "7.0.0"
 
 # MOGH
 mogh_cache = "1.2.0"
-mogh_config = "3.0.0"
+mogh_config = "3.0.2"
 mogh_encryption = "2.1.0"
 mogh_error = "1.1.0"
 mogh_logger = "1.5.0"
@@ -36,7 +36,7 @@ mogh_server = "2.2.0"
 mogh_validations = "1.0.3"
 
 # CICADA
-cicada_loader = "0.20.0"
+cicada_loader = "0.21.0"
 
 # ASYNC
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "form", "rustls"] }

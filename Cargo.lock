@@ -650,25 +650,27 @@ dependencies = [
 
 [[package]]
 name = "cicada_client"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1bb783ac7a8e77edae781bc50b7e8242a9c2be35f4d734c0fa9605f58eaa3d4"
+checksum = "3110b7d40cecac064206e4fcada9b22d14bfaf5fb8e0ed375dda03332d446af8"
 dependencies = [
  "async_timing_util",
  "chrono",
  "futures-util",
  "http",
- "mogh_auth_client 6.0.1",
+ "mogh_auth_client",
  "mogh_error",
- "mogh_pki 2.0.2",
+ "mogh_pki",
  "mogh_resolver",
  "rand 0.10.3",
  "reqwest 0.13.5",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "strum",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "tracing",
  "typeshare",
@@ -676,9 +678,9 @@ dependencies = [
 
 [[package]]
 name = "cicada_loader"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c77d1c3dfe8924f0603df67953a6544d5f8b35fb3ad9f341792ccc04744a6c7"
+checksum = "4df5af5c0a0f9ff9861cbe3620bc9aec745552bdd4ff2ed5aefbe19c6d79ac59"
 dependencies = [
  "anyhow",
  "cicada_client",
@@ -1295,7 +1297,7 @@ name = "example_client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "mogh_auth_client 7.0.0",
+ "mogh_auth_client",
  "mogh_error",
  "mogh_resolver",
  "reqwest 0.13.5",
@@ -1330,14 +1332,14 @@ dependencies = [
  "envy",
  "example_client",
  "example_mock_idp",
- "mogh_auth_client 7.0.0",
+ "mogh_auth_client",
  "mogh_auth_server",
  "mogh_cache",
  "mogh_config",
  "mogh_encryption",
  "mogh_error",
  "mogh_logger",
- "mogh_pki 3.0.0",
+ "mogh_pki",
  "mogh_rate_limit",
  "mogh_request_ip",
  "mogh_resolver",
@@ -2413,30 +2415,11 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_client"
-version = "6.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91b664b41ddcaf8664c0adbc89add1bcfd4451d80afa894b2606185815a2560f"
-dependencies = [
- "anyhow",
- "mogh_error",
- "mogh_resolver",
- "reqwest 0.13.5",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "strum",
- "typeshare",
- "webauthn-rs",
- "zeroize",
-]
-
-[[package]]
-name = "mogh_auth_client"
 version = "7.0.0"
 dependencies = [
  "anyhow",
  "mogh_error",
- "mogh_pki 3.0.0",
+ "mogh_pki",
  "mogh_resolver",
  "rand 0.10.3",
  "reqwest 0.13.5",
@@ -2461,9 +2444,9 @@ dependencies = [
  "data-encoding",
  "http-body-util",
  "jsonwebtoken",
- "mogh_auth_client 7.0.0",
+ "mogh_auth_client",
  "mogh_error",
- "mogh_pki 3.0.0",
+ "mogh_pki",
  "mogh_rate_limit",
  "mogh_request_ip",
  "mogh_resolver",
@@ -2497,7 +2480,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_config"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "cicada_loader",
  "colored",
@@ -2552,26 +2535,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "mogh_pki"
-version = "2.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a233f40bb4ab34c9aa23053de57c8c22b40003fdcb93b859adb188a86824946"
-dependencies = [
- "anyhow",
- "arc-swap",
- "data-encoding",
- "der",
- "mogh_secret_file",
- "pem-rfc7468 1.0.0",
- "pkcs8",
- "snow",
- "spki",
- "subtle",
- "tracing",
- "zeroize",
 ]
 
 [[package]]
