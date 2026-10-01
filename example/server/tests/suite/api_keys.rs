@@ -2,10 +2,10 @@
 //! private key).
 
 use example_client::{
-  ClientAuth, ExampleClient,
+  ClientAuth, ExampleClient, SignedRequest,
   api::{
     execute::GenerateKeyPair,
-    read::{GetCoreInfo, GetRequestInfo, ListApiKeys},
+    read::{GetRequestInfo, ListApiKeys},
   },
   auth::{
     api::manage::{
@@ -14,6 +14,9 @@ use example_client::{
     },
     config::{
       TrustedIssuer, TrustedIssuerKeys, WorkloadClaim, WorkloadRule,
+    },
+    signature::{
+      SIGNED_AT_ANOTHER_TIME, SIGNED_FOR_ANOTHER_HOST, random_nonce,
     },
   },
   entities::{ApiKeyKind, AuthMethod},
@@ -55,15 +58,14 @@ fn api_key_client(
   })
 }
 
-async fn signing_key_client(
+/// Signs its requests with `private_key`, for the host of the
+/// address it sends them to.
+fn signing_key_client(
   client: &ExampleClient,
   private_key: &str,
 ) -> ExampleClient {
-  let server_public_key =
-    client.read(GetCoreInfo {}).await.unwrap().public_key;
   client.with_auth(ClientAuth::PrivateKey {
     private_key: private_key.into(),
-    server_public_key,
   })
 }
 
@@ -191,7 +193,7 @@ async fn expired_keys_stop_working_and_can_be_deleted() {
     .private_key
     .unwrap();
   let api_key = api_key_client(&admin, &key, &secret);
-  let signing_key = signing_key_client(&admin, &private_key).await;
+  let signing_key = signing_key_client(&admin, &private_key);
   api_key.read(GetRequestInfo {}).await.unwrap();
   signing_key.read(GetRequestInfo {}).await.unwrap();
 
@@ -277,7 +279,7 @@ async fn signing_key_signs_requests() {
     .unwrap()
     .private_key
     .expect("No private key for a generated pair");
-  let api = signing_key_client(&admin, &private_key).await;
+  let api = signing_key_client(&admin, &private_key);
   let info = api.read(GetRequestInfo {}).await.unwrap();
   assert_eq!(info.auth_method, AuthMethod::PublicKey);
   // Works for the auth management api too.
@@ -289,10 +291,30 @@ async fn signing_key_signs_requests() {
   // A key pair the server doesn't know
   let unknown = admin.execute(GenerateKeyPair {}).await.unwrap();
   let res = signing_key_client(&admin, &unknown.private_key)
-    .await
     .read(GetRequestInfo {})
     .await;
   assert_eq!(status_of(res), StatusCode::UNAUTHORIZED);
+
+  // A request which carries other credentials is not signed: the
+  // server would take those over the signature, and count what it
+  // makes of them against the client. An address with a
+  // `user:password@` is such a request (reqwest sends that as
+  // Authorization), and so is one with an api key in its headers.
+  let mut with_credentials = signing_key_client(&admin, &private_key);
+  with_credentials.address =
+    app.address.replacen("://", "://user:hunter2@", 1);
+  let mut with_api_key = signing_key_client(&admin, &private_key);
+  with_api_key
+    .headers
+    .insert("x-api-key", "K_some_key_K".parse().unwrap());
+  for client in [with_credentials, with_api_key] {
+    let err = client.read(GetRequestInfo {}).await.unwrap_err();
+    let err = format!("{err:#}");
+    assert!(err.contains("carries other credentials"), "{err}");
+    assert!(!err.contains("hunter2"), "{err}");
+  }
+  // The key still works: nothing was sent for the server to count.
+  api.read(GetRequestInfo {}).await.unwrap();
 }
 
 #[tokio::test]
@@ -322,20 +344,27 @@ async fn signing_key_accepts_own_public_key_in_any_encoding() {
     // The client keeps its own private key.
     assert!(res.private_key.is_none());
     signing_key_client(&admin, &pair.private_key)
-      .await
       .read(GetRequestInfo {})
       .await
       .unwrap_or_else(|e| panic!("{name} public key: {e:#}"));
   }
 
-  // What isn't a public key is refused rather than stored. So is a
-  // low order point (the all zero key): a request "signed" as it
-  // needs no private key at all.
+  // What isn't an Ed25519 public key is refused rather than stored.
+  // So is a low order point (the identity): a request "signed" as
+  // it needs no private key at all. And so is an X25519 key, as
+  // signing keys were before signatures were Ed25519: nothing
+  // verifies with it.
+  let x25519 =
+    mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::Mutual)
+      .unwrap()
+      .public
+      .into_inner();
   for public_key in [
     "not a key",
     "AAAA",
     "-----BEGIN PUBLIC KEY-----",
-    "MCowBQYDK2VuAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "MCowBQYDK2VwAyEAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    x25519.as_str(),
   ] {
     let res = admin
       .manage(CreateSigningKey {
@@ -394,7 +423,6 @@ async fn signing_keys_cannot_be_registered_twice() {
   // Requests signed with it are still the owner's, who alone can
   // delete it.
   let info = signing_key_client(&admin, &pair.private_key)
-    .await
     .read(GetRequestInfo {})
     .await
     .unwrap();
@@ -413,13 +441,100 @@ async fn signing_keys_cannot_be_registered_twice() {
     .unwrap();
 }
 
-#[tokio::test]
-async fn signature_is_bound_to_the_request_and_time() {
-  let app = TestApp::spawn().await;
-  let admin = app.sign_up("admin").await;
-  let private_key = admin
+/// The headers of a signed request, as sent.
+type SignedHeaders = [(&'static str, String); 5];
+
+/// The headers of `method path` with `body`, signed with
+/// `private_key` for the server at `host`, at `timestamp`.
+fn signed_headers(
+  private_key: &str,
+  host: &str,
+  method: &str,
+  path: &str,
+  timestamp: i64,
+  body: &[u8],
+) -> SignedHeaders {
+  let nonce = random_nonce().unwrap();
+  let signature = sign_request(
+    private_key,
+    &SignedRequest {
+      host,
+      method,
+      path_and_query: path,
+      timestamp,
+      nonce: &nonce,
+      body,
+    },
+  )
+  .unwrap();
+  let public_key = mogh_pki::EncodedKeyPair::from_private_key(
+    mogh_pki::PkiKind::Signature,
+    private_key,
+  )
+  .unwrap()
+  .public
+  .into_inner();
+  [
+    ("x-api-public-key", public_key),
+    ("x-api-host", host.to_string()),
+    ("x-api-timestamp", timestamp.to_string()),
+    ("x-api-nonce", nonce),
+    ("x-api-signature", signature),
+  ]
+}
+
+/// `headers` with the value of `header` replaced.
+fn with_header(
+  mut headers: SignedHeaders,
+  header: &str,
+  value: impl Into<String>,
+) -> SignedHeaders {
+  let (_, replaced) = headers
+    .iter_mut()
+    .find(|(name, _)| *name == header)
+    .unwrap();
+  *replaced = value.into();
+  headers
+}
+
+/// Sends `POST path` with `body` and `headers` to the app, returning
+/// the status.
+async fn send_signed(
+  app: &TestApp,
+  path: &str,
+  body: Vec<u8>,
+  headers: impl IntoIterator<Item = (&'static str, String)>,
+) -> StatusCode {
+  send_signed_answer(app, path, body, headers).await.0
+}
+
+/// [send_signed], returning the body of the answer as well.
+async fn send_signed_answer(
+  app: &TestApp,
+  path: &str,
+  body: Vec<u8>,
+  headers: impl IntoIterator<Item = (&'static str, String)>,
+) -> (StatusCode, String) {
+  let mut request = app
+    .client()
+    .reqwest
+    .post(format!("{}{path}", app.address))
+    .header("content-type", "application/json")
+    .body(body);
+  for (header, value) in headers {
+    request = request.header(header, value);
+  }
+  let res = request.send().await.unwrap();
+  (res.status(), res.text().await.unwrap())
+}
+
+async fn generated_signing_key(
+  client: &ExampleClient,
+  name: &str,
+) -> String {
+  client
     .manage(CreateSigningKey {
-      name: "generated".into(),
+      name: name.into(),
       expires: 0,
       cidr_whitelist: Vec::new(),
       public_key: String::new(),
@@ -427,67 +542,301 @@ async fn signature_is_bound_to_the_request_and_time() {
     .await
     .unwrap()
     .private_key
-    .unwrap();
-  let server_public_key =
-    admin.read(GetCoreInfo {}).await.unwrap().public_key;
+    .unwrap()
+}
 
-  let send = |path: &'static str,
-              body: Vec<u8>,
-              signature: String,
-              timestamp: i64| {
-    let reqwest = admin.reqwest.clone();
-    let url = format!("{}{path}", app.address);
-    async move {
-      reqwest
-        .post(url)
-        .header("x-api-signature", signature)
-        .header("x-api-timestamp", timestamp)
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .unwrap()
-        .status()
-    }
+#[tokio::test]
+async fn signature_is_bound_to_the_request_and_time() {
+  let app = TestApp::spawn().await;
+  let admin = app.sign_up("admin").await;
+  let private_key = generated_signing_key(&admin, "generated").await;
+  let host = app.host();
+
+  let now = || unix_timestamp_ms() as i64;
+  let sign = |method: &str,
+              path: &str,
+              timestamp: i64,
+              body: &[u8]| {
+    signed_headers(&private_key, &host, method, path, timestamp, body)
   };
-  let now = unix_timestamp_ms() as i64;
-  let sign =
-    |method: &str, path: &str, timestamp: i64, body: &[u8]| {
-      sign_request(
-        &private_key,
-        &server_public_key,
-        method,
-        path,
-        timestamp,
-        body,
-      )
-      .unwrap()
-    };
 
   let path = "/read/GetRequestInfo";
   let body = b"{}".to_vec();
   assert_eq!(
-    send(path, body.clone(), sign("POST", path, now, &body), now)
-      .await,
+    send_signed(
+      &app,
+      path,
+      body.clone(),
+      sign("POST", path, now(), &body)
+    )
+    .await,
     StatusCode::OK
   );
-  // Signed for another path, method, body or time
-  for (signature, timestamp) in [
-    (sign("POST", "/read/GetUser", now, &body), now),
-    (sign("GET", path, now, &body), now),
-    (sign("POST", path, now, b""), now),
-    (sign("POST", path, now, b"{ }"), now),
-    (sign("POST", path, now, &body), now + 1),
-    // A captured request can't be replayed later on.
-    (sign("POST", path, now - 60_000, &body), now - 60_000),
-    (sign("POST", path, now + 60_000, &body), now + 60_000),
-    ("not-a-signature".to_string(), now),
-  ] {
-    let status = send(path, body.clone(), signature, timestamp).await;
+  // The key of somebody else, who the request then isn't signed by.
+  let other = admin.execute(GenerateKeyPair {}).await.unwrap();
+  // Signed for another path, method, body, time or nonce, or by
+  // another key: the signature is no signature of the request. Each
+  // is signed right before it is sent, so none is refused for its
+  // age instead.
+  type Case<'a> = Box<dyn Fn(i64) -> SignedHeaders + 'a>;
+  let cases: Vec<Case> = vec![
+    Box::new(|now| sign("POST", "/read/GetUser", now, &body)),
+    Box::new(|now| sign("GET", path, now, &body)),
+    Box::new(|now| sign("post", path, now, &body)),
+    Box::new(|now| sign("POST", path, now, b"")),
+    Box::new(|now| sign("POST", path, now, b"{ }")),
+    Box::new(|now| {
+      with_header(
+        sign("POST", path, now, &body),
+        "x-api-timestamp",
+        (now + 1).to_string(),
+      )
+    }),
+    Box::new(|now| {
+      with_header(
+        sign("POST", path, now, &body),
+        "x-api-nonce",
+        "0123456789abcdef0123456789abcdef",
+      )
+    }),
+    Box::new(|now| {
+      with_header(
+        sign("POST", path, now, &body),
+        "x-api-public-key",
+        other.public_key.clone(),
+      )
+    }),
+  ];
+  for (i, headers) in cases.iter().enumerate() {
+    let (status, answer) =
+      send_signed_answer(&app, path, body.clone(), headers(now()))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "case {i}");
     assert!(
-      status == StatusCode::UNAUTHORIZED
-        || status == StatusCode::BAD_REQUEST,
-      "{status}"
+      answer.contains("Invalid client credentials"),
+      "case {i}: {answer}"
+    );
+  }
+  // A captured request can't be replayed later on, and the answer
+  // says it is the time (not the key) which is refused.
+  for timestamp in [now() - 60_000, now() + 60_000] {
+    let (status, answer) = send_signed_answer(
+      &app,
+      path,
+      body.clone(),
+      sign("POST", path, timestamp, &body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(answer.contains(SIGNED_AT_ANOTHER_TIME), "{answer}");
+  }
+  // Headers which are no signature, nonce, key or timestamp, or not
+  // in the one form each has.
+  for (header, value, says) in [
+    ("x-api-signature", "not-a-signature", "X-API-SIGNATURE"),
+    ("x-api-nonce", "short", "X-API-NONCE"),
+    ("x-api-public-key", "not-a-key", "X-API-PUBLIC-KEY"),
+    ("x-api-timestamp", "soon", "X-API-TIMESTAMP"),
+  ] {
+    let headers =
+      with_header(sign("POST", path, now(), &body), header, value);
+    let (status, answer) =
+      send_signed_answer(&app, path, body.clone(), headers).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{header}");
+    assert!(answer.contains(says), "{header}: {answer}");
+  }
+  let timestamp = now();
+  let (status, answer) = send_signed_answer(
+    &app,
+    path,
+    body.clone(),
+    with_header(
+      sign("POST", path, timestamp, &body),
+      "x-api-timestamp",
+      format!("+{timestamp}"),
+    ),
+  )
+  .await;
+  assert_eq!(status, StatusCode::UNAUTHORIZED);
+  assert!(answer.contains("X-API-TIMESTAMP"), "{answer}");
+  // A client from before signatures were Ed25519 sends the signature
+  // and timestamp only: refused, not a server error.
+  let old_client = sign("POST", path, now(), &body)
+    .into_iter()
+    .filter(|(header, _)| {
+      ["x-api-signature", "x-api-timestamp"].contains(header)
+    });
+  assert_eq!(
+    send_signed(&app, path, body.clone(), old_client).await,
+    StatusCode::UNAUTHORIZED
+  );
+}
+
+/// A signature is made for one server. The same public key can be
+/// registered at another one, where a request captured at the first
+/// (eg. by that server itself) must not be accepted.
+#[tokio::test]
+async fn signature_is_bound_to_the_server() {
+  let app = TestApp::spawn().await;
+  let other_app = TestApp::spawn().await;
+  let admin = app.sign_up("admin").await;
+  let other_admin = other_app.sign_up("admin").await;
+
+  // One key pair, registered at both.
+  let pair = admin.execute(GenerateKeyPair {}).await.unwrap();
+  for client in [&admin, &other_admin] {
+    client
+      .manage(CreateSigningKey {
+        name: "shared".into(),
+        expires: 0,
+        cidr_whitelist: Vec::new(),
+        public_key: pair.public_key.clone(),
+      })
+      .await
+      .unwrap();
+  }
+  // The client signs for the server it sends the request to.
+  for client in [&admin, &other_admin] {
+    signing_key_client(client, &pair.private_key)
+      .read(GetRequestInfo {})
+      .await
+      .unwrap();
+  }
+
+  let path = "/read/GetRequestInfo";
+  let body = b"{}".to_vec();
+  let sign_for = |app: &TestApp| {
+    signed_headers(
+      &pair.private_key,
+      &app.host(),
+      "POST",
+      path,
+      unix_timestamp_ms() as i64,
+      &body,
+    )
+  };
+  // What one server received is passed on to the other within the
+  // timestamp tolerance, with everything the request said: also its
+  // Host header. The other server says who the request is for.
+  for (signed_for, sent_to) in
+    [(&app, &other_app), (&other_app, &app)]
+  {
+    let headers = sign_for(signed_for);
+    assert_eq!(
+      send_signed(signed_for, path, body.clone(), headers.clone())
+        .await,
+      StatusCode::OK
+    );
+    let (status, answer) = send_signed_answer(
+      sent_to,
+      path,
+      body.clone(),
+      headers.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+      answer.contains(SIGNED_FOR_ANOTHER_HOST)
+        && answer.contains(&signed_for.host()),
+      "{answer}"
+    );
+    let with_host = headers
+      .clone()
+      .into_iter()
+      .chain([("host", signed_for.host())]);
+    assert_eq!(
+      send_signed(sent_to, path, body.clone(), with_host).await,
+      StatusCode::UNAUTHORIZED
+    );
+    // Saying it is for the other server doesn't make it so: the
+    // signature is for the first.
+    let relabeled =
+      with_header(headers, "x-api-host", sent_to.host());
+    let (status, answer) =
+      send_signed_answer(sent_to, path, body.clone(), relabeled)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+      answer.contains("Invalid client credentials"),
+      "{answer}"
+    );
+  }
+  // A host which is nobody's.
+  let headers = signed_headers(
+    &pair.private_key,
+    "example.com",
+    "POST",
+    path,
+    unix_timestamp_ms() as i64,
+    &body,
+  );
+  assert_eq!(
+    send_signed(&app, path, body.clone(), headers).await,
+    StatusCode::UNAUTHORIZED
+  );
+}
+
+/// The app is also reached at other addresses than its `host`, eg.
+/// inside the network: requests signed for those are accepted once
+/// they are in `extra_hosts`. What the request says its host is (a
+/// proxy may rewrite it) doesn't matter.
+#[tokio::test]
+async fn signature_is_accepted_for_extra_hosts() {
+  let app = TestApp::spawn_with(TestAppOptions {
+    config: json!({
+      "extra_hosts": [
+        "https://Example.com",
+        "http://example.internal:9220/",
+      ],
+    }),
+    ..Default::default()
+  })
+  .await;
+  let admin = app.sign_up("admin").await;
+  let private_key = generated_signing_key(&admin, "generated").await;
+
+  let path = "/read/GetRequestInfo";
+  let body = b"{}".to_vec();
+  let sign_for = |host: &str| {
+    signed_headers(
+      &private_key,
+      host,
+      "POST",
+      path,
+      unix_timestamp_ms() as i64,
+      &body,
+    )
+  };
+  for host in
+    [app.host().as_str(), "example.com", "example.internal:9220"]
+  {
+    assert_eq!(
+      send_signed(&app, path, body.clone(), sign_for(host)).await,
+      StatusCode::OK,
+      "{host}"
+    );
+    // Whatever the Host header says.
+    let with_host = sign_for(host)
+      .into_iter()
+      .chain([("host", String::from("proxied.internal"))]);
+    assert_eq!(
+      send_signed(&app, path, body.clone(), with_host).await,
+      StatusCode::OK,
+      "{host}"
+    );
+  }
+  // The hosts as configured, not anything like them.
+  for host in [
+    "example.com:8443",
+    "example.internal",
+    "example.internal:9221",
+    "sub.example.com",
+    "proxied.internal",
+  ] {
+    assert_eq!(
+      send_signed(&app, path, body.clone(), sign_for(host)).await,
+      StatusCode::UNAUTHORIZED,
+      "{host}"
     );
   }
 }
@@ -500,19 +849,8 @@ async fn signature_is_bound_to_the_request_and_time() {
 async fn signed_request_body_is_limited() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
-  let private_key = admin
-    .manage(CreateSigningKey {
-      name: "generated".into(),
-      expires: 0,
-      cidr_whitelist: Vec::new(),
-      public_key: String::new(),
-    })
-    .await
-    .unwrap()
-    .private_key
-    .unwrap();
-  let server_public_key =
-    admin.read(GetCoreInfo {}).await.unwrap().public_key;
+  let private_key = generated_signing_key(&admin, "generated").await;
+  let host = app.host();
 
   let path = "/read/GetRequestInfo";
   // Valid JSON of the given length: `{}` and whitespace.
@@ -523,27 +861,23 @@ async fn signed_request_body_is_limited() {
   };
   let send = |body: Vec<u8>, valid: bool| {
     let timestamp = unix_timestamp_ms() as i64;
-    let signature = if valid {
-      sign_request(
-        &private_key,
-        &server_public_key,
-        "POST",
-        path,
-        timestamp,
-        &body,
-      )
-      .unwrap()
-    } else {
-      String::from("AAAA")
-    };
-    let request = admin
-      .reqwest
-      .post(format!("{}{path}", app.address))
-      .header("x-api-signature", signature)
-      .header("x-api-timestamp", timestamp)
-      .header("content-type", "application/json")
-      .body(body);
-    async move { request.send().await.unwrap().status() }
+    let mut headers = signed_headers(
+      &private_key,
+      &host,
+      "POST",
+      path,
+      timestamp,
+      &body,
+    );
+    if !valid {
+      // In form, of no request.
+      headers = with_header(
+        headers,
+        "x-api-signature",
+        format!("{}==", "A".repeat(86)),
+      );
+    }
+    send_signed(&app, path, body, headers)
   };
 
   const MB: usize = 1024 * 1024;
@@ -562,19 +896,8 @@ async fn signed_request_body_is_limited() {
 async fn signature_headers_cannot_carry_another_body() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
-  let private_key = admin
-    .manage(CreateSigningKey {
-      name: "terraform".into(),
-      expires: 0,
-      cidr_whitelist: Vec::new(),
-      public_key: String::new(),
-    })
-    .await
-    .unwrap()
-    .private_key
-    .unwrap();
-  let server_public_key =
-    admin.read(GetCoreInfo {}).await.unwrap().public_key;
+  let private_key = generated_signing_key(&admin, "terraform").await;
+  let host = app.host();
 
   // The admin key runs a harmless request on the route which takes
   // every request type in the body.
@@ -584,27 +907,18 @@ async fn signature_headers_cannot_carry_another_body() {
     "params": {},
   }))
   .unwrap();
-  let timestamp = unix_timestamp_ms() as i64;
-  let signature = sign_request(
+  let headers = signed_headers(
     &private_key,
-    &server_public_key,
+    &host,
     "POST",
     path,
-    timestamp,
+    unix_timestamp_ms() as i64,
     &listed,
-  )
-  .unwrap();
-  let send = |body: Vec<u8>| {
-    admin
-      .reqwest
-      .post(format!("{}{path}", app.address))
-      .header("x-api-signature", signature.clone())
-      .header("x-api-timestamp", timestamp)
-      .header("content-type", "application/json")
-      .body(body)
-      .send()
-  };
-  assert_eq!(send(listed).await.unwrap().status(), StatusCode::OK);
+  );
+  assert_eq!(
+    send_signed(&app, path, listed, headers.clone()).await,
+    StatusCode::OK
+  );
 
   // Whoever sees its headers can't send another request with them
   // while the timestamp is valid, eg. one creating a trusted issuer
@@ -637,7 +951,7 @@ async fn signature_headers_cannot_carry_another_body() {
   }))
   .unwrap();
   assert_eq!(
-    send(created.clone()).await.unwrap().status(),
+    send_signed(&app, path, created.clone(), headers).await,
     StatusCode::UNAUTHORIZED
   );
   assert!(
@@ -649,30 +963,18 @@ async fn signature_headers_cannot_carry_another_body() {
   );
 
   // Signed by the key itself it is accepted.
-  let timestamp = unix_timestamp_ms() as i64;
-  let status = admin
-    .reqwest
-    .post(format!("{}{path}", app.address))
-    .header(
-      "x-api-signature",
-      sign_request(
-        &private_key,
-        &server_public_key,
-        "POST",
-        path,
-        timestamp,
-        &created,
-      )
-      .unwrap(),
-    )
-    .header("x-api-timestamp", timestamp)
-    .header("content-type", "application/json")
-    .body(created)
-    .send()
-    .await
-    .unwrap()
-    .status();
-  assert_eq!(status, StatusCode::OK);
+  let headers = signed_headers(
+    &private_key,
+    &host,
+    "POST",
+    path,
+    unix_timestamp_ms() as i64,
+    &created,
+  );
+  assert_eq!(
+    send_signed(&app, path, created, headers).await,
+    StatusCode::OK
+  );
   assert_eq!(
     admin.manage(ListTrustedIssuers {}).await.unwrap().len(),
     1
@@ -683,21 +985,12 @@ async fn signature_headers_cannot_carry_another_body() {
 async fn signature_works_over_http2() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
-  let private_key = admin
-    .manage(CreateSigningKey {
-      name: "h2".into(),
-      expires: 0,
-      cidr_whitelist: Vec::new(),
-      public_key: String::new(),
-    })
-    .await
-    .unwrap()
-    .private_key
-    .unwrap();
-  let api = signing_key_client(&admin, &private_key).await;
+  let private_key = generated_signing_key(&admin, "h2").await;
+  let api = signing_key_client(&admin, &private_key);
 
   // The server sees the scheme and authority in the uri of an HTTP/2
-  // request, the client signs the path and query.
+  // request, the client signs the path and query, and the host on
+  // its own.
   let mut h2 = api.clone();
   h2.reqwest = reqwest::Client::builder()
     .http2_prior_knowledge()

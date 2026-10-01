@@ -9,7 +9,7 @@ use mogh_server::{
 
 use crate::{
   auth::{ExampleAuthImpl, RequestUser},
-  config::{core_config, core_keys},
+  config::core_config,
 };
 
 mod execute;
@@ -25,10 +25,6 @@ pub fn app() -> Router {
   let config = core_config();
   let mut app = Router::new()
     .route("/version", get(|| async { env!("CARGO_PKG_VERSION") }))
-    .route(
-      "/public_key",
-      get(|| async { core_keys().load().public().to_string() }),
-    )
     .nest("/auth", mogh_auth_server::api::router::<ExampleAuthImpl>())
     .nest("/user", user_router())
     .nest("/read", read::router())

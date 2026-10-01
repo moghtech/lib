@@ -52,7 +52,6 @@ export default defineConfig({
         EXAMPLE_PORT: String(APP_PORT),
         EXAMPLE_BIND_IP: "127.0.0.1",
         EXAMPLE_DATABASE_PATH: path.join(DATA, "example.db"),
-        EXAMPLE_PRIVATE_KEY: `file:${path.join(DATA, "server.key")}`,
         EXAMPLE_JWT_SECRET: "e2e-jwt-secret",
         EXAMPLE_UI_PATH: path.resolve(import.meta.dirname, "dist"),
         EXAMPLE_BCRYPT_COST: "4",

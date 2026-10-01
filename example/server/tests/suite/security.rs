@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use example_client::{
   ClientAuth,
-  api::{read::GetRequestInfo, write::UpdateCidrWhitelist},
+  api::{
+    execute::GenerateKeyPair, read::GetRequestInfo,
+    write::UpdateCidrWhitelist,
+  },
   auth::api::login::{JwtOrTwoFactor, LoginLocalUser},
 };
 use reqwest::StatusCode;
@@ -150,20 +153,58 @@ async fn invalid_request_signatures_are_rate_limited() {
   })
   .await;
   let admin = app.sign_up("admin").await;
-  let send = |signature: &'static str| {
-    let request = admin
+  let public_key =
+    admin.execute(GenerateKeyPair {}).await.unwrap().public_key;
+  // A signed request whose signature (64 bytes, as one is) is not
+  // the signature of the request, with or without the headers it is
+  // verified with.
+  let host = app.host();
+  let send = |complete: bool| {
+    let mut request = admin
       .reqwest
       .post(format!("{}/read/GetRequestInfo", app.address))
-      .header("x-api-signature", signature)
+      .header("x-api-signature", format!("{}==", "A".repeat(86)))
       .header("x-api-timestamp", unix_timestamp_ms().to_string())
       .json(&json!({}));
+    if complete {
+      request = request
+        .header("x-api-public-key", &public_key)
+        .header("x-api-host", &host)
+        .header("x-api-nonce", "0123456789abcdef0123456789abcdef");
+    }
     async move { request.send().await.unwrap().status() }
   };
-  // Each costs the server a key exchange to refuse.
-  for _ in 0..3 {
-    assert_eq!(send("AAAA").await, StatusCode::UNAUTHORIZED);
+  // What can't verify whatever the body is (here: a client from
+  // before 7.0, which sends no public key or nonce) is refused
+  // before the body is read, and costs the server nothing: it isn't
+  // counted.
+  for _ in 0..10 {
+    assert_eq!(send(false).await, StatusCode::UNAUTHORIZED);
   }
-  assert_eq!(send("AAAA").await, StatusCode::TOO_MANY_REQUESTS);
+  // So is a request signed for another server, whatever its
+  // signature: it never gets as far.
+  for _ in 0..10 {
+    let status = admin
+      .reqwest
+      .post(format!("{}/read/GetRequestInfo", app.address))
+      .header("x-api-signature", format!("{}==", "A".repeat(86)))
+      .header("x-api-timestamp", unix_timestamp_ms().to_string())
+      .header("x-api-public-key", &public_key)
+      .header("x-api-host", "other.example.com")
+      .header("x-api-nonce", "0123456789abcdef0123456789abcdef")
+      .json(&json!({}))
+      .send()
+      .await
+      .unwrap()
+      .status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+  }
+  // Each of these costs the server reading the body and verifying a
+  // signature to refuse.
+  for _ in 0..3 {
+    assert_eq!(send(true).await, StatusCode::UNAUTHORIZED);
+  }
+  assert_eq!(send(true).await, StatusCode::TOO_MANY_REQUESTS);
 
   // Requests without any credentials don't count: a UI which isn't
   // logged in yet sends those, and must not lock its own login out.
@@ -522,8 +563,6 @@ async fn session_cookie_is_http_only_and_same_site() {
   // Anything using the session sets the cookie.
   let res = admin
     .authenticate(
-      &reqwest::Method::POST,
-      "/auth/manage/BeginTotpEnrollment",
       reqwest::Client::new()
         .post(format!(
           "{}/auth/manage/BeginTotpEnrollment",

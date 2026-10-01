@@ -31,12 +31,11 @@ use mogh_auth_server::{
   user::{AuthUserImpl, BoxAuthUser},
 };
 use mogh_error::{AddStatusCode as _, AddStatusCodeError as _};
-use mogh_pki::RotatableKeyPair;
 use mogh_rate_limit::RateLimiter;
 use tracing::{info, warn};
 
 use crate::{
-  config::{core_config, core_keys},
+  config::core_config,
   db::{self, DbUser, NewUser, UserUpdate},
   state::{self, login_providers_cache, trusted_issuers_cache},
 };
@@ -129,6 +128,10 @@ impl AuthImpl for ExampleAuthImpl {
 
   fn host(&self) -> &str {
     &core_config().host
+  }
+
+  fn extra_hosts(&self) -> &[String] {
+    &core_config().extra_hosts
   }
 
   fn post_link_redirect(&self) -> &str {
@@ -752,8 +755,8 @@ impl AuthImpl for ExampleAuthImpl {
   // = SIGNING KEYS =
   // ================
 
-  fn server_private_key(&self) -> Option<&RotatableKeyPair> {
-    Some(core_keys())
+  fn signing_keys_enabled(&self) -> bool {
+    true
   }
 
   fn create_signing_key(

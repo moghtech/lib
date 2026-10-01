@@ -6,7 +6,6 @@ use mogh_auth_client::config::{
 };
 use mogh_config::ConfigLoader;
 use mogh_logger::{LogLevel, StdioLogMode};
-use mogh_pki::RotatableKeyPair;
 use mogh_secret_file::maybe_read_item_from_file;
 use serde::Deserialize;
 
@@ -22,6 +21,7 @@ pub struct Env {
 
   pub example_title: Option<String>,
   pub example_host: Option<String>,
+  pub example_extra_hosts: Option<Vec<String>>,
   pub example_port: Option<u16>,
   pub example_bind_ip: Option<String>,
   pub example_database_path: Option<PathBuf>,
@@ -32,8 +32,6 @@ pub struct Env {
   pub example_jwt_ttl_seconds: Option<u64>,
   pub example_encryption_key: Option<String>,
   pub example_encryption_key_file: Option<PathBuf>,
-  pub example_private_key: Option<String>,
-  pub example_private_key_file: Option<PathBuf>,
 
   pub example_local_auth: Option<bool>,
   pub example_disable_user_registration: Option<bool>,
@@ -74,6 +72,11 @@ pub struct CoreConfig {
   pub title: String,
   /// The address users reach the app at, eg. `https://example.com`.
   pub host: String,
+  /// More addresses the app is reached at, eg.
+  /// `http://10.0.0.5:9220` inside the network. A request signed
+  /// with a signing key is made for the host it is sent to, and
+  /// accepted for `host` and these.
+  pub extra_hosts: Vec<String>,
   pub port: u16,
   pub bind_ip: String,
   /// Path of the sqlite database file.
@@ -88,9 +91,6 @@ pub struct CoreConfig {
   /// Base64url 32 byte key to encrypt secrets in the database with.
   /// If empty, one is generated next to the database.
   pub encryption_key: String,
-  /// The server private key for signing keys, or `file:<path>`
-  /// to generate / load it from a file.
-  pub private_key: String,
 
   pub local_auth: bool,
   pub disable_user_registration: bool,
@@ -132,6 +132,7 @@ impl Default for CoreConfig {
     Self {
       title: String::from("Mogh Example"),
       host: String::from("http://localhost:9220"),
+      extra_hosts: Vec::new(),
       port: 9220,
       bind_ip: String::from("[::]"),
       // `.dev` is git ignored in this repository.
@@ -140,7 +141,6 @@ impl Default for CoreConfig {
       jwt_secret: String::new(),
       jwt_ttl_seconds: 24 * 60 * 60,
       encryption_key: String::new(),
-      private_key: String::from("file:./.dev/example/server.key"),
       local_auth: true,
       disable_user_registration: false,
       enable_new_users: true,
@@ -210,6 +210,9 @@ fn load_config() -> anyhow::Result<CoreConfig> {
   Ok(CoreConfig {
     title: env.example_title.unwrap_or(config.title),
     host: env.example_host.unwrap_or(config.host),
+    extra_hosts: env
+      .example_extra_hosts
+      .unwrap_or(config.extra_hosts),
     port: env.example_port.unwrap_or(config.port),
     bind_ip: env.example_bind_ip.unwrap_or(config.bind_ip),
     database_path: env
@@ -229,11 +232,6 @@ fn load_config() -> anyhow::Result<CoreConfig> {
       env.example_encryption_key,
     )
     .unwrap_or(config.encryption_key),
-    private_key: maybe_read_item_from_file(
-      env.example_private_key_file,
-      env.example_private_key,
-    )
-    .unwrap_or(config.private_key),
     local_auth: env.example_local_auth.unwrap_or(config.local_auth),
     disable_user_registration: env
       .example_disable_user_registration
@@ -304,20 +302,6 @@ fn load_config() -> anyhow::Result<CoreConfig> {
         .example_logging_pretty
         .unwrap_or(config.logging.pretty),
     },
-  })
-}
-
-/// The server key pair, which requests with a signing key are signed
-/// for.
-/// Call on startup so the server fails without a valid private key.
-pub fn core_keys() -> &'static RotatableKeyPair {
-  static CORE_KEYS: OnceLock<RotatableKeyPair> = OnceLock::new();
-  CORE_KEYS.get_or_init(|| {
-    RotatableKeyPair::from_private_key_spec(
-      mogh_pki::PkiKind::OneWay,
-      &core_config().private_key,
-    )
-    .expect("Invalid 'private_key' config")
   })
 }
 

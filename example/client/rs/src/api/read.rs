@@ -47,10 +47,9 @@ pub struct GetCoreInfo {}
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GetCoreInfoResponse {
   pub app_name: String,
+  /// The address the app is reached at. Requests with a signing
+  /// key are signed for its host.
   pub host: String,
-  /// The server public key, which clients using
-  /// signing keys sign their requests for.
-  pub public_key: String,
 }
 
 //

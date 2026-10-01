@@ -18,7 +18,7 @@ use typeshare::typeshare;
 use crate::{
   api::{Variant, admin_only},
   auth::{ExampleAuthImpl, RequestUser},
-  config::{core_config, core_keys},
+  config::core_config,
   db,
   state::{STATS_VALID_FOR_MS, stats_cache},
 };
@@ -111,7 +111,6 @@ impl Resolve<ReadArgs> for GetCoreInfo {
     Ok(GetCoreInfoResponse {
       app_name: config.title.clone(),
       host: config.host.clone(),
-      public_key: core_keys().load().public().to_string(),
     })
   }
 }

@@ -671,8 +671,6 @@ async fn beginning_a_link_gets_a_new_session_id() {
   let path = "/auth/manage/BeginExternalLoginLink";
   let res = admin
     .authenticate(
-      &reqwest::Method::POST,
-      path,
       reqwest
         .post(format!("{}{path}", app.address))
         .header("cookie", &planted)

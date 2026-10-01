@@ -87,7 +87,7 @@ impl Resolve<ExecuteArgs> for GenerateKeyPair {
     self,
     _: &ExecuteArgs,
   ) -> Result<Self::Response, Self::Error> {
-    let keys = EncodedKeyPair::generate(PkiKind::OneWay)?;
+    let keys = EncodedKeyPair::generate(PkiKind::Signature)?;
     Ok(GenerateKeyPairResponse {
       private_key: keys.private.into_inner(),
       public_key: keys.public.into_inner(),

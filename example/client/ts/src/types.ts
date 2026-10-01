@@ -80,8 +80,9 @@ export enum ApiKeyKind {
 	/** An api key: `X-API-KEY` / `X-API-SECRET`. */
 	ApiKey = "ApiKey",
 	/**
-	 * A signing key: `X-API-SIGNATURE` / `X-API-TIMESTAMP`, signed
-	 * with its private key.
+	 * A signing key: the request is signed with its private key
+	 * (`X-API-PUBLIC-KEY` / `X-API-HOST` / `X-API-TIMESTAMP` /
+	 * `X-API-NONCE` / `X-API-SIGNATURE`).
 	 */
 	SigningKey = "SigningKey",
 }
@@ -152,7 +153,7 @@ export interface DeleteUser {
 }
 
 /**
- * Generate a key pair, eg. to create a signing key with.
+ * Generate an Ed25519 key pair, eg. to create a signing key with.
  * Response: [GenerateKeyPairResponse].
  */
 export interface GenerateKeyPair {
@@ -176,12 +177,11 @@ export interface GetCoreInfo {
 /** Response for [GetCoreInfo]. */
 export interface GetCoreInfoResponse {
 	app_name: string;
-	host: string;
 	/**
-	 * The server public key, which clients using
-	 * signing keys sign their requests for.
+	 * The address the app is reached at. Requests with a signing
+	 * key are signed for its host.
 	 */
-	public_key: string;
+	host: string;
 }
 
 /**

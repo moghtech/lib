@@ -3,7 +3,7 @@ extern crate tracing;
 
 use anyhow::Context as _;
 
-use crate::config::{core_config, core_keys};
+use crate::config::core_config;
 
 mod api;
 mod auth;
@@ -30,8 +30,15 @@ async fn app() -> anyhow::Result<()> {
       .context("Invalid 'trusted_proxies' config")?;
   info!("Trusted Proxies: {trusted_proxies:?}");
 
-  // Fails here if the private key is invalid.
-  info!("Public Key: {}", core_keys().load().public());
+  // A request signed with a signing key is made for one of these
+  // hosts: an address without one is a startup error, rather than
+  // requests which never verify.
+  let signed_request_hosts =
+    mogh_auth_server::middleware::check_signed_request_hosts(
+      &auth::ExampleAuthImpl,
+    )
+    .context("Invalid 'host' / 'extra_hosts' config")?;
+  info!("Signed Request Hosts: {signed_request_hosts:?}");
 
   db::init().await?;
   // Fails here if the encryption key is invalid.

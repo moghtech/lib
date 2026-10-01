@@ -145,7 +145,6 @@ impl TestApp {
       "title": "Example Test",
       "host": "http://wrong-host-overridden-by-env",
       "database_path": dir.path().join("data/example.db"),
-      "private_key": format!("file:{}", dir.path().join("data/server.key").display()),
       "bcrypt_cost": 4,
       "auth_rate_limit_disabled": options.rate_limit.is_none(),
       "logging": { "level": "debug" },
@@ -249,6 +248,12 @@ impl TestApp {
 
   pub fn path(&self, path: &str) -> PathBuf {
     self.dir.path().join(path)
+  }
+
+  /// The host of the app, as requests with a signing key are signed
+  /// for it.
+  pub fn host(&self) -> String {
+    example_client::auth::signature::url_host(&self.address).unwrap()
   }
 
   /// A client without credentials and its own cookie jar (session).

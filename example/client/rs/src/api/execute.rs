@@ -10,7 +10,7 @@ pub trait ExampleExecuteRequest: HasResponse {}
 
 //
 
-/// Generate a key pair, eg. to create a signing key with.
+/// Generate an Ed25519 key pair, eg. to create a signing key with.
 /// Response: [GenerateKeyPairResponse].
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone, Resolve)]

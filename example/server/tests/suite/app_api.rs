@@ -397,8 +397,7 @@ async fn string_validation_rules() {
 }
 
 #[tokio::test]
-async fn generated_key_pairs_are_unique_and_match_the_server_format()
-{
+async fn generated_key_pairs_are_unique_ed25519_keys() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
   let a = admin.execute(GenerateKeyPair {}).await.unwrap();
@@ -406,16 +405,26 @@ async fn generated_key_pairs_are_unique_and_match_the_server_format()
   assert_ne!(a.private_key, b.private_key);
   assert_ne!(a.public_key, b.public_key);
 
+  // Base64 pkcs8 / spki der of an Ed25519 key, as signing keys are.
+  for pair in [&a, &b] {
+    assert_eq!(pair.private_key.len(), 64);
+    assert!(pair.private_key.starts_with("MC4CAQAwBQYDK2VwBCIEI"));
+    assert_eq!(pair.public_key.len(), 60);
+    assert!(pair.public_key.starts_with("MCowBQYDK2VwAyEA"));
+    let keys = mogh_pki::EncodedKeyPair::from_private_key(
+      mogh_pki::PkiKind::Signature,
+      &pair.private_key,
+    )
+    .unwrap();
+    assert_eq!(keys.public(), pair.public_key);
+  }
+
+  // The server has no key of its own to serve: signed requests are
+  // verified with the public key of the client.
   let info = admin.read(GetCoreInfo {}).await.unwrap();
   assert_eq!(info.app_name, "Example Test");
-  // Same encoding as the server public key, also served without auth.
-  assert_eq!(info.public_key.len(), a.public_key.len());
-  let public_key =
-    reqwest::get(format!("{}/public_key", app.address))
-      .await
-      .unwrap()
-      .text()
-      .await
-      .unwrap();
-  assert_eq!(public_key, info.public_key);
+  let res = reqwest::get(format!("{}/public_key", app.address))
+    .await
+    .unwrap();
+  assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }

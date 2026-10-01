@@ -73,8 +73,9 @@ pub struct User {
 pub enum ApiKeyKind {
   /// An api key: `X-API-KEY` / `X-API-SECRET`.
   ApiKey,
-  /// A signing key: `X-API-SIGNATURE` / `X-API-TIMESTAMP`, signed
-  /// with its private key.
+  /// A signing key: the request is signed with its private key
+  /// (`X-API-PUBLIC-KEY` / `X-API-HOST` / `X-API-TIMESTAMP` /
+  /// `X-API-NONCE` / `X-API-SIGNATURE`).
   SigningKey,
 }
 

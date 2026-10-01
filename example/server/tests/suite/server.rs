@@ -119,13 +119,12 @@ async fn raw_get(address: &str, path: &str) -> String {
 #[tokio::test]
 async fn secrets_on_disk_are_private_and_config_sources_are_merged() {
   let app = TestApp::spawn().await;
-  for file in ["data/server.key", "data/example.encryption.key"] {
-    let mode = std::fs::metadata(app.path(file))
-      .unwrap()
-      .permissions()
-      .mode();
-    assert_eq!(mode & 0o777, 0o600, "{file}");
-  }
+  let file = "data/example.encryption.key";
+  let mode = std::fs::metadata(app.path(file))
+    .unwrap()
+    .permissions()
+    .mode();
+  assert_eq!(mode & 0o777, 0o600, "{file}");
   // The title comes from the config file, the host from
   // the environment (which wins over the file).
   let admin = app.sign_up("admin").await;

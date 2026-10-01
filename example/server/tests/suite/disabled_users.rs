@@ -92,8 +92,6 @@ async fn manage_variant(
   let path = format!("/auth/manage/{variant}");
   client
     .authenticate(
-      &reqwest::Method::POST,
-      &path,
       client
         .reqwest
         .post(format!("{}{path}", client.address))

@@ -44,7 +44,10 @@ test("tools: key pair, seal / open, validate", async ({ page }) => {
   await page.goto("/tools");
 
   await page.getByRole("button", { name: "Generate Key Pair" }).click();
-  await expect(page.getByTestId("generated-public-key")).toHaveText(/^MCow/);
+  // An Ed25519 public key (spki), as signing keys are.
+  await expect(page.getByTestId("generated-public-key")).toHaveText(
+    /^MCowBQYDK2VwAyEA/,
+  );
 
   await page.getByLabel("Text", { exact: true }).fill("for my eyes only");
   await page.getByRole("button", { name: "Seal", exact: true }).click();

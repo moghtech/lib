@@ -1,4 +1,4 @@
-import { Code, Group, Stack, Text } from "@mantine/core";
+import { Code, Stack, Text } from "@mantine/core";
 import { Page, Section } from "mogh_ui";
 import { Home as HomeIcon } from "lucide-react";
 import { useRead, useUser } from "@/lib/hooks";
@@ -34,10 +34,6 @@ export default function Home() {
           <Text>
             {info?.app_name} at <Code>{info?.host}</Code>
           </Text>
-          <Group gap="xs">
-            <Text>Public key:</Text>
-            <Code data-testid="server-public-key">{info?.public_key}</Code>
-          </Group>
           <Text data-testid="stats">
             {stats?.users ?? "-"} users, {stats?.notes ?? "-"} notes,{" "}
             {stats?.api_keys ?? "-"} api keys

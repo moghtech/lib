@@ -250,8 +250,6 @@ async fn new_users_can_require_an_admin_to_enable_them() {
   // ... but can still see that they are disabled.
   let res = pending
     .authenticate(
-      &reqwest::Method::GET,
-      "/user",
       pending.reqwest.get(format!("{}/user", app.address)),
     )
     .unwrap()

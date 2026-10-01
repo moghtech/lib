@@ -5,10 +5,10 @@
 use anyhow::{Context as _, anyhow};
 use mogh_auth_client::{
   api::{login::MoghAuthLoginRequest, manage::MoghAuthManageRequest},
-  signature::signed_request_headers,
+  signature::signed_request_headers_for_url,
 };
 
-pub use mogh_auth_client::signature::sign_request;
+pub use mogh_auth_client::signature::{SignedRequest, sign_request};
 use mogh_error::deserialize_error;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -36,12 +36,10 @@ pub enum ClientAuth {
   Jwt(String),
   /// `X-API-KEY` / `X-API-SECRET`
   ApiKey { key: String, secret: String },
-  /// A signing key: `X-API-SIGNATURE` / `X-API-TIMESTAMP`, signed
-  /// with its private key for the server public key.
-  PrivateKey {
-    private_key: String,
-    server_public_key: String,
-  },
+  /// A signing key: the request is signed with its private key for
+  /// the host of the server (`X-API-PUBLIC-KEY` / `X-API-HOST` /
+  /// `X-API-TIMESTAMP` / `X-API-NONCE` / `X-API-SIGNATURE`).
+  PrivateKey { private_key: String },
 }
 
 #[derive(Clone)]
@@ -157,13 +155,11 @@ impl ExampleClient {
     self.post("/auth/manage", T::req_type(), &request).await
   }
 
-  /// Adds the credential headers for a `method` request to `path`
-  /// (the path and query the server receives). A signature (signing
-  /// key) covers the body, so set it on `request` before.
+  /// Adds the credential headers to `request`. A signature (signing
+  /// key) covers its method, url and body, so set them on `request`
+  /// before.
   pub fn authenticate(
     &self,
-    method: &reqwest::Method,
-    path: &str,
     request: reqwest::RequestBuilder,
   ) -> anyhow::Result<reqwest::RequestBuilder> {
     let request = request.headers(self.headers.clone());
@@ -175,17 +171,25 @@ impl ExampleClient {
       ClientAuth::ApiKey { key, secret } => request
         .header("x-api-key", key)
         .header("x-api-secret", secret),
-      ClientAuth::PrivateKey {
-        private_key,
-        server_public_key,
-      } => {
+      ClientAuth::PrivateKey { private_key } => {
         let (client, request) = request.build_split();
         let mut request = request.context("Invalid request")?;
-        let headers = signed_request_headers(
+        // The server takes these over a signature. reqwest makes an
+        // Authorization header of credentials in the url
+        // (`user:password@`), which the url doesn't show anymore.
+        if request.headers().contains_key("authorization")
+          || request.headers().contains_key("x-api-key")
+        {
+          anyhow::bail!(
+            "The request carries other credentials (an Authorization header, also of a `user:password@` in the address, or an api key), which the server takes over the signature"
+          );
+        }
+        // Signed for where it goes: the host the request is sent to
+        // (which the server must know itself by), its path and query.
+        let headers = signed_request_headers_for_url(
           private_key,
-          server_public_key,
-          method.as_str(),
-          path,
+          request.method().as_str(),
+          request.url(),
           request
             .body()
             .and_then(|body| body.as_bytes())
@@ -214,7 +218,7 @@ impl ExampleClient {
       .post(format!("{}{path}", self.address))
       .json(&json!({ "type": req_type, "params": params }));
     let res = self
-      .authenticate(&reqwest::Method::POST, path, request)?
+      .authenticate(request)?
       .send()
       .await
       .context("Failed to reach Example API")?;

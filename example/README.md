@@ -33,14 +33,14 @@ Which crate is used where:
 | `mogh_error` | Error responses with status codes, everywhere. |
 | `mogh_rate_limit` / `mogh_request_ip` | Auth rate limiters (`server/src/state.rs`), client ip, cidr whitelists. |
 | `mogh_encryption` | Secrets at rest: TOTP secrets, passkeys, provider client secrets, notes (`server/src/crypto.rs`), and `SealText` / `OpenText`. |
-| `mogh_pki` | The server key pair for signing keys, `GenerateKeyPair`. |
+| `mogh_pki` | `GenerateKeyPair` (the Ed25519 keys of signing keys). The auth server verifies signed requests with it. |
 | `mogh_cache` | Cached login providers / trusted issuers, and the `GetStats` timeout cache. |
 | `mogh_validations` | Note titles, groups, `ValidateString`. |
 
 ## Run it
 
 ```sh
-# Server on http://localhost:9220 (database and key files in ./.dev/example)
+# Server on http://localhost:9220 (database in ./.dev/example)
 cargo run -p example_server
 
 # With the mock identity provider as OIDC login (users: alice, bob, mallory)
