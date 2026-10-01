@@ -401,9 +401,10 @@ impl mogh_auth_server::AuthImpl for AppAuthImpl {
     })
   }
 
-  // signing keys: server_private_key, create_signing_key (public keys
-  // unique across all users), get_signing_key (refusing expired keys like
-  // get_api_key), get_signing_key_owner_id (finding them), delete_signing_key
+  // signing keys: signing_keys_enabled (and extra_hosts, for more hosts
+  // than `host`), create_signing_key (public keys unique across all
+  // users), get_signing_key (refusing expired keys like get_api_key),
+  // get_signing_key_owner_id (finding them), delete_signing_key
 }
 ```
 
@@ -668,36 +669,119 @@ reported: the server rate limits and logs them.
 
 A signing key is a key pair registered with the user (`CreateSigningKey`,
 `DeleteSigningKey`): the server stores its public key, and clients sign each
-request with its private key instead of sending a secret (`X-API-SIGNATURE` /
-`X-API-TIMESTAMP`). An api key (`CreateApiKey`) is the key + secret sent as
-they are (`X-API-KEY` / `X-API-SECRET`). The rust client has the helpers
-behind its `pki` feature:
-`mogh_auth_client::signature::signed_request_headers`.
+request with its private key instead of sending a secret. An api key
+(`CreateApiKey`) is the key + secret sent as they are (`X-API-KEY` /
+`X-API-SECRET`). The keys are Ed25519 keys, and the server verifies a
+signature with a public key alone, the one the request names, which the app
+then looks up among the stored ones (`get_signing_key`): the server holds no
+key of its own for this, and nothing it holds could sign a request for a
+client.
+
+Signing keys are off by default, enable them with
+`AuthImpl::signing_keys_enabled` (which needs `AuthImpl::host`):
 
 ```rust
-let path = "/read/GetVersion";
+fn signing_keys_enabled(&self) -> bool {
+  true
+}
+
+/// More origins than `host` clients reach the app at and sign requests
+/// for, eg. an address inside the network.
+fn extra_hosts(&self) -> &[String] {
+  &core_config().extra_hosts
+}
+```
+
+Check the origins when the app starts: one a host can't be read from (it has
+no scheme) otherwise only shows in the log, and as a `401` to every client
+signing for it (a `500`, when no origin is usable).
+
+```rust
+let hosts = mogh_auth_server::middleware::check_signed_request_hosts(&auth)?;
+info!("Signed request hosts: {hosts:?}");
+```
+
+The rust client has the helpers behind its `pki` feature:
+`mogh_auth_client::signature::signed_request_headers_for_url` signs a request
+for the host, path and query of the url it is sent to.
+
+```rust
+let url = reqwest::Url::parse(&format!("{address}/read/GetVersion"))?;
 let body = serde_json::to_vec(&GetVersion {})?;
 let mut request = reqwest
-  .post(format!("{address}{path}"))
+  .post(url.clone())
   .header("content-type", "application/json")
   .body(body.clone());
-for (header, value) in signed_request_headers(
-  &private_key, &server_public_key, "POST", path, &body,
-)? {
+for (header, value) in
+  signed_request_headers_for_url(&private_key, "POST", &url, &body)?
+{
   request = request.header(header, value);
 }
 ```
 
-- The signature is a Noise handshake with the server key over the string
-  `{METHOD}|{path_and_query}|{timestamp}|{sha256(body) hex}`, eg.
-  `GET|/api/notes?page=2|1718000000000|e3b0c442...b855` (no body): the
-  uppercased method, the path and query, the timestamp in unix milliseconds
-  (the value of `X-API-TIMESTAMP`), and the lowercase hex sha256 of the body
-  (of empty input for no body, and for a CONNECT request, eg. a websocket over
-  HTTP/2). Sign the body exactly as sent, and the path and query as the server
-  receives them: percent encoded, without scheme and host (it is the same over
-  HTTP/2). So the headers are made for each request, they can't be default
-  headers of a client.
+Where a proxy in front of the server changes the path (it strips a prefix),
+sign the path the server receives: `signed_request_headers` takes the host
+(`url_host` of the address) and the path and query on their own.
+
+- A signed request carries five headers: `X-API-PUBLIC-KEY` (the public key of
+  the signing key, base64 spki der), `X-API-HOST` (the host the request is
+  signed for), `X-API-TIMESTAMP` (unix milliseconds), `X-API-NONCE` (a random
+  value of 16 to 64 characters of `A-Z a-z 0-9 - _`, new for every request) and
+  `X-API-SIGNATURE` (the base64 of the 64 byte Ed25519 signature). Each has one
+  form the server accepts and is given once (the timestamp in plain digits, the
+  public key as it is stored), so a request has one spelling.
+- The signature is over these lines, joined by `\n` without a trailing one:
+
+  ```text
+  mogh-signed-request-v1
+  {host}
+  {method}
+  {path_and_query}
+  {timestamp}
+  {nonce}
+  {sha256(body) hex}
+  ```
+
+  eg. `example.com`, `GET`, `/api/notes?page=2`, `1718000000000`,
+  `0123456789abcdef0123456789abcdef`, `e3b0c442...b855` (no body): the host
+  the request is made for (the value of `X-API-HOST`), the method as it is
+  sent (methods are case sensitive), the path and query, the timestamp in unix
+  milliseconds (the value of `X-API-TIMESTAMP`), the nonce (the value of
+  `X-API-NONCE`) and the lowercase hex sha256 of the body (of empty input for
+  no body, and for a CONNECT request over HTTP/2 or later, eg. a websocket,
+  whose body is the tunnel). Sign the body exactly as sent, and the path and
+  query as the server receives them: percent encoded, without scheme, host
+  and fragment (it is the same over HTTP/2). So the headers are made for each
+  request, they can't be default headers of a client.
+- The host is the lowercase `host[:port]` of the address the client uses,
+  without the port when it is the default of the scheme
+  (`signature::url_host`): `example.com` for `https://example.com`,
+  `10.0.0.5:9120` for `http://10.0.0.5:9120`. An address with credentials
+  (`https://user:password@example.com`) is refused: a client sends those as
+  `Authorization`, which the server takes over the signature. The server
+  accepts a request signed for `AuthImpl::host` or one of
+  `AuthImpl::extra_hosts` (both origins, like `https://example.com`), and no
+  other: the same public key can be registered at another server, and a
+  request made for that one is not a request for this one. What the server
+  goes by is the host the client signed (`X-API-HOST`, which the signature
+  covers), never where the request arrived (its `Host` header): whoever passes
+  a request on to another server sets that too. So it doesn't matter what a
+  proxy does to that header, but every address clients sign requests for has
+  to be `host` or one of `extra_hosts`.
+- The host is all that tells one server from another: list origins which are
+  this server's alone. Never the address of another server (a request signed
+  for it would be accepted here too), and mind names several deployments
+  share (a service name used in two networks, `localhost`). The hosts are not
+  secret: the answer to a request signed for another host tells whoever asks
+  whether a host is one of them.
+- A request signed for another host is refused with `401` before its body is
+  read. The error starts with `signature::SIGNED_FOR_ANOTHER_HOST` and names
+  the host: the client uses an address the server isn't configured with, and
+  no other key would get it through. So is one whose timestamp is outside the
+  tolerance, with `signature::SIGNED_AT_ANOTHER_TIME`: the clocks differ, or
+  the request took too long to arrive. Clients can tell both from a key the
+  server doesn't know (`401 Invalid client credentials`), and neither counts
+  against the rate limiter.
 - The server reads the body of a signed request before authenticating it, up
   to `AuthImpl::signed_request_body_limit` (2 MB by default) and to the router's
   `DefaultBodyLimit` like axum's body extractors (axum's 2 MB default when the
@@ -706,28 +790,118 @@ for (header, value) in signed_request_headers(
   much of a signed request is buffered before it is authenticated. To accept
   signed bodies over 2 MB, raise both `signed_request_body_limit` and the
   router's `DefaultBodyLimit` (a layer outside of the auth middleware). A signed
-  request which can't verify, found out before (without `server_private_key`,
-  or with the `X-API-TIMESTAMP` missing or outside the tolerance), is refused
+  request which can't verify, found out before (signing keys are not enabled,
+  the timestamp is outside the tolerance, the host is none of the server's, or
+  one of the five headers is missing, given twice or malformed), is refused
   with `401` without its body being read, and so is a client the general rate
-  limiter has locked out, with `429`. Anybody can send a current timestamp, so
+  limiter has locked out, with `429`. Anybody can send well formed headers, so
   the body of any other signed request is read (up to the limit), even when its
   signature turns out to be invalid.
-- Apps without `AuthImpl::server_private_key` (the default) answer signed
+- The body has `AuthImpl::signed_request_body_timeout` (30 seconds by default)
+  to arrive once the headers have, else `408 Request Timeout`. The timestamp
+  is checked when the headers arrive, so this is what keeps a request from
+  being accepted long after it was signed (its headers sent in time, its body
+  held back). Raise it along with the limit for larger bodies.
+- Apps without `AuthImpl::signing_keys_enabled` (the default) answer signed
   requests with `401 Signing keys are not enabled`.
 - The signature is accepted for one second around the server time by default,
   `AuthImpl::signing_key_timestamp_tolerance_ms` raises that for clients without
   synchronized clocks. It is measured when the headers arrive, the time the
-  body takes to upload doesn't count. It is also how long a captured request
-  can be replayed (the exact same request, it can't carry another body), always
-  use TLS.
-- A public key given to `CreateSigningKey` can be base64 or pem, anything else
-  is refused, and so is one already stored (`409 Conflict`). ⚠️ Public keys
-  are not secret: store them unique across all users (eg. a unique index),
-  which also covers two requests racing.
+  body takes to upload doesn't count against it (the body timeout does;
+  behind a proxy which buffers request bodies the headers arrive with the
+  body, so the upload counts). A captured request can be replayed while its
+  headers arrive before the server time is past its `X-API-TIMESTAMP` plus the
+  tolerance: up to twice the tolerance after it was first accepted, for a
+  client whose clock runs ahead (the exact same request to the same server, it
+  can't carry another body). Always use TLS.
+- The server doesn't remember the requests it has seen. An app which wants to
+  refuse a replay implements `AuthImpl::accept_signed_request`, which is
+  called once for every signed request when it authenticated, right before it
+  is handled, on the app's routes behind `authenticate_request` and on the
+  auth management api alike (so there, not in `handle_request_authentication`,
+  which the management api doesn't call). What it refuses counts against the
+  general rate limiter. The nonce makes every signature unique, and a
+  signature has one accepted form (canonical base64 of a canonical signature),
+  so one seen before is a replay. A request's body has to arrive by its
+  `X-API-TIMESTAMP` plus the tolerance plus the body timeout, and the request
+  gets to the hook a moment after that at the latest: remember each signature
+  until a margin past that time, and refuse one seen before, or one which only
+  gets there after the margin (it could be the copy of one forgotten
+  already). The margin covers the moment it takes to authenticate the signer,
+  and how far the clocks of the app's instances and of the store differ.
+  Check and remember in one step, in a store all instances of the app share.
+  A middleware of the app's own, built on
+  `extract_request_authentication_rate_limited`, calls
+  `middleware::accept_signed_request` itself.
+
+  ```rust
+  fn accept_signed_request(
+    &self,
+    accepted: AcceptedSignature,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async move {
+      // accepted.signature, accepted.timestamp (unix ms), and the
+      // public_key, host and nonce of the request.
+      let keep_until = accepted.timestamp
+        + TOLERANCE_MS
+        + BODY_TIMEOUT_MS
+        + MARGIN_MS;
+      if now_ms() > keep_until
+        || !seen_signatures().insert_new(accepted.signature, keep_until).await?
+      {
+        return Err(
+          anyhow!("Invalid client credentials")
+            .status_code(StatusCode::UNAUTHORIZED),
+        );
+      }
+      Ok(())
+    })
+  }
+  ```
+- The signature covers the request's method, path and query and body, and the
+  host it is for: not its other headers (`Content-Type`, cookies), nor the
+  scheme of the address (`http://example.com` and `https://example.com` are
+  both signed as `example.com`, as are `ws` and `wss`). Where a proxy strips
+  a path prefix, two apps under one host are told apart by nothing a
+  signature covers: give them hosts of their own.
+- A public key given to `CreateSigningKey` can be base64 or pem
+  (`openssl pkey -pubout`), anything else is refused, and so is one already
+  stored (`409 Conflict`). It must be an Ed25519 key
+  (`openssl genpkey -algorithm ed25519`). ⚠️ Public keys are not secret: store
+  them unique across all users (eg. a unique index), which also covers two
+  requests racing.
 - The server never checks a signing key's `expires`: refuse expired keys in
   `get_signing_key` (`401 Invalid client credentials`), and implement
   `get_signing_key_owner_id` so they stay deletable.
 - Invalid signatures count against the general rate limiter.
+
+Since 7.0 the signature is an Ed25519 signature: a hard switch. Before, it was
+one message of a Noise handshake with a key of the server, which whoever held
+that key could also make for any client.
+- Signing keys are Ed25519 keys now. The X25519 keys stored before are refused
+  (`400` by `CreateSigningKey`, `401` in `X-API-PUBLIC-KEY`), and requests
+  signed the old way (`X-API-SIGNATURE` / `X-API-TIMESTAMP` only) are refused
+  with `401` until the client upgrades and has a new key. Stored X25519 keys
+  can still be deleted (`DeleteSigningKey`): remove them, nothing can be signed
+  with them anymore.
+- `AuthImpl::server_private_key` is gone, the server has no key for this.
+  Signing keys are enabled with `AuthImpl::signing_keys_enabled`, and what the
+  server key bound a request to before (this server) is now the host in the
+  signed message: `AuthImpl::host` and the new `AuthImpl::extra_hosts`.
+- The client functions changed with it: `signed_request_headers` takes the
+  host (`url_host` of the server address) instead of the server public key and
+  returns five headers (`signed_request_headers_for_url` takes the url of the
+  request for both the host and the path), `sign_request` takes a
+  `SignedRequest`, whose `message` replaces `pki_auth_prologue`
+  (`middleware::signed_request_message` on the server). The method is signed
+  as it is sent (it was uppercased).
+- A stale timestamp is answered with `SIGNED_AT_ANOTHER_TIME` (it was the same
+  `Invalid client credentials` as an unknown key).
+- The body of a signed request has to arrive within
+  `AuthImpl::signed_request_body_timeout` (it could take any time), and a body
+  sent with a CONNECT request before HTTP/2 is read and verified like any
+  other (it was passed on unread, signed as empty).
+- `AuthImpl::accept_signed_request` is new: the place to refuse a replay.
 
 Since 5.0 the body is signed: a hard switch, clients signing the 4.x string
 (`{METHOD}|{uri}|{timestamp}`, without the body hash) are refused until they

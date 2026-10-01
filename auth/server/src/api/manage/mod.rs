@@ -25,7 +25,7 @@ pub mod passkey;
 pub mod provider;
 pub mod totp;
 
-mod middleware;
+pub(crate) mod middleware;
 
 use middleware::{AuthenticatedAt, UserExtractor, attach_user};
 

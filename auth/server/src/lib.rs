@@ -1,6 +1,7 @@
 use std::{
   net::IpAddr,
   sync::{Arc, LazyLock},
+  time::Duration,
 };
 
 use anyhow::{Context as _, anyhow};
@@ -11,7 +12,6 @@ use mogh_auth_client::{
   passkey::Passkey,
 };
 use mogh_error::{AddStatusCode, AddStatusCodeError};
-use mogh_pki::RotatableKeyPair;
 use mogh_rate_limit::RateLimiter;
 use serde::{Deserialize, Serialize};
 
@@ -64,10 +64,32 @@ pub enum RequestAuthentication {
   /// DANGER ⚠️ the secret needs bcrypt compare with matching
   /// api key's hashed secret to be validated as belonging to a particular client.
   ApiKey { key: String, secret: String },
-  /// X-API-SIGNATURE and X-API-TIMESTAMP of a request signed with a
-  /// signing key. The handshake produces its public key.
+  /// The X-API-PUBLIC-KEY of a request signed with a signing key,
+  /// whose X-API-SIGNATURE verified with it.
   /// DANGER ⚠️ the public key must still be validated as belonging to a particular client.
   PublicKey(String),
+}
+
+/// The signature of a request signed with a signing key, which
+/// verified and whose signer authenticated: what
+/// [AuthImpl::accept_signed_request] is called with. Every field is
+/// the header of the request as it was sent (each has one accepted
+/// form), and the signature covers all of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedSignature {
+  /// `X-API-PUBLIC-KEY`: the public key of the signing key.
+  pub public_key: String,
+  /// `X-API-HOST`: the host of this server the request is signed
+  /// for.
+  pub host: String,
+  /// `X-API-TIMESTAMP`: when the request was signed, unix
+  /// milliseconds.
+  pub timestamp: i64,
+  /// `X-API-NONCE`: new for every request, which makes every
+  /// signature unique.
+  pub nonce: String,
+  /// `X-API-SIGNATURE`.
+  pub signature: String,
 }
 
 /// A login the auth server completed, see [AuthImpl::record_login].
@@ -209,10 +231,39 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// Provide the app 'host' config: the origin the app is reached at,
   /// eg. `https://example.com`, without the path the auth router is
   /// nested at ([Self::path]).
+  ///
+  /// It is also the host requests signed with a signing key are
+  /// made for ([Self::signing_keys_enabled]): `example.com` here, or
+  /// `example.com:8443` for `https://example.com:8443`
+  /// ([middleware::check_signed_request_hosts] at startup tells
+  /// whether one can be read from it).
   fn host(&self) -> &str {
     panic!(
-      "Must implement 'AuthImpl::host' in order for external logins and other features to work."
+      "Must implement 'AuthImpl::host' in order for external logins, signing keys and other features to work."
     )
+  }
+
+  /// More origins the app is reached at, in the form of [Self::host]
+  /// (eg. `http://10.0.0.5:9120`, an address inside the network).
+  /// None by default.
+  ///
+  /// Allows more hosts for requests signed with a signing key
+  /// ([Self::signing_keys_enabled]): a signature is made for the
+  /// host the client sends the request to, and is only accepted when
+  /// that is [Self::host] or one of these. So every address clients
+  /// sign requests for has to be here.
+  ///
+  /// The host is all that tells this server from another to a signed
+  /// request: list origins which are this server's alone. Never the
+  /// address of another server (a request signed for it would be
+  /// accepted here too), and mind names several deployments share
+  /// (one service name in two networks).
+  ///
+  /// The hosts are not secret: a request signed for another host is
+  /// told so, which tells whoever asks whether a host is one of
+  /// these.
+  fn extra_hosts(&self) -> &[String] {
+    &[]
   }
 
   /// This should be the path to where the auth server is nested on 'host'.
@@ -383,8 +434,8 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// - credentials presented to [middleware::authenticate_request] and
   ///   the auth management API: invalid tokens, api keys and secrets
   ///   (each unknown api key costs a bcrypt hash), and the signatures
-  ///   of requests signed with a signing key (each costs a key
-  ///   exchange);
+  ///   of requests signed with a signing key (each costs reading the
+  ///   body and verifying a signature);
   /// - the second factor of logins (TOTP codes, recovery codes,
   ///   passkeys), and local logins unless
   ///   [Self::local_login_rate_limiter] is implemented;
@@ -1246,29 +1297,98 @@ pub trait AuthImpl: Send + Sync + 'static {
   // ================
   // = SIGNING KEYS =
   // ================
-  /// Pass the server private key, which the requests signed with a
-  /// signing key are signed for (see [mogh_auth_client::signature]).
-  /// Without one (the default) signing keys are not enabled, and
-  /// signed requests are refused.
-  fn server_private_key(&self) -> Option<&RotatableKeyPair> {
-    None
+  /// Whether requests signed with a signing key are accepted (see
+  /// [mogh_auth_client::signature]). Off by default: signed requests
+  /// are then refused, before their body is read.
+  ///
+  /// A request is signed for the host of the server, and accepted
+  /// when that is [Self::host] (which must be implemented to enable
+  /// this: every signed request asks for it) or one of
+  /// [Self::extra_hosts]. Check them when the app starts, with
+  /// [middleware::check_signed_request_hosts]. The server verifies
+  /// the signature with the public key of the signing key alone, it
+  /// holds no key of its own for this.
+  fn signing_keys_enabled(&self) -> bool {
+    false
   }
 
   /// How far the `X-API-TIMESTAMP` of a signed request may be from
   /// the server time, in milliseconds. Default: 1 second.
   ///
   /// It is checked when the request headers arrive, before the body is
-  /// read, so the time the body takes to upload doesn't count.
+  /// read, so the time the body takes to upload doesn't count (behind
+  /// a proxy which buffers request bodies the headers arrive with the
+  /// body, and it does).
   ///
-  /// The signature covers the method, path and query, timestamp and
-  /// body of the request, so this is how long a captured request can
-  /// be replayed for (the exact same request, it can't be changed),
-  /// and at the same time how much clock difference (plus the latency
-  /// of the headers) clients can have before their requests are
-  /// refused. Raise it for clients without synchronized clocks, always
-  /// use TLS either way.
+  /// The signature covers the host, method, path and query,
+  /// timestamp, nonce and body of the request, so this bounds how
+  /// long a captured request can be replayed for (the exact same
+  /// request to the same server, it can't be changed): its headers
+  /// have to arrive before the server time is past its timestamp
+  /// plus the tolerance, which for a client whose clock runs ahead is
+  /// up to twice the tolerance after it was first accepted, and its
+  /// body within [Self::signed_request_body_timeout] of them. It is
+  /// at the same time how much clock difference (plus the latency of
+  /// the headers) clients can have before their requests are refused.
+  /// Raise it for clients without synchronized clocks, always use TLS
+  /// either way.
+  ///
+  /// The server doesn't remember the requests it has seen. An app
+  /// which wants to refuse a replay can, in
+  /// [Self::accept_signed_request].
   fn signing_key_timestamp_tolerance_ms(&self) -> u64 {
     1_000
+  }
+
+  /// Called once for every request signed with a signing key, when
+  /// its signature verified and its signer authenticated, right
+  /// before the request is handled: by
+  /// [middleware::authenticate_request] (after
+  /// [Self::handle_request_authentication]) and by the auth
+  /// management api alike. An error refuses the request, and counts
+  /// against [Self::general_rate_limiter]. The default accepts.
+  ///
+  /// This is where an app refuses a replay (here, not in
+  /// [Self::handle_request_authentication], which the auth management
+  /// api doesn't call: a check in both would refuse every request
+  /// the second time it sees its signature). The `X-API-NONCE` makes
+  /// every signature unique, and a signature has one accepted form,
+  /// so one seen before is a replay.
+  ///
+  /// The body of a request has to arrive by its timestamp plus
+  /// [Self::signing_key_timestamp_tolerance_ms] plus
+  /// [Self::signed_request_body_timeout], and the request gets here
+  /// a moment after that at the latest. So remember each signature
+  /// ([AcceptedSignature::signature]) until some margin past that
+  /// time, and refuse (`401`) one which was seen before, or which
+  /// only gets here after the margin: it could be the copy of one
+  /// forgotten already. The margin covers the moment it takes to
+  /// authenticate the signer, and how far the clocks of the app's
+  /// instances and of the store differ. Check and remember in one
+  /// step (two copies arriving together), in a store all instances
+  /// of the app share.
+  fn accept_signed_request(
+    &self,
+    _accepted: AcceptedSignature,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async { Ok(()) })
+  }
+
+  /// How long the body of a request signed with a signing key may
+  /// take to arrive once its headers have. Default: 30 seconds, which
+  /// carries the default 2 MB ([Self::signed_request_body_limit]) over
+  /// a link of ~70 KB/s. A body which takes longer is refused with
+  /// `408 Request Timeout`.
+  ///
+  /// The `X-API-TIMESTAMP` is checked when the headers arrive
+  /// ([Self::signing_key_timestamp_tolerance_ms]) and the body is read
+  /// after, so this is what keeps a request from being accepted long
+  /// after it was signed: its headers sent in time, its body held
+  /// back. Raise it along with the limit for larger bodies, and mind
+  /// that it adds to how long an app has to remember the signatures
+  /// it has seen.
+  fn signed_request_body_timeout(&self) -> Duration {
+    Duration::from_secs(30)
   }
 
   /// The largest body, in bytes, a request signed with a signing key

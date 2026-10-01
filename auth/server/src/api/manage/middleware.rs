@@ -15,6 +15,7 @@ use crate::{
   AuthImpl, RequestAuthentication,
   api::manage::ManageRequest,
   middleware::{
+    accept_signed_request, accepted_signature,
     extract_request_authentication_rate_limited,
     get_user_from_request_authentication, read_request_body,
     read_signed_request_body,
@@ -87,6 +88,8 @@ pub async fn attach_user<I: AuthImpl>(
   )
   .await?;
 
+  let accepted = accepted_signature(&req_auth, req.headers())?;
+
   let authenticated_at = match &req_auth {
     RequestAuthentication::Jwt(jwt) => auth
       .jwt_provider()
@@ -113,6 +116,10 @@ pub async fn attach_user<I: AuthImpl>(
   } else {
     check_disabled_user_request(req).await?
   };
+
+  // The request goes on to be handled: the app gets to refuse its
+  // signature (one it has seen before).
+  accept_signed_request(&auth, ip, accepted, &mut req).await?;
 
   req.extensions_mut().insert(UserExtractor(Arc::new(user)));
   req

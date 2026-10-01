@@ -16,7 +16,7 @@ use webauthn_rs::{
 pub struct PasskeyProvider(Webauthn);
 
 impl PasskeyProvider {
-  /// Pass the app host address, IE 'https://auth.mogh.tech'.
+  /// Pass the app host address, IE `https://auth.mogh.tech`.
   pub fn new(host: &str) -> anyhow::Result<Self> {
     let rp_origin = Url::parse(host)?;
     let rp_id = rp_origin.domain().context("Host missing domain")?;

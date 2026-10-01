@@ -135,17 +135,27 @@ impl Resolve<ManageArgs> for DeleteApiKey {
 
 //
 
-/// The public key as the request handshake produces it (base64
-/// spki der), so a key given in another encoding (pem) is stored in
-/// the form requests are matched with. BAD_REQUEST if it isn't a
-/// public key.
+/// The public key as signed requests are matched with (base64 spki
+/// der), so a key given in another encoding (pem) is stored in the
+/// form the middleware returns. BAD_REQUEST if it isn't an Ed25519
+/// public key: signatures only verify with one. An X25519 key (as
+/// signing keys were before 7.0) is told so.
 fn normalize_public_key(
   public_key: &str,
 ) -> mogh_error::Result<String> {
-  mogh_pki::SpkiPublicKey::from_maybe_pem(public_key.trim())
-    .map(mogh_pki::SpkiPublicKey::into_inner)
-    .context("Invalid public key")
-    .status_code(StatusCode::BAD_REQUEST)
+  mogh_pki::SpkiPublicKey::from_maybe_pem(
+    mogh_pki::PkiKind::Signature,
+    public_key.trim(),
+  )
+  .map(mogh_pki::SpkiPublicKey::into_inner)
+  .map_err(|e| {
+    if e.is::<mogh_pki::WrongKeyAlgorithm>() {
+      e.context("Invalid public key: signing keys are Ed25519 keys")
+    } else {
+      e.context("Invalid public key")
+    }
+  })
+  .status_code(StatusCode::BAD_REQUEST)
 }
 
 /// Public keys are not secret, and requests are recognized by the
@@ -185,8 +195,9 @@ pub async fn create_signing_key<I: AuthImpl + ?Sized>(
   let public_key = body.public_key.trim();
 
   let (private_key, public_key) = if public_key.is_empty() {
-    let key_pair =
-      mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::OneWay)?;
+    let key_pair = mogh_pki::EncodedKeyPair::generate(
+      mogh_pki::PkiKind::Signature,
+    )?;
     (
       Some(key_pair.private.into_inner()),
       key_pair.public.into_inner(),
@@ -245,8 +256,10 @@ pub async fn delete_signing_key<I: AuthImpl + ?Sized>(
   user_id: &str,
   public_key: String,
 ) -> mogh_error::Result<()> {
-  // Keys stored before public keys were normalized
-  // may be in another encoding, so fall back to the key as given.
+  // Keys stored before public keys were normalized may be in
+  // another encoding, and keys stored before 7.0 are X25519 keys
+  // (which no request can be signed with anymore): fall back to the
+  // key as given, so they can still be deleted.
   let public_key =
     normalize_public_key(&public_key).unwrap_or(public_key);
 
@@ -327,10 +340,11 @@ mod tests {
 
   #[test]
   fn test_normalize_public_key_encodings() {
-    let keys =
-      mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::OneWay)
-        .unwrap();
-    // The form the request handshake produces.
+    let keys = mogh_pki::EncodedKeyPair::generate(
+      mogh_pki::PkiKind::Signature,
+    )
+    .unwrap();
+    // The form the middleware returns for a signed request.
     let canonical = keys.public().to_string();
     assert_eq!(normalize_public_key(&canonical).unwrap(), canonical);
     assert_eq!(
@@ -346,20 +360,44 @@ mod tests {
 
   #[test]
   fn test_normalize_public_key_rejects_invalid() {
-    let private =
-      mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::OneWay)
-        .unwrap()
-        .private()
-        .to_string();
+    let private = mogh_pki::EncodedKeyPair::generate(
+      mogh_pki::PkiKind::Signature,
+    )
+    .unwrap()
+    .private()
+    .to_string();
     for invalid in [
       "not a key",
       "AAAA",
       "-----BEGIN PUBLIC KEY-----",
       // A private key is not a public key.
       private.as_str(),
+      // The identity: a key of low order, which signatures can be
+      // made for without a private key.
+      "MCowBQYDK2VwAyEAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     ] {
       let err = normalize_public_key(invalid).unwrap_err();
       assert_eq!(err.status, StatusCode::BAD_REQUEST, "{invalid:?}");
+      assert_eq!(err.error.to_string(), "Invalid public key");
+    }
+  }
+
+  /// A signing key from before 7.0 is an X25519 key, which no
+  /// signature verifies with: refused, saying which key is needed.
+  #[test]
+  fn test_normalize_public_key_rejects_x25519() {
+    let x25519 =
+      mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::Mutual)
+        .unwrap();
+    for public_key in
+      [x25519.public().to_string(), x25519.public.as_pem()]
+    {
+      let err = normalize_public_key(&public_key).unwrap_err();
+      assert_eq!(err.status, StatusCode::BAD_REQUEST);
+      assert_eq!(
+        err.error.to_string(),
+        "Invalid public key: signing keys are Ed25519 keys"
+      );
     }
   }
 
@@ -428,13 +466,29 @@ mod tests {
         }
       })
     }
+    fn delete_signing_key(
+      &self,
+      public_key: String,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      let known = public_key == self.known;
+      Box::pin(async move {
+        if known {
+          Ok(())
+        } else {
+          Err(
+            anyhow!("Deleted another key than the known one").into(),
+          )
+        }
+      })
+    }
   }
 
   #[tokio::test]
   async fn test_create_signing_key_refuses_known_public_key() {
-    let known =
-      mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::OneWay)
-        .unwrap();
+    let known = mogh_pki::EncodedKeyPair::generate(
+      mogh_pki::PkiKind::Signature,
+    )
+    .unwrap();
     let auth = KnownKeyAuth {
       known: known.public().to_string(),
     };
@@ -461,9 +515,10 @@ mod tests {
       assert!(!format!("{:#}", err.error).contains("owner"));
     }
     // Other keys are created.
-    let other =
-      mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::OneWay)
-        .unwrap();
+    let other = mogh_pki::EncodedKeyPair::generate(
+      mogh_pki::PkiKind::Signature,
+    )
+    .unwrap();
     create_signing_key(
       &auth,
       "user".into(),
@@ -476,7 +531,72 @@ mod tests {
       create_signing_key(&auth, "user".into(), create(String::new()))
         .await
         .unwrap();
-    assert!(res.private_key.is_some());
+    // The private key of an Ed25519 pair, which requests are signed
+    // with.
+    let private_key = res.private_key.unwrap();
+    let generated = mogh_pki::EncodedKeyPair::from_private_key(
+      mogh_pki::PkiKind::Signature,
+      &private_key,
+    )
+    .unwrap();
+    let signature =
+      mogh_pki::signature::sign(&generated.private, b"request")
+        .unwrap();
+    mogh_pki::signature::verify(
+      &generated.public,
+      b"request",
+      &signature,
+    )
+    .unwrap();
+
+    // An X25519 key (as signing keys were before 7.0) isn't stored.
+    let x25519 =
+      mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::Mutual)
+        .unwrap();
+    let err = create_signing_key(
+      &auth,
+      "user".into(),
+      create(x25519.public().to_string()),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+  }
+
+  /// A key stored before 7.0 is an X25519 key: nothing can be signed
+  /// with it anymore, but its owner can still delete it.
+  #[tokio::test]
+  async fn test_delete_signing_key_of_another_algorithm() {
+    let x25519 =
+      mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::Mutual)
+        .unwrap();
+    let auth = KnownKeyAuth {
+      known: x25519.public().to_string(),
+    };
+    let err = delete_signing_key(
+      &auth,
+      "someone-else",
+      x25519.public().to_string(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status, StatusCode::FORBIDDEN);
+    delete_signing_key(&auth, "owner", x25519.public().to_string())
+      .await
+      .unwrap();
+
+    // An Ed25519 key is found in any encoding.
+    let ed25519 = mogh_pki::EncodedKeyPair::generate(
+      mogh_pki::PkiKind::Signature,
+    )
+    .unwrap();
+    let auth = KnownKeyAuth {
+      known: ed25519.public().to_string(),
+    };
+    delete_signing_key(&auth, "owner", ed25519.public.as_pem())
+      .await
+      .unwrap();
   }
 
   /// The secret of a new api key is hashed on the bounded budget
