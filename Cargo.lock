@@ -2641,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_supporter"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "arc-swap",

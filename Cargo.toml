@@ -34,7 +34,7 @@ mogh_resolver = "1.0.1"
 mogh_resolver_derive = "1.0.1"
 mogh_secret_file = "1.3.0"
 mogh_server = "2.2.0"
-mogh_supporter = "1.0.0"
+mogh_supporter = "1.0.1"
 mogh_validations = "1.0.3"
 
 # CICADA
