@@ -1,16 +1,11 @@
 # Mogh Supporter
 
-Mogh supporter keys, both sides of the server: the key format, with
-parsing and signing, and the embedded api which serves the key to the
-browser and lets admins manage it, and the branding of an
-organization's key, in the UI. The [typescript package](../ts)
-verifies the key offline in the browser, and [mogh_ui](../../ui)
-renders the badge and the settings section.
+Mogh Supporter schema, client, and embedded API. 
 
-A key unlocks nothing, every feature stays free: a valid key only
-makes the topbar show a supporter badge instead of the "Become a
-supporter" button. A bad key means no badge, never an error. Nothing
-here talks to mogh.tech at runtime.
+The [typescript package](../ts) verifies the key offline in the browser,
+and [mogh_ui](../../ui) renders the badge and the settings section.
+
+Nothing talks to mogh.tech at runtime.
 
 ```rust,ignore
 // With the `server` feature. On the app's `AuthImpl` of
