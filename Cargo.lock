@@ -650,9 +650,9 @@ dependencies = [
 
 [[package]]
 name = "cicada_client"
-version = "0.21.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3110b7d40cecac064206e4fcada9b22d14bfaf5fb8e0ed375dda03332d446af8"
+checksum = "4cdedfc3eb4998532434a1e6b87145034443743ffa7fdfebd5be5b5c9011d549"
 dependencies = [
  "async_timing_util",
  "chrono",
@@ -678,9 +678,9 @@ dependencies = [
 
 [[package]]
 name = "cicada_loader"
-version = "0.21.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4df5af5c0a0f9ff9861cbe3620bc9aec745552bdd4ff2ed5aefbe19c6d79ac59"
+checksum = "0a78ca062846a951cffeeb43f59ee5d49a95368d7a872c1ea7c971ab3f6d3197"
 dependencies = [
  "anyhow",
  "cicada_client",
@@ -2280,9 +2280,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libm"
@@ -2482,7 +2482,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_config"
-version = "3.0.2"
+version = "3.0.3"
 dependencies = [
  "cicada_loader",
  "colored",
@@ -4578,9 +4578,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
 dependencies = [
  "bytes",
  "libc",
@@ -5147,9 +5147,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.26.1"
+version = "1.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
+checksum = "97277d36b9c3ace13e58fa6e753f8b0bbbf302a18dd193240d70f9e29681059a"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",

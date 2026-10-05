@@ -23,7 +23,7 @@ mogh_auth_server = "7.0.0"
 
 # MOGH
 mogh_cache = "1.2.0"
-mogh_config = "3.0.2"
+mogh_config = "3.0.3"
 mogh_encryption = "2.1.0"
 mogh_error = "1.1.0"
 mogh_logger = "1.5.0"
@@ -38,11 +38,11 @@ mogh_supporter = "1.0.1"
 mogh_validations = "1.0.3"
 
 # CICADA
-cicada_loader = "0.21.0"
+cicada_loader = "0.22.0"
 
 # ASYNC
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "form", "rustls"] }
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.53.2", features = ["full"] }
 arc-swap = "1.9.2"
 
 # SERVER
@@ -132,10 +132,9 @@ syn = "3.0.6"
 
 # MISC
 clap = { version = "4.6.7", features = ["derive"] }
-uuid = { version = "1.26.1", features = ["v4"] }
+uuid = { version = "1.27.0", features = ["v4"] }
 typeshare = "1.0.5"
-# The extended attributes (acls, security labels) mogh_secret_file keeps.
-libc = "0.2.189"
+libc = "0.2.190"
 wildcard = "0.3.0"
 ipnet = "2.12.2"
 colored = "3.1.1"
