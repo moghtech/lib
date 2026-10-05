@@ -3,7 +3,8 @@
 Common UI components and styling used across Mogh apps
 ([Mantine](https://mantine.dev) + React), including the pages and
 components of [mogh_auth](../auth) (login, profile, login providers,
-trusted issuers).
+trusted issuers), and the supporter badge of
+[mogh_supporter](../supporter/ts) (`useSupporter`, `SupporterBadge`).
 
 ## Requirements
 
@@ -74,6 +75,60 @@ import { ThemeProvider } from "mogh_ui";
 - `useKeyListener` / `useShiftKeyListener` / `useCtrlKeyListener`: a
   handler returning `false` declines the press, which then keeps its
   browser default (eg. Enter on a focused button).
+- The supporter badge and its settings talk to the app's supporter api
+  (`mogh_supporter`'s `server::router`, mounted at `/supporter`) on
+  their own: call `setSupporterUrl` before the first render, like
+  `setAuthUrl`. `useSupporter({ app, releaseDate, rootKeys })` asks
+  for the key in use once per page load and verifies it in the browser
+  under `rootKeys`, the root public keys the app hardcodes (each app
+  has its own, the libraries ship none),
+  `SupporterBadge` renders it: a quiet "Become a supporter" (subtle,
+  dimmed) without a valid key, else the name with the heart, or the
+  organisation's icon (its branding, below). It goes next to the
+  app's home button, takes the props of the button it is (eg.
+  `visibleFrom`, to leave it out on a small screen), and its text is
+  cut with an ellipsis where the topbar is short of room. Both have a
+  hover card for the app's own words: `unsupportedText` on the offer
+  (what supporting the app means; no card without it), and
+  `supportedText` under the thanks on a supporter's badge (a node, or
+  a function of the supporter). Don't say there that a key unlocks
+  anything or expires.
+  `releaseDate` is the `YYYY-MM-DD`
+  of the build, set at build time, never the current date. The result
+  stays in memory for the life of the page, never in storage.
+  `SupporterKeyConfig` is the settings section for admins: what is
+  configured (never the key itself), a field to paste a key into,
+  and its removal; the badge updates without a reload.
+- With the key of an organization or sponsor, `SupporterKeyConfig`
+  also edits the branding, in a `Config` section of its own under the
+  key's (its changes are listed in the confirm dialog before they are
+  saved; an uploaded image shows there by its name and size): an icon
+  in place of the heart (an image
+  url, or an uploaded image of up to 256 KB), the icon's width and
+  height, a link the badge opens in a new tab instead of the Mogh
+  supporter page, a switch to hide the name for an icon which
+  includes it, a switch to show the name in capital letters, and a
+  switch to show icon and name in place of the app's home button. The topbar gets it from `useSupporterBrand({ app,
+  releaseDate, rootKeys })`: `supporter` and `branding` go to
+  `SupporterBadge`,
+  and while `homeBrand` is set the app renders its home button from
+  it (`SupporterBrandIcon` for the icon, `homeBrand.name` for the
+  text, still linking to `/`), and the badge renders nothing. While
+  `homeBrand.uppercaseName` is set the app shows the name in capitals
+  (a `text-transform`, like its own name). While
+  `homeBrand.hideName` is set the icon is the whole home button, with
+  the name as its `aria-label`: it is only set with an icon, and not
+  while the icon fails to load, so the name is never lost. The
+  branding only shows for a key the browser verified as an
+  organization's or sponsor's.
+- `SupporterBrandIcon` shows the icon as high as the branding sets,
+  else 20 pixels (`DEFAULT_ICON_HEIGHT` of mogh_supporter), wherever
+  it shows, and as wide as the branding sets, else as the image is at
+  that height. `maxWidth` caps the width for a narrow place, eg. the
+  topbar of a small screen. An icon can be up to 56 pixels high, which
+  fits a topbar of 62: `supporterIconHeight(brand)` is the height to
+  make room for (a Mantine `Button` has a fixed height and clips what
+  is higher).
 
 ## Development
 

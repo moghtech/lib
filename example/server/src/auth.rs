@@ -32,6 +32,7 @@ use mogh_auth_server::{
 };
 use mogh_error::{AddStatusCode as _, AddStatusCodeError as _};
 use mogh_rate_limit::RateLimiter;
+use mogh_supporter::{SupporterBranding, server::SupporterImpl};
 use tracing::{info, warn};
 
 use crate::{
@@ -967,4 +968,62 @@ pub async fn sync_workload_users_on_startup() -> anyhow::Result<()> {
     );
   }
   Ok(())
+}
+
+/// The supporter key (`mogh_supporter`): the example keeps a key an
+/// admin sets in its database, encrypted like its other secrets,
+/// and an organization's branding next to it, as JSON.
+impl SupporterImpl for ExampleAuthImpl {
+  fn supporter_app(&self) -> &'static str {
+    state::SUPPORTER_APP
+  }
+
+  fn supporter_config_key(&self) -> &str {
+    &core_config().supporter_key
+  }
+
+  /// The example trusts the test root of the fixture, which a release
+  /// must never: an app hardcodes its own root keys of mogh.tech here
+  /// (and the same ones in its UI).
+  fn supporter_root_keys(&self) -> &'static [&'static str] {
+    &[mogh_supporter::fixture::ROOT]
+  }
+
+  fn load_stored_supporter_key(
+    &self,
+  ) -> DynFuture<mogh_error::Result<Option<String>>> {
+    Box::pin(async {
+      db::load_supporter_key().await.map_err(Into::into)
+    })
+  }
+
+  fn store_supporter_key(
+    &self,
+    key: Option<String>,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async move {
+      db::store_supporter_key(key.as_deref())
+        .await
+        .map_err(Into::into)
+    })
+  }
+
+  fn load_supporter_branding(
+    &self,
+  ) -> DynFuture<mogh_error::Result<Option<SupporterBranding>>> {
+    Box::pin(async {
+      db::load_supporter_branding().await.map_err(Into::into)
+    })
+  }
+
+  fn store_supporter_branding(
+    &self,
+    branding: SupporterBranding,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async move {
+      db::store_supporter_branding(&branding)
+        .await
+        .map_err(Into::into)
+    })
+  }
 }

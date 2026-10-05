@@ -32,6 +32,8 @@ pub struct Env {
   pub example_jwt_ttl_seconds: Option<u64>,
   pub example_encryption_key: Option<String>,
   pub example_encryption_key_file: Option<PathBuf>,
+  pub example_supporter_key: Option<String>,
+  pub example_supporter_key_file: Option<PathBuf>,
 
   pub example_local_auth: Option<bool>,
   pub example_disable_user_registration: Option<bool>,
@@ -91,6 +93,10 @@ pub struct CoreConfig {
   /// Base64url 32 byte key to encrypt secrets in the database with.
   /// If empty, one is generated next to the database.
   pub encryption_key: String,
+  /// The Mogh supporter key of this instance, which makes the UI
+  /// show a supporter badge (`mogh_supporter`). Empty for none.
+  /// Whitespace in it (a wrapped key) is ignored.
+  pub supporter_key: String,
 
   pub local_auth: bool,
   pub disable_user_registration: bool,
@@ -141,6 +147,7 @@ impl Default for CoreConfig {
       jwt_secret: String::new(),
       jwt_ttl_seconds: 24 * 60 * 60,
       encryption_key: String::new(),
+      supporter_key: String::new(),
       local_auth: true,
       disable_user_registration: false,
       enable_new_users: true,
@@ -232,6 +239,11 @@ fn load_config() -> anyhow::Result<CoreConfig> {
       env.example_encryption_key,
     )
     .unwrap_or(config.encryption_key),
+    supporter_key: maybe_read_item_from_file(
+      env.example_supporter_key_file,
+      env.example_supporter_key,
+    )
+    .unwrap_or(config.supporter_key),
     local_auth: env.example_local_auth.unwrap_or(config.local_auth),
     disable_user_registration: env
       .example_disable_user_registration
@@ -362,6 +374,7 @@ impl mogh_logger::LogConfig for &LoggingConfig {
           "mogh_pki",
           "mogh_server",
           "mogh_auth_server",
+          "mogh_supporter",
         ]
         .into_iter()
         .map(str::to_string)

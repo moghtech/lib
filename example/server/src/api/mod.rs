@@ -26,6 +26,10 @@ pub fn app() -> Router {
   let mut app = Router::new()
     .route("/version", get(|| async { env!("CARGO_PKG_VERSION") }))
     .nest("/auth", mogh_auth_server::api::router::<ExampleAuthImpl>())
+    .nest(
+      "/supporter",
+      mogh_supporter::server::router::<ExampleAuthImpl>(),
+    )
     .nest("/user", user_router())
     .nest("/read", read::router())
     .nest("/write", write::router())

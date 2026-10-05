@@ -1,0 +1,44 @@
+[package]
+name = "mogh_supporter"
+description = "Mogh supporter keys: the key format, the embedded api which serves and manages one, and its client"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# `server`: the embedded api (`server::router`), which an app mounts
+# at `/supporter` with its `AuthImpl` of mogh_auth_server.
+server = [
+  "dep:mogh_auth_server",
+  "dep:mogh_rate_limit",
+  "dep:mogh_request_ip",
+  "dep:arc-swap",
+  "dep:tokio",
+  "dep:strum",
+  "dep:axum",
+]
+
+[dependencies]
+# MOGH
+mogh_error = { workspace = true, features = ["axum"] }
+mogh_resolver.workspace = true
+mogh_auth_server = { workspace = true, optional = true }
+mogh_rate_limit = { workspace = true, optional = true }
+mogh_request_ip = { workspace = true, optional = true }
+# EXTERNAL
+arc-swap = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+strum = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+ed25519-dalek.workspace = true
+data-encoding.workspace = true
+serde_json.workspace = true
+typeshare.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+zeroize.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+sha2.workspace = true

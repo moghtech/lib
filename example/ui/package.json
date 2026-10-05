@@ -21,6 +21,7 @@
     "example_client": "file:../client/ts",
     "lucide-react": "^1.47.0",
     "mogh_auth_client": "file:../../auth/client/ts",
+    "mogh_supporter": "file:../../supporter/ts",
     "mogh_ui": "file:../../ui",
     "monaco-editor": "^0.56.0",
     "monaco-yaml": "^5.5.1",

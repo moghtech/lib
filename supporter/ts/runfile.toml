@@ -1,0 +1,12 @@
+[install-supporter-ts]
+cmd = "npm install"
+
+[build-supporter-ts]
+cmd = "npm run build"
+
+[test-supporter-ts]
+cmd = "npm test"
+
+[publish-supporter-ts]
+description = "Publish the typescript package to npm"
+cmd = "npm publish"

@@ -17,6 +17,7 @@ mod providers;
 mod reauth;
 mod security;
 mod server;
+mod supporter;
 mod token_exchange;
 mod two_factor;
 mod workload;

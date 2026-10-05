@@ -25,7 +25,26 @@ Source: https://github.com/moghtech/lib
 - mogh_resolver
 - mogh_secret_file
 - mogh_server
+- mogh_supporter
 - mogh_validations
+
+### Typescript packages
+
+- mogh_auth_client ([auth/client/ts](auth/client/ts)): the auth api client.
+- mogh_ui ([ui](ui)): common React components, the auth pages, the
+  supporter badge.
+- mogh_supporter ([supporter/ts](supporter/ts)): verifies supporter keys
+  in the browser.
+
+### Supporter keys
+
+[supporter](supporter) is both sides of Mogh supporter keys implementation.
+The Rust crate parses the key and serves the embedded api at `/supporter`,
+over which the browser gets the key signed for its nonce and admins set a
+key from the UI. The typescript package verifies the answer offline in
+the browser, and `mogh_ui` renders the badge and the settings section.
+A key unlocks nothing apart from the vanity features, no functional
+features depend on it.
 
 ### Example app
 

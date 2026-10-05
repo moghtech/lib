@@ -29,6 +29,7 @@ export default defineConfig({
     "monaco-editor",
     "monaco-yaml",
     "mogh_auth_client",
+    "mogh_supporter",
     "prettier",
     /\.scss$/,
   ],

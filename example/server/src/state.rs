@@ -147,6 +147,12 @@ pub fn trusted_issuers_cache()
   CACHE.get_or_init(Default::default)
 }
 
+/// The app the supporter key is for (`SupporterImpl::supporter_app`
+/// in `auth.rs`). The example plays `komodo`: the key of
+/// `mogh_supporter::fixture`, which its tests configure, is for it.
+/// An app passes its own name.
+pub const SUPPORTER_APP: &str = "komodo";
+
 /// How long [GetStatsResponse] is reused for.
 pub const STATS_VALID_FOR_MS: i64 = 2_000;
 

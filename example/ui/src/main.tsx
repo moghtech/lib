@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Notifications } from "@mantine/notifications";
-import { setAuthUrl, ThemeProvider } from "mogh_ui";
+import { setAuthUrl, setSupporterUrl, ThemeProvider } from "mogh_ui";
 import { Router } from "@/router";
 
 import "@mantine/core/styles.css";
@@ -19,8 +19,10 @@ const client = new QueryClient({
   defaultOptions: { queries: { retry: false } },
 });
 
-// mogh_ui talks to the auth api on its own, it only needs the url.
+// mogh_ui talks to the auth and supporter apis on its own, it only
+// needs the urls.
 setAuthUrl(EXAMPLE_BASE_URL + "/auth");
+setSupporterUrl(EXAMPLE_BASE_URL + "/supporter");
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

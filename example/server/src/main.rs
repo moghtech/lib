@@ -43,6 +43,10 @@ async fn app() -> anyhow::Result<()> {
   db::init().await?;
   // Fails here if the encryption key is invalid.
   crypto::encryption_key();
+  // The supporter key in use: the stored one, else the config's.
+  mogh_supporter::server::init::<auth::ExampleAuthImpl>()
+    .await
+    .context("Failed to load the supporter key")?;
   // Static trusted issuers may have changed in the config.
   auth::sync_workload_users_on_startup()
     .await

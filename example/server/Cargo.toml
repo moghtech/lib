@@ -28,6 +28,7 @@ mogh_request_ip.workspace = true
 mogh_resolver.workspace = true
 mogh_secret_file.workspace = true
 mogh_server.workspace = true
+mogh_supporter = { workspace = true, features = ["server"] }
 mogh_validations.workspace = true
 # EXTERNAL
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "derive", "macros"] }

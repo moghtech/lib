@@ -16,6 +16,19 @@ export const IDP_PORT = 9231;
 export const APP_URL = `http://localhost:${APP_PORT}`;
 export const IDP_URL = `http://127.0.0.1:${IDP_PORT}`;
 
+/**
+ * The supporter key of mogh_supporter's fixture (for `komodo`, which
+ * the example plays), wrapped like a pasted key would be. An admin
+ * sets it in the settings in e2e/supporter.spec.ts, with the branding
+ * of the organization, and the badge shows "Acme Corp" for it.
+ */
+export const SUPPORTER_KEY = [
+  "qGF2AWFrSP6BLBLzq0zmYWlQAZCjwntqfMKx8EpdnjyPIWFhZmtvbW9kb2FuaUFjbWUg",
+  "Q29ycGF0bG9yZ2FuaXphdGlvbmFzajIwMjUtMDEtMTVhY2oyMDI3LTA5LTMw.B569urTv",
+  "MsFeTldR8Cmt9cnCY7SB81t_cG4-53VueFqF51BOmrAmoYk1o0toBHlUe0Z0WBpN2sGD",
+  "Eri4TVCwCA.NUVlvQ9tLCimq2RpjTvrr9t44m-zUjHDDVk5nymZQQw",
+].join("\n");
+
 export default defineConfig({
   testDir: "./e2e",
   globalSetup: "./e2e/global-setup.ts",

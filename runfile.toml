@@ -11,6 +11,16 @@ cmd = """
 node ./auth/client/ts/generate_types.mjs && \
 cd ./auth/client/ts && npm run build"""
 
+[install-supporter-ts]
+alias = "ist"
+description = "Installs the supporter ts package dependencies"
+cmd = "cd ./supporter/ts && npm install"
+
+[test-supporter-ts]
+alias = "tst"
+description = "Builds and tests the supporter ts package"
+after = "install-supporter-ts"
+cmd = "cd ./supporter/ts && npm test"
 
 [example-server]
 alias = "es"

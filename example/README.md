@@ -36,6 +36,7 @@ Which crate is used where:
 | `mogh_pki` | `GenerateKeyPair` (the Ed25519 keys of signing keys). The auth server verifies signed requests with it. |
 | `mogh_cache` | Cached login providers / trusted issuers, and the `GetStats` timeout cache. |
 | `mogh_validations` | Note titles, groups, `ValidateString`. |
+| `mogh_supporter` | The supporter api under `/supporter`: `SupporterImpl` in `server/src/auth.rs` (the `supporter_key` config, the stored key and an organization's branding in the database), the badge and the branded home button in the topbar (`ui/src/app`) and the settings section (`ui/src/pages/settings.tsx`), from `mogh_ui`. The example plays `komodo`, the app of the crate's fixture key, and trusts the fixture's test root, which a release must not. |
 
 ## Run it
 
@@ -57,6 +58,14 @@ The first user to sign up is the admin. Everything in `CoreConfig`
 toml / yaml / json) or with `EXAMPLE_*` environment variables, which win.
 Secrets also take a `_FILE` variant, eg. `EXAMPLE_JWT_SECRET_FILE`.
 
+To see the supporter badge, paste the key of `mogh_supporter::fixture`
+(`supporter/rs/src/fixture.rs`) into the settings page as the admin, or
+set it as `EXAMPLE_SUPPORTER_KEY`. The key is an organization's, so the
+settings then also offer its branding: an icon (eg. `/mogh-512x512.png`,
+or an uploaded image), its size, hiding the name next to it, and showing
+it in place of the "Mogh Example" home button. The UI compares the key against the date of
+its build (`EXAMPLE_RELEASE_DATE` at build time, else the current date).
+
 UI, either with the dev server against the running api:
 
 ```sh
@@ -76,9 +85,10 @@ cd example/ui && npm run build
 EXAMPLE_UI_PATH=example/ui/dist cargo run -p example_server
 ```
 
-The UI uses `mogh_ui` and `mogh_auth_client` from this repository (`file:`
-dependencies), so build them after changing them: `cd ui && npm run build`,
-`cd auth/client/ts && npm run build`.
+The UI uses `mogh_ui`, `mogh_auth_client` and `mogh_supporter` from this
+repository (`file:` dependencies), so build them after changing them:
+`cd ui && npm run build`, `cd auth/client/ts && npm run build`,
+`cd supporter/ts && npm run build`.
 
 After changing the api types, regenerate the typescript types
 (needs the `typeshare` cli) and rebuild the client:
@@ -112,6 +122,7 @@ config and key files) plus an in process mock identity provider, see
 | `reauth` | Credential changes need a recent login, api keys can't make them, disabling the check |
 | `security` | Rate limiting, forwarded ips / trusted proxies, user cidr whitelist, headers, CORS, session cookie |
 | `app_api` | The resolver api: ownership, validation, encryption at rest, caching, both request forms |
+| `supporter` | The supporter api: config forms, the signed answer the fixture pins, nonce checks, invalid keys ignored and logged without the key, admins setting and removing the key (persisted encrypted, used over the config's), an organization's branding (validated, for admins and organization keys, persisted, an uploaded icon never logged) |
 | `server` | Static UI hosting, config layering, startup failures, token expiry, json logs |
 
 Passkeys need an authenticator, they are covered by the browser tests.
@@ -129,8 +140,12 @@ Playwright builds and starts the mock identity provider and the server (fresh
 database in `ui/.e2e`) by itself. Covered: local signup / login, the react-query
 read / write / execute hooks (notes, tools), api keys, logging in again for
 credential changes, TOTP (retry, recovery code, cancel), passkeys with the virtual authenticator of the browser, OIDC login
-/ linking / second factor through the provider's pages, and the admin settings
-(`LoginProvidersTable`, `TrustedIssuersTable`, users).
+/ linking / second factor through the provider's pages, the admin settings
+(`LoginProvidersTable`, `TrustedIssuersTable`, users), and the supporter key
+(set and removed in the settings, the badge following without a reload; not
+shown for an answer changed on the way or signed for another nonce; an
+organization's branding: icon url and upload, size, the icon alone without
+the name, and the home button).
 
 ## Adding to it
 

@@ -11,6 +11,7 @@ repository.workspace = true
 # MOGH
 mogh_auth_client = { workspace = true, features = ["pki"] }
 mogh_resolver.workspace = true
+mogh_supporter.workspace = true
 mogh_error.workspace = true
 # EXTERNAL
 serde_json.workspace = true

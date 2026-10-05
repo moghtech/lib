@@ -1300,6 +1300,7 @@ dependencies = [
  "mogh_auth_client",
  "mogh_error",
  "mogh_resolver",
+ "mogh_supporter",
  "reqwest 0.13.5",
  "serde",
  "serde_json",
@@ -1345,6 +1346,7 @@ dependencies = [
  "mogh_resolver",
  "mogh_secret_file",
  "mogh_server",
+ "mogh_supporter",
  "mogh_validations",
  "reqwest 0.13.5",
  "serde",
@@ -2635,6 +2637,32 @@ dependencies = [
  "tower-sessions",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "mogh_supporter"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "axum",
+ "data-encoding",
+ "ed25519-dalek",
+ "mogh_auth_server",
+ "mogh_error",
+ "mogh_rate_limit",
+ "mogh_request_ip",
+ "mogh_resolver",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "strum",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "typeshare",
+ "zeroize",
 ]
 
 [[package]]

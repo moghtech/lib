@@ -16,6 +16,7 @@ use mogh_auth_client::{
   passkey::Passkey,
 };
 use mogh_auth_server::provider::workload::WorkloadAccess;
+use mogh_supporter::SupporterBranding;
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{
   SqlitePool,
@@ -856,6 +857,78 @@ pub async fn delete_login_provider(id: &str) -> anyhow::Result<()> {
     .await
     .context("Failed to remove links to login provider")?;
   tx.commit().await.context("Failed to commit transaction")
+}
+
+// =================
+// = SUPPORTER KEY =
+// =================
+
+/// The key an admin set over the supporter api, if any. It holds the
+/// instance private key, so it is stored encrypted.
+pub async fn load_supporter_key() -> anyhow::Result<Option<String>> {
+  sqlx::query_as::<_, (String,)>(
+    "SELECT data FROM supporter_key WHERE id = 1",
+  )
+  .fetch_optional(db())
+  .await
+  .context("Failed to query supporter key")?
+  .map(|(data,)| crypto::open(&data, "supporter_key"))
+  .transpose()
+}
+
+/// Keeps the key an admin set, or removes it (`None`).
+pub async fn store_supporter_key(
+  key: Option<&str>,
+) -> anyhow::Result<()> {
+  match key {
+    Some(key) => {
+      sqlx::query(
+        "INSERT INTO supporter_key (id, data, updated_at) VALUES (1, ?, ?) \
+         ON CONFLICT (id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+      )
+      .bind(crypto::seal(key, "supporter_key")?)
+      .bind(unix_timestamp_ms())
+      .execute(db())
+      .await
+      .context("Failed to store supporter key")?;
+    }
+    None => {
+      sqlx::query("DELETE FROM supporter_key WHERE id = 1")
+        .execute(db())
+        .await
+        .context("Failed to remove supporter key")?;
+    }
+  }
+  Ok(())
+}
+
+/// The branding an admin set over the supporter api, if any.
+pub async fn load_supporter_branding()
+-> anyhow::Result<Option<SupporterBranding>> {
+  sqlx::query_as::<_, (String,)>(
+    "SELECT data FROM supporter_branding WHERE id = 1",
+  )
+  .fetch_optional(db())
+  .await
+  .context("Failed to query supporter branding")?
+  .map(|(data,)| from_json(&data))
+  .transpose()
+}
+
+/// Keeps the branding an admin set, replacing what was kept.
+pub async fn store_supporter_branding(
+  branding: &SupporterBranding,
+) -> anyhow::Result<()> {
+  sqlx::query(
+    "INSERT INTO supporter_branding (id, data, updated_at) VALUES (1, ?, ?) \
+     ON CONFLICT (id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+  )
+  .bind(to_json(branding)?)
+  .bind(unix_timestamp_ms())
+  .execute(db())
+  .await
+  .context("Failed to store supporter branding")?;
+  Ok(())
 }
 
 // ===================

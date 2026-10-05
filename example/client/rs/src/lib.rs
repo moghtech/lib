@@ -10,6 +10,9 @@ use mogh_auth_client::{
 
 pub use mogh_auth_client::signature::{SignedRequest, sign_request};
 use mogh_error::deserialize_error;
+use mogh_supporter::api::{
+  MoghSupporterReadRequest, MoghSupporterWriteRequest,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use typeshare::typeshare;
@@ -18,6 +21,7 @@ pub mod api;
 pub mod entities;
 
 pub use mogh_auth_client as auth;
+pub use mogh_supporter as supporter;
 
 use crate::api::{
   execute::ExampleExecuteRequest, read::ExampleReadRequest,
@@ -153,6 +157,30 @@ impl ExampleClient {
     T::Response: DeserializeOwned,
   {
     self.post("/auth/manage", T::req_type(), &request).await
+  }
+
+  /// The supporter api's read requests (`mogh_supporter`).
+  pub async fn supporter_read<T>(
+    &self,
+    request: T,
+  ) -> anyhow::Result<T::Response>
+  where
+    T: Serialize + MoghSupporterReadRequest,
+    T::Response: DeserializeOwned,
+  {
+    self.post("/supporter/read", T::req_type(), &request).await
+  }
+
+  /// The supporter api's write requests, for admins.
+  pub async fn supporter_write<T>(
+    &self,
+    request: T,
+  ) -> anyhow::Result<T::Response>
+  where
+    T: Serialize + MoghSupporterWriteRequest,
+    T::Response: DeserializeOwned,
+  {
+    self.post("/supporter/write", T::req_type(), &request).await
   }
 
   /// Adds the credential headers to `request`. A signature (signing

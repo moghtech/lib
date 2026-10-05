@@ -3,6 +3,7 @@ import {
   LoginProvidersTable,
   Page,
   Section,
+  SupporterKeyConfig,
   TrustedIssuersTable,
 } from "mogh_ui";
 import { Settings as SettingsIcon, Users } from "lucide-react";
@@ -16,6 +17,8 @@ export default function Settings() {
   return (
     <Page title="Settings" icon={SettingsIcon}>
       <UsersTable ownId={user.id} />
+      {/* Manages itself over the supporter api (admin only). */}
+      <SupporterKeyConfig />
       {/* Both manage themselves over the auth api (admin only). */}
       <LoginProvidersTable />
       <TrustedIssuersTable groupOptions={["deployers", "readers"]} />
