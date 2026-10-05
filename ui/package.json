@@ -64,7 +64,7 @@
     "@types/react-dom": "^19.3.0",
     "lucide-react": "^1.52.0",
     "mogh_auth_client": "^7.0.0",
-    "mogh_supporter": "file:../supporter/ts",
+    "mogh_supporter": "^1.0.0",
     "monaco-editor": "^0.57.0",
     "monaco-yaml": "^5.5.1",
     "prettier": "^3.9.9",
