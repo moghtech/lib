@@ -640,7 +640,7 @@ function SupporterBrandingConfig({
               icon_width: (width, set) => (
                 <ConfigItem
                   label="Width"
-                  description={`In pixels. Max of ${MAX_ICON_WIDTH} px. If unset, the value for height is used.`}
+                  description={`In pixels. Max of ${MAX_ICON_WIDTH} px. Default: automatic`}
                 >
                   {pixels("width", width, (icon_width) => set({ icon_width }))}
                 </ConfigItem>
