@@ -1,6 +1,6 @@
 {
   "name": "mogh_ui",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "description": "Common UI components and styling used across Mogh apps.",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,10 +24,10 @@
     "test": "node --test \"tests/**/*.test.ts\""
   },
   "peerDependencies": {
-    "@mantine/core": "^9.7.0",
-    "@mantine/form": "^9.7.0",
-    "@mantine/hooks": "^9.7.0",
-    "@mantine/notifications": "^9.7.0",
+    "@mantine/core": "^9.7.1",
+    "@mantine/form": "^9.7.1",
+    "@mantine/hooks": "^9.7.1",
+    "@mantine/notifications": "^9.7.1",
     "@monaco-editor/react": "^4.7.0",
     "@tanstack/react-table": "^9.2.6",
     "@tanstack/react-query": "^5.104.1",
@@ -52,10 +52,10 @@
     }
   },
   "devDependencies": {
-    "@mantine/core": "^9.7.0",
-    "@mantine/form": "^9.7.0",
-    "@mantine/hooks": "^9.7.0",
-    "@mantine/notifications": "^9.7.0",
+    "@mantine/core": "^9.7.1",
+    "@mantine/form": "^9.7.1",
+    "@mantine/hooks": "^9.7.1",
+    "@mantine/notifications": "^9.7.1",
     "@monaco-editor/react": "^4.7.0",
     "@tanstack/query-core": "^5.104.1",
     "@tanstack/react-query": "^5.104.1",
