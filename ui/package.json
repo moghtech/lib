@@ -62,7 +62,7 @@
     "@tanstack/react-table": "^9.2.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "lucide-react": "^1.52.0",
+    "lucide-react": "^1.53.0",
     "mogh_auth_client": "^7.0.0",
     "mogh_supporter": "^1.0.0",
     "monaco-editor": "^0.57.0",
