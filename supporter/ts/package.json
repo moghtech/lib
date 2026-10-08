@@ -1,6 +1,6 @@
 {
   "name": "mogh_supporter",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Verifies Mogh supporter keys in the browser, offline.",
   "repository": {
     "url": "https://github.com/moghtech/lib"
@@ -15,7 +15,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "license": "MPL-2.0",
   "publishConfig": {
