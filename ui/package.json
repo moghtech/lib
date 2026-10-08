@@ -1,6 +1,6 @@
 {
   "name": "mogh_ui",
-  "version": "3.1.2",
+  "version": "3.1.3",
   "description": "Common UI components and styling used across Mogh apps.",
   "type": "module",
   "main": "./dist/index.js",
@@ -15,7 +15,8 @@
     "./theme.scss": "./dist/theme.scss"
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "scripts": {
     "build": "tsup && tsc --emitDeclarationOnly && cd src && find . -name '*.scss' -exec cp --parents {} ../dist \\;",
