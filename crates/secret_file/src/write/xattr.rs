@@ -32,7 +32,7 @@ const MAX_VALUE_SIZE: usize = 64 * 1024;
 /// what those bits allow, so the temp file (`0600` until now) never
 /// grants more than the existing file does.
 ///
-/// Fails with a [not permitted](super::not_permitted) error when an
+/// Fails with a [not permitted](super::is_not_permitted) error when an
 /// attribute can't be set or removed, eg. without the permission to
 /// relabel a file, or when the filesystem doesn't support it.
 pub(super) fn copy_access_control(

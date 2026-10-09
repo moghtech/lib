@@ -3,12 +3,19 @@ use std::{
   str::FromStr,
 };
 
-/// NOTE. This function will panic if file is non-None and fails to read file contents
+/// The item in the file `var_file` names (a `*_FILE` variable, eg.
+/// a docker compose secret), trimmed and parsed, else `var`. A blank
+/// `var_file` counts as no file.
+///
+/// NOTE. This function will panic if the file fails to be read, or
+/// its contents to parse.
 pub fn maybe_read_item_from_file<T: FromStrDebugErr>(
   var_file: Option<PathBuf>,
   var: Option<T>,
 ) -> Option<T> {
-  let Some(path) = var_file else { return var };
+  let Some(path) = file_path(var_file) else {
+    return var;
+  };
   let res = std::fs::read_to_string(&path)
     .map_err(|err| Error::<T>::ReadFileError {
       path: path.clone(),
@@ -24,46 +31,30 @@ pub fn maybe_read_item_from_file<T: FromStrDebugErr>(
   Some(res)
 }
 
-/// NOTE. This function will panic if file is non-None and fails to read file contents
-#[cfg(feature = "tokio")]
-pub async fn maybe_read_item_from_file_async<T: FromStrDebugErr>(
-  var_file: Option<PathBuf>,
-  var: Option<T>,
-) -> Option<T> {
-  let Some(path) = var_file else { return var };
-  let res = tokio::fs::read_to_string(&path)
-    .await
-    .map_err(|err| Error::<T>::ReadFileError {
-      path: path.clone(),
-      err,
-    })
-    .unwrap();
-  let res = T::from_str(res.trim())
-    .map_err(|err| Error::<T>::ParseValueError {
-      path,
-      err: err.into(),
-    })
-    .unwrap();
-  Some(res)
-}
-
-/// NOTE. This function will panic if file is non-None and fails to read file contents
+/// The comma separated list in the file `var_file` names (a `*_FILE`
+/// variable), else `var`. A blank `var_file` counts as no file.
+///
+/// NOTE. This function will panic if the file fails to be read, or
+/// an item to parse.
 pub fn maybe_read_list_from_file<T: FromStrDebugErr>(
   var_file: Option<PathBuf>,
   var: Option<Vec<T>>,
 ) -> Option<Vec<T>> {
-  let Some(path) = var_file else { return var };
+  let Some(path) = file_path(var_file) else {
+    return var;
+  };
   Some(parse_list_from_file(&path).unwrap())
 }
 
-/// NOTE. This function will panic if file is non-None and fails to read file contents
-#[cfg(feature = "tokio")]
-pub async fn maybe_read_list_from_file_async<T: FromStrDebugErr>(
-  var_file: Option<PathBuf>,
-  var: Option<Vec<T>>,
-) -> Option<Vec<T>> {
-  let Some(path) = var_file else { return var };
-  Some(parse_list_from_file_async(&path).await.unwrap())
+/// The file a `*_FILE` variable names. A blank one counts as unset,
+/// as a blank variable does elsewhere: compose files template
+/// optional secrets as `SECRET_FILE: ${SECRET_FILE:-}`, which envy
+/// hands over as `Some("")`, and reading "" would panic instead of
+/// falling back to the plain value.
+fn file_path(var_file: Option<PathBuf>) -> Option<PathBuf> {
+  var_file.filter(|path| {
+    !path.to_str().is_some_and(|path| path.trim().is_empty())
+  })
 }
 
 pub trait FromStrDebugErr: FromStr + std::fmt::Debug {
@@ -95,20 +86,6 @@ fn parse_list_from_file<T: FromStrDebugErr>(
       err,
     }
   })?;
-  parse_list_from_contents(path, &contents)
-}
-
-#[cfg(feature = "tokio")]
-async fn parse_list_from_file_async<T: FromStrDebugErr>(
-  path: &Path,
-) -> Result<Vec<T>, Error<T>> {
-  let contents =
-    tokio::fs::read_to_string(path).await.map_err(|err| {
-      Error::ReadFileError {
-        path: path.to_path_buf(),
-        err,
-      }
-    })?;
   parse_list_from_contents(path, &contents)
 }
 
@@ -174,6 +151,32 @@ mod tests {
     assert_eq!(res, Some(42));
   }
 
+  /// A blank `_FILE` variable (eg. `SECRET_FILE=` from a compose
+  /// template, which envy hands over as `Some("")`) counts as
+  /// unset: the plain value is used, rather than reading "".
+  #[test]
+  fn blank_file_path_counts_as_no_file() {
+    for blank in ["", " ", "\t\n"] {
+      let blank = || Some(PathBuf::from(blank));
+      assert_eq!(
+        maybe_read_item_from_file(blank(), Some("var".to_string())),
+        Some("var".to_string())
+      );
+      assert_eq!(
+        maybe_read_item_from_file::<String>(blank(), None),
+        None
+      );
+      assert_eq!(
+        maybe_read_list_from_file(blank(), Some(vec![1i64, 2])),
+        Some(vec![1, 2])
+      );
+      assert_eq!(
+        maybe_read_list_from_file::<i64>(blank(), None),
+        None
+      );
+    }
+  }
+
   #[test]
   #[should_panic]
   fn missing_file_panics() {
@@ -217,36 +220,5 @@ mod tests {
       Some(vec![1, 2])
     );
     assert_eq!(maybe_read_list_from_file::<i64>(None, None), None);
-  }
-
-  #[cfg(feature = "tokio")]
-  mod tokio_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn async_item_and_list() {
-      let path = temp_file("async_item", "  99 \n");
-      let res = maybe_read_item_from_file_async::<i64>(
-        Some(path.clone()),
-        None,
-      )
-      .await;
-      std::fs::remove_file(path).unwrap();
-      assert_eq!(res, Some(99));
-
-      let path = temp_file("async_list", "4,5, 6,\n");
-      let res = maybe_read_list_from_file_async::<i64>(
-        Some(path.clone()),
-        None,
-      )
-      .await;
-      std::fs::remove_file(path).unwrap();
-      assert_eq!(res, Some(vec![4, 5, 6]));
-
-      assert_eq!(
-        maybe_read_item_from_file_async(None, Some(1i64)).await,
-        Some(1)
-      );
-    }
   }
 }

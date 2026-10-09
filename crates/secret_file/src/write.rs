@@ -94,12 +94,167 @@ pub async fn write_async(
   path: impl AsRef<Path>,
   contents: impl AsRef<[u8]>,
 ) -> std::io::Result<()> {
-  let path = path.as_ref().to_path_buf();
-  let contents = ClearOnDrop(contents.as_ref().to_vec());
-  match tokio::task::spawn_blocking(move || {
-    write_file(&path, &contents.0)
-  })
-  .await
+  write_blocking(path.as_ref(), contents.as_ref(), write_file).await
+}
+
+/// Writes data to a new file at path, never over an existing one.
+/// `std::fs` sync version.
+///
+/// For files which must never be overwritten, like a generated key:
+/// two processes racing to create one end up with the same key, as
+/// the second gets an error of kind
+/// [AlreadyExists](ErrorKind::AlreadyExists), and can read the file
+/// the first created. The file is created with `0600` permissions
+/// (on unix), and its parent directories as needed.
+///
+/// Anything at the path (a file, a directory, a symlink, even a
+/// dangling one) is an `AlreadyExists` error, and left untouched.
+///
+/// ## Atomic create
+///
+/// The contents are written to a temp file beside the path and
+/// synced, then the temp file is hard linked to the path (which
+/// fails, rather than replaces, when the path exists), so the file
+/// appears with all of its contents or not at all. Where the
+/// filesystem has no hard links (eg. vfat, some network and FUSE
+/// filesystems), the temp file is renamed onto the path after
+/// checking nothing is there, which a creator racing in between can
+/// lose its file to. The directory is synced afterwards (as are the
+/// directories holding any parents created), so once this returns
+/// `Ok` the new file survives a crash.
+///
+/// A crash between the link and the removal of the temp file's name
+/// leaves that name beside the path: a second link to the new file.
+///
+/// ## Errors
+///
+/// In rare cases, an error syncing the directory (eg. an I/O error)
+/// is returned after the new file is already in place: a retry then
+/// gets `AlreadyExists`.
+pub fn write_new(
+  path: impl AsRef<Path>,
+  contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+  write_new_file(path.as_ref(), contents.as_ref())
+}
+
+/// Writes data to a new file at path, never over an existing one.
+/// `tokio` async version.
+///
+/// Runs [write_new()] on the tokio blocking thread pool, see
+/// [write_new()] for how the file is written, and [write_async()]
+/// for what dropping the returned future does.
+#[cfg(feature = "tokio")]
+pub async fn write_new_async(
+  path: impl AsRef<Path>,
+  contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+  write_blocking(path.as_ref(), contents.as_ref(), write_new_file)
+    .await
+}
+
+/// Replaces the file at path with a new file holding the data, never
+/// writing an existing file in place. `std::fs` sync version.
+///
+/// For contents which must never be seen, or left by a crash,
+/// partially written, like a key. Where [write()] would write the
+/// file in place (see its "In place writes"), this fails instead:
+/// - The file is a bind mount, which can't be renamed onto.
+/// - The directory can't be written to (or is read only).
+/// - The owner / group, or on Linux the ACL / security label, can't
+///   be given to the new file.
+///
+/// A file with other hard links is split off from them: the other
+/// links keep the old contents.
+///
+/// Otherwise the file is written as [write()] writes it: a new file
+/// is created with `0600` permissions (on unix), an existing file
+/// keeps its permissions, owner, group (and on Linux its access ACL
+/// and security label), a symlink at the path is replaced rather
+/// than followed, parent directories are created, and the file and
+/// its directory are synced, so once this returns `Ok` the new
+/// contents survive a crash. A failure leaves the existing file as
+/// it was, except in rare cases an error syncing the directory (eg.
+/// an I/O error), returned after the new contents are in place.
+pub fn replace(
+  path: impl AsRef<Path>,
+  contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+  replace_file(path.as_ref(), contents.as_ref())
+}
+
+/// Gives the open file `to` the owner, group and mode (on unix) of
+/// the file at `from`, and on Linux its access ACL (`setfacl`) and
+/// SELinux / Smack security label: what [write()] keeps when it
+/// replaces a file, for a file written beside another one, to be
+/// renamed onto it (eg. a key rotation's `<key>.next`), so the
+/// rename doesn't change who can read it.
+///
+/// They are set through the handle, so they can't be redirected to
+/// another file. Open `to` without following a symlink (eg. with
+/// `O_NOFOLLOW`), or keep the handle it was written through. Only a
+/// regular file at `from` has them to give: a symlink there (or
+/// anything else) is not followed, and `to` is left as it is, like
+/// [write()] replacing a symlink with a new `0600` file.
+///
+/// Fails when they can't be given, eg. a process which isn't root
+/// can't give a file to another user, or relabeling it is not
+/// permitted ([is_not_permitted] tells these errors apart from eg.
+/// I/O errors). The owner `to` had is put back then, but it may be
+/// left with part of the access control: don't rename it into
+/// place.
+pub fn copy_identity(
+  from: impl AsRef<Path>,
+  to: &File,
+) -> std::io::Result<()> {
+  let from = from.as_ref();
+  // The entry at the path itself, not following a symlink.
+  let existing = std::fs::symlink_metadata(from)?;
+  if !existing.is_file() {
+    return Ok(());
+  }
+  let created = to.metadata()?;
+  copy_identity_onto(from, to, &created, &existing)
+}
+
+/// Whether an error of [copy_identity] is a refusal: the owner,
+/// group, mode or access control are not permitted (or supported)
+/// to be given, eg. without root, or the permission to relabel a
+/// file. Rather than eg. an I/O error. [write()] and [replace()]
+/// tell the same apart when they keep an existing file's.
+pub fn is_not_permitted(e: &std::io::Error) -> bool {
+  matches!(
+    e.kind(),
+    ErrorKind::PermissionDenied
+      | ErrorKind::InvalidInput
+      | ErrorKind::Unsupported
+  )
+}
+
+/// Syncs the directory holding `path` (`.` for a bare file name), so
+/// a rename onto `path`, or its creation or removal, survives a
+/// crash, as [write()] does after its rename. A directory which
+/// can't be synced is skipped (`Ok`): some filesystems can't sync
+/// one, and one without read permission can't be opened.
+pub fn sync_parent_dir(
+  path: impl AsRef<Path>,
+) -> std::io::Result<()> {
+  sync_dir(parent_dir(path.as_ref()))
+}
+
+/// Runs `write` on the tokio blocking thread pool, with a copy of
+/// the contents which is cleared once written. The task is not tied
+/// to the returned future: once spawned, it runs to completion.
+#[cfg(feature = "tokio")]
+async fn write_blocking(
+  path: &Path,
+  contents: &[u8],
+  write: fn(&Path, &[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+  let path = path.to_path_buf();
+  let contents = ClearOnDrop(contents.to_vec());
+  match tokio::task::spawn_blocking(move || write(&path, &contents.0))
+    .await
   {
     Ok(res) => res,
     Err(_) => Err(std::io::Error::other("background task failed")),
@@ -124,18 +279,8 @@ fn write_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     create_dir_all(parent)?;
   }
 
-  // The entry at the path itself, not following a symlink.
-  let existing = match std::fs::symlink_metadata(path) {
-    Ok(existing) => Some(existing),
-    Err(e) if e.kind() == ErrorKind::NotFound => None,
-    Err(e) => return Err(e),
-  };
-
-  // Only a regular file keeps its identity, or is written in place.
-  // Anything else, like a symlink, is replaced by a new file,
-  // so a link is never followed.
-  let Some(existing) = existing.filter(Metadata::is_file) else {
-    replace(path, None, false, contents)?;
+  let Some(existing) = existing_file(path)? else {
+    rename_into_place(path, None, false, contents)?;
     return Ok(());
   };
 
@@ -155,11 +300,115 @@ fn write_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     }
   }
 
-  if replace(path, Some(&existing), in_place, contents)? {
+  if rename_into_place(path, Some(&existing), in_place, contents)? {
     Ok(())
   } else {
     write_in_place(path, &existing, contents)
   }
+}
+
+fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+  if let Some(parent) = path.parent() {
+    create_dir_all(parent)?;
+  }
+  let existing = existing_file(path)?;
+  // Not in place: either renamed into place, or an error.
+  rename_into_place(path, existing.as_ref(), false, contents)
+    .map(|_| ())
+}
+
+fn write_new_file(
+  path: &Path,
+  contents: &[u8],
+) -> std::io::Result<()> {
+  // Checked up front too, so an existing file costs no copy of the
+  // contents on disk. The link decides.
+  if entry_exists(path)? {
+    return Err(already_exists(path));
+  }
+  if let Some(parent) = path.parent() {
+    create_dir_all(parent)?;
+  }
+
+  let (mut file, temp) = create_temp(path)?;
+  file.write_all(contents)?;
+  // The contents have to be on disk
+  // before the link makes them visible.
+  file.sync_all()?;
+  drop(file);
+
+  #[cfg(test)]
+  tests::injected_failure(path)?;
+
+  link_new(temp, path)?;
+  // The new entry (and the temp name's removal) is only durable
+  // once its directory is synced.
+  sync_dir(parent_dir(path))
+}
+
+/// The regular file at `path`, not following a symlink. Only a
+/// regular file keeps its identity, or is written in place: anything
+/// else, like a symlink, is replaced by a new file, so a link is
+/// never followed.
+fn existing_file(path: &Path) -> std::io::Result<Option<Metadata>> {
+  match std::fs::symlink_metadata(path) {
+    Ok(existing) => Ok(Some(existing).filter(Metadata::is_file)),
+    Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+    Err(e) => Err(e),
+  }
+}
+
+/// Whether there is an entry at `path`, not following a symlink.
+fn entry_exists(path: &Path) -> std::io::Result<bool> {
+  match std::fs::symlink_metadata(path) {
+    Ok(_) => Ok(true),
+    Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+    Err(e) => Err(e),
+  }
+}
+
+fn already_exists(path: &Path) -> std::io::Error {
+  std::io::Error::new(
+    ErrorKind::AlreadyExists,
+    format!("{path:?} already exists"),
+  )
+}
+
+/// Gives the written `temp` file the name `path`, never over an
+/// existing entry (an `AlreadyExists` error, and the temp file is
+/// removed).
+fn link_new(temp: TempPath, path: &Path) -> std::io::Result<()> {
+  match hard_link(&temp.path, path) {
+    // Dropping `temp` removes its name, leaving the one at `path`.
+    Ok(()) => Ok(()),
+    Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+      Err(already_exists(path))
+    }
+    // No hard links on this filesystem (`EPERM` on vfat, or not
+    // supported): the best left is a rename after a look.
+    Err(e)
+      if matches!(
+        e.kind(),
+        ErrorKind::PermissionDenied | ErrorKind::Unsupported
+      ) =>
+    {
+      if entry_exists(path)? {
+        return Err(already_exists(path));
+      }
+      std::fs::rename(&temp.path, path)?;
+      temp.keep();
+      Ok(())
+    }
+    Err(e) => Err(e),
+  }
+}
+
+/// [std::fs::hard_link], which `link`s without following a symlink
+/// at `path`, and fails when anything is there.
+fn hard_link(temp: &Path, path: &Path) -> std::io::Result<()> {
+  #[cfg(test)]
+  tests::injected_no_hard_links(path)?;
+  std::fs::hard_link(temp, path)
 }
 
 /// Writes the contents to a new temp file beside `path`, and renames
@@ -167,7 +416,7 @@ fn write_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 /// access control extended attributes of the `existing` file. With
 /// `in_place`, returns `Ok(false)`, leaving `path` untouched, when
 /// the existing file has to be written in place instead.
-fn replace(
+fn rename_into_place(
   path: &Path,
   existing: Option<&Metadata>,
   in_place: bool,
@@ -190,15 +439,15 @@ fn replace(
   };
 
   if let Some(existing) = existing {
-    // Read before copy_identity may give the temp file away: its
-    // owner as created is the writer as the kernel sees it.
+    // Read before copy_identity_onto may give the temp file away:
+    // its owner as created is the writer as the kernel sees it.
     let created = file.metadata()?;
-    match copy_identity(path, &file, &created, existing) {
+    match copy_identity_onto(path, &file, &created, existing) {
       Ok(()) => {}
       // eg. a non-root process can't give a file to another user,
       // the owner is outside the user namespace, or relabeling
       // the file is not permitted.
-      Err(e) if not_permitted(&e) => {
+      Err(e) if is_not_permitted(&e) => {
         if in_place
           && sticky_permits_in_place(path, &created, existing)?
         {
@@ -285,7 +534,7 @@ fn same_file(opened: &Metadata, _existing: &Metadata) -> bool {
 /// Linux its access control extended attributes (ACL and security
 /// label).
 #[cfg(unix)]
-fn copy_identity(
+fn copy_identity_onto(
   path: &Path,
   temp: &File,
   created: &Metadata,
@@ -320,7 +569,7 @@ fn copy_identity(
 /// Only unix has an owner and mode to carry over. The read only flag
 /// is not copied: Windows can't rename onto a read only file anyways.
 #[cfg(not(unix))]
-fn copy_identity(
+fn copy_identity_onto(
   _path: &Path,
   _temp: &File,
   _created: &Metadata,
@@ -344,18 +593,6 @@ fn copy_access_control(
   Ok(())
 }
 
-/// Whether setting the owner / group / mode / access control failed
-/// because it is not permitted (or supported), rather than eg. an
-/// I/O error.
-fn not_permitted(e: &std::io::Error) -> bool {
-  matches!(
-    e.kind(),
-    ErrorKind::PermissionDenied
-      | ErrorKind::InvalidInput
-      | ErrorKind::Unsupported
-  )
-}
-
 /// Whether the existing file, whose owner / group can't be given to
 /// a new file, may be written in place instead. In a sticky
 /// directory (eg. `/tmp`) the kernel only lets the owner of the file
@@ -365,8 +602,8 @@ fn not_permitted(e: &std::io::Error) -> bool {
 ///
 /// The writer is the owner of the temp file as it was `created`
 /// (the process's filesystem uid, which the kernel's check goes
-/// by), not its owner now: [copy_identity] may have given it to the
-/// existing file's owner before failing to set its mode.
+/// by), not its owner now: [copy_identity_onto] may have given it to
+/// the existing file's owner before failing to set its mode.
 #[cfg(unix)]
 fn sticky_permits_in_place(
   path: &Path,
@@ -674,6 +911,28 @@ mod tests {
     FAIL_ACCESS_CONTROL.lock().unwrap().push(path.to_path_buf());
   }
 
+  /// Paths whose new files land on a filesystem without hard links
+  /// (eg. vfat, which refuses `link` with `EPERM`).
+  static NO_HARD_LINKS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+  pub(super) fn injected_no_hard_links(
+    path: &Path,
+  ) -> std::io::Result<()> {
+    if NO_HARD_LINKS.lock().unwrap().iter().any(|p| p == path) {
+      Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "injected: no hard links",
+      ))
+    } else {
+      Ok(())
+    }
+  }
+
+  #[cfg(unix)]
+  fn inject_no_hard_links(path: &Path) {
+    NO_HARD_LINKS.lock().unwrap().push(path.to_path_buf());
+  }
+
   /// Temp paths handed out, in order, before random ones, per path
   /// written: `(path, temp path)`.
   static FORCED_TEMP_PATHS: Mutex<Vec<(PathBuf, PathBuf)>> =
@@ -724,6 +983,19 @@ mod tests {
   #[test]
   fn sync_dir_accepts_bare_file_name() {
     super::sync_dir(super::parent_dir(Path::new("secret"))).unwrap();
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn sync_parent_dir_syncs_the_directory_of_a_path() {
+    super::sync_parent_dir("secret").unwrap();
+    super::sync_parent_dir(std::env::temp_dir().join("secret"))
+      .unwrap();
+    // The directory has to exist, the file doesn't.
+    let missing =
+      std::env::temp_dir().join("mogh_missing_dir/secret");
+    let err = super::sync_parent_dir(missing).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
   }
 
   #[cfg(unix)]
@@ -1322,6 +1594,332 @@ mod tests {
       std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A new file is created complete, `0600`, with its parents, and
+    /// an existing one is never written: the second create fails
+    /// with `AlreadyExists`.
+    #[test]
+    fn write_new_creates_and_never_overwrites() {
+      let dir = temp_dir("new");
+      let path = dir.join("nested").join("secret");
+      super::super::write_new(&path, "hunter2").unwrap();
+      assert_eq!(std::fs::read_to_string(&path).unwrap(), "hunter2");
+      assert_eq!(mode(&path), 0o600);
+      assert_eq!(std::fs::metadata(&path).unwrap().nlink(), 1);
+
+      let err =
+        super::super::write_new(&path, "hunter3").unwrap_err();
+      assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+      assert_eq!(std::fs::read_to_string(&path).unwrap(), "hunter2");
+      // The temp file is not left behind.
+      assert_eq!(entries(path.parent().unwrap()), ["secret"]);
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Anything at the path counts as existing, even a dangling
+    /// symlink, which is neither followed nor replaced.
+    #[test]
+    fn write_new_refuses_any_existing_entry() {
+      let dir = temp_dir("new-existing");
+      std::fs::create_dir_all(dir.join("dir")).unwrap();
+      let dangling = dir.join("dangling");
+      std::os::unix::fs::symlink("target", &dangling).unwrap();
+      for path in [&dangling, &dir.join("dir")] {
+        let err =
+          super::super::write_new(path, "hunter2").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+      }
+      assert!(dangling.symlink_metadata().unwrap().is_symlink());
+      assert_eq!(entries(&dir), ["dangling", "dir"]);
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A create which fails after the temp file is written leaves
+    /// nothing behind.
+    #[test]
+    fn failed_write_new_leaves_nothing() {
+      let dir = temp_dir("new-failure");
+      let path = dir.join("secret");
+      std::fs::create_dir_all(&dir).unwrap();
+      super::inject_failure(&path);
+      assert!(super::super::write_new(&path, "hunter2").is_err());
+      assert!(entries(&dir).is_empty());
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Two creators racing for one path: the one whose link comes
+    /// second gets `AlreadyExists`, and the winner's file is kept.
+    #[test]
+    fn write_new_loses_a_race_without_clobbering() {
+      let dir = temp_dir("new-race");
+      let path = dir.join("secret");
+      std::fs::create_dir_all(&dir).unwrap();
+      // The loser wrote its temp file before the winner's appeared.
+      let (mut file, temp) =
+        super::super::create_temp(&path).unwrap();
+      std::io::Write::write_all(&mut file, b"loser").unwrap();
+      drop(file);
+      std::fs::write(&path, "winner").unwrap();
+
+      let err = super::super::link_new(temp, &path).unwrap_err();
+      assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+      assert_eq!(std::fs::read_to_string(&path).unwrap(), "winner");
+      assert_eq!(entries(&dir), ["secret"]);
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Without hard links, the temp file is renamed into place after
+    /// checking the path is free, and an existing file is still
+    /// never replaced.
+    #[test]
+    fn write_new_without_hard_links_renames() {
+      let dir = temp_dir("new-no-hard-links");
+      let path = dir.join("secret");
+      super::inject_no_hard_links(&path);
+      super::super::write_new(&path, "hunter2").unwrap();
+      assert_eq!(std::fs::read_to_string(&path).unwrap(), "hunter2");
+      assert_eq!(mode(&path), 0o600);
+      assert_eq!(entries(&dir), ["secret"]);
+
+      // The race arm: the check before the rename finds the file.
+      let (mut file, temp) =
+        super::super::create_temp(&path).unwrap();
+      std::io::Write::write_all(&mut file, b"loser").unwrap();
+      drop(file);
+      let err = super::super::link_new(temp, &path).unwrap_err();
+      assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+      assert_eq!(std::fs::read_to_string(&path).unwrap(), "hunter2");
+      assert_eq!(entries(&dir), ["secret"]);
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `replace` writes a new file every time, keeping the existing
+    /// file's mode, and replaces (doesn't follow) a symlink.
+    #[test]
+    fn replace_writes_a_new_file_keeping_the_mode() {
+      let dir = temp_dir("replace");
+      let path = dir.join("nested").join("secret");
+      super::super::replace(&path, "hunter2").unwrap();
+      assert_eq!(mode(&path), 0o600);
+      set_mode(&path, 0o640);
+      let ino = std::fs::metadata(&path).unwrap().ino();
+      super::super::replace(&path, "hunter3").unwrap();
+      assert_eq!(std::fs::read_to_string(&path).unwrap(), "hunter3");
+      assert_eq!(mode(&path), 0o640);
+      assert_ne!(std::fs::metadata(&path).unwrap().ino(), ino);
+      assert_eq!(entries(path.parent().unwrap()), ["secret"]);
+
+      let link = dir.join("link");
+      std::os::unix::fs::symlink(&path, &link).unwrap();
+      super::super::replace(&link, "hunter4").unwrap();
+      assert!(link.symlink_metadata().unwrap().is_file());
+      assert_eq!(std::fs::read_to_string(&path).unwrap(), "hunter3");
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A hard linked file which `write` writes in place (only its
+    /// owner can write to the directory) is replaced, splitting off
+    /// the link, which keeps the old contents.
+    #[test]
+    fn replace_splits_hard_links() {
+      let dir = temp_dir("replace-hard-link");
+      let a = dir.join("a");
+      let b = dir.join("b");
+      super::super::write(&a, "hunter2 is longer").unwrap();
+      set_mode(&dir, 0o755);
+      std::fs::hard_link(&a, &b).unwrap();
+      super::super::replace(&a, "hunter3").unwrap();
+      assert_eq!(std::fs::read_to_string(&a).unwrap(), "hunter3");
+      assert_eq!(
+        std::fs::read_to_string(&b).unwrap(),
+        "hunter2 is longer"
+      );
+      assert_eq!(std::fs::metadata(&a).unwrap().nlink(), 1);
+      assert_eq!(entries(&dir), ["a", "b"]);
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A file in a directory which can't be written to, which
+    /// `write` writes in place, fails to `replace`, untouched.
+    #[test]
+    fn replace_fails_rather_than_write_in_place() {
+      let dir = temp_dir("replace-read-only-dir");
+      let path = dir.join("secret");
+      super::super::write(&path, "hunter2").unwrap();
+      let ino = std::fs::metadata(&path).unwrap().ino();
+
+      set_mode(&dir, 0o555);
+      let root = bypasses_permissions(&dir);
+      let res = super::super::replace(&path, "hunter3");
+      set_mode(&dir, 0o755);
+
+      // Root can replace it regardless of the mode.
+      if !root {
+        assert!(res.is_err());
+        assert_eq!(
+          std::fs::read_to_string(&path).unwrap(),
+          "hunter2"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino);
+        assert_eq!(entries(&dir), ["secret"]);
+      }
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "tokio")]
+    #[tokio::test]
+    async fn write_new_async_creates_and_never_overwrites() {
+      let dir = temp_dir("new-async");
+      let path = dir.join("nested").join("secret");
+      super::super::write_new_async(&path, "hunter2")
+        .await
+        .unwrap();
+      assert_eq!(std::fs::read_to_string(&path).unwrap(), "hunter2");
+      assert_eq!(mode(&path), 0o600);
+      let err = super::super::write_new_async(&path, "hunter3")
+        .await
+        .unwrap_err();
+      assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+      assert_eq!(std::fs::read_to_string(&path).unwrap(), "hunter2");
+      assert_eq!(entries(path.parent().unwrap()), ["secret"]);
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The file `copy_identity` copies onto, as a caller wrote it
+    /// beside another (`0600`, this process's), opened read only.
+    fn written_beside(path: &Path) -> std::fs::File {
+      super::super::write_new(path, "key").unwrap();
+      std::fs::File::open(path).unwrap()
+    }
+
+    #[test]
+    fn copy_identity_copies_the_mode() {
+      let dir = temp_dir("identity-mode");
+      let (from, to) = (dir.join("from"), dir.join("to"));
+      super::super::write(&from, "key").unwrap();
+      set_mode(&from, 0o640);
+      let file = written_beside(&to);
+      assert_eq!(mode(&to), 0o600);
+      super::super::copy_identity(&from, &file).unwrap();
+      assert_eq!(mode(&to), 0o640);
+      // A missing source is an error, which tells.
+      let err =
+        super::super::copy_identity(dir.join("missing"), &file)
+          .unwrap_err();
+      assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A symlink at `from` has nothing to give: its target's access
+    /// may only be safe in the target's directory. `to` stays as it
+    /// was written, like `write` replacing a symlink.
+    #[test]
+    fn copy_identity_doesnt_follow_symlinks() {
+      let dir = temp_dir("identity-symlink");
+      let (target, from, to) =
+        (dir.join("target"), dir.join("from"), dir.join("to"));
+      super::super::write(&target, "key").unwrap();
+      set_mode(&target, 0o644);
+      std::os::unix::fs::symlink(&target, &from).unwrap();
+      let file = written_beside(&to);
+      super::super::copy_identity(&from, &file).unwrap();
+      assert_eq!(mode(&to), 0o600);
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The group is kept: a supplementary group of this process,
+    /// which it can give files to without being root.
+    #[test]
+    fn copy_identity_copies_the_group() {
+      let dir = temp_dir("identity-group");
+      let (from, to) = (dir.join("from"), dir.join("to"));
+      super::super::write(&from, "key").unwrap();
+      let file = written_beside(&to);
+      let own_gid = std::fs::metadata(&to).unwrap().gid();
+      let status = std::fs::read_to_string("/proc/self/status")
+        .unwrap_or_default();
+      let Some(gid) = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Groups:"))
+        .into_iter()
+        .flat_map(|groups| groups.split_whitespace())
+        .filter_map(|gid| gid.parse::<u32>().ok())
+        .find(|gid| *gid != own_gid)
+      else {
+        eprintln!("No supplementary group, skipping");
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+      };
+      std::os::unix::fs::chown(&from, None, Some(gid)).unwrap();
+      super::super::copy_identity(&from, &file).unwrap();
+      assert_eq!(std::fs::metadata(&to).unwrap().gid(), gid);
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Another user's file: root gives the new file to its owner,
+    /// anyone else isn't permitted to, and the file is left as is.
+    #[test]
+    fn copy_identity_copies_the_owner_or_is_not_permitted() {
+      let dir = temp_dir("identity-owner");
+      let (from, to) = (dir.join("from"), dir.join("to"));
+      super::super::write(&from, "key").unwrap();
+      let file = written_beside(&to);
+      let created = std::fs::metadata(&to).unwrap();
+      if std::os::unix::fs::chown(&from, Some(12345), Some(12345))
+        .is_ok()
+      {
+        // Root.
+        super::super::copy_identity(&from, &file).unwrap();
+        let metadata = std::fs::metadata(&to).unwrap();
+        assert_eq!((metadata.uid(), metadata.gid()), (12345, 12345));
+        assert_eq!(mode(&to), 0o600);
+      } else {
+        // A file of another user's: root's.
+        let other = Path::new("/");
+        let owner = std::fs::metadata(other).unwrap().uid();
+        if owner == created.uid() {
+          eprintln!("/ is owned by this user, skipping");
+          std::fs::remove_dir_all(dir).unwrap();
+          return;
+        }
+        // `/` is a directory, which gives nothing: copy from a
+        // regular file of root's instead, if there is one.
+        let Some(other) = ["/etc/hostname", "/etc/passwd"]
+          .into_iter()
+          .map(Path::new)
+          .find(|path| {
+            std::fs::symlink_metadata(path)
+              .is_ok_and(|m| m.is_file() && m.uid() != created.uid())
+          })
+        else {
+          eprintln!("No regular file of another user's, skipping");
+          std::fs::remove_dir_all(dir).unwrap();
+          return;
+        };
+        let err =
+          super::super::copy_identity(other, &file).unwrap_err();
+        assert!(super::super::is_not_permitted(&err), "{err:?}");
+        let metadata = std::fs::metadata(&to).unwrap();
+        assert_eq!(metadata.uid(), created.uid());
+        assert_eq!(mode(&to), 0o600);
+      }
+      std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn not_permitted_errors_are_told_apart() {
+      use std::io::{Error, ErrorKind};
+      for kind in [
+        ErrorKind::PermissionDenied,
+        ErrorKind::InvalidInput,
+        ErrorKind::Unsupported,
+      ] {
+        assert!(super::super::is_not_permitted(&Error::from(kind)));
+      }
+      for kind in [ErrorKind::NotFound, ErrorKind::Other] {
+        assert!(!super::super::is_not_permitted(&Error::from(kind)));
+      }
+    }
+
     /// Env var marking the process as running in the mount namespace
     /// set up by [write_bind_mounted_file].
     const BIND_MOUNT_TEST_DIR: &str =
@@ -1397,6 +1995,11 @@ mod tests {
         std::fs::read_to_string(&mounted).unwrap(),
         "hunter3"
       );
+      assert_eq!(std::fs::read_to_string(&host).unwrap(), "hunter3");
+      assert_eq!(entries(mounted.parent().unwrap()), ["secret"]);
+
+      // `replace` never writes in place, so it fails on the mount.
+      assert!(super::super::replace(&mounted, "hunter4").is_err());
       assert_eq!(std::fs::read_to_string(&host).unwrap(), "hunter3");
       assert_eq!(entries(mounted.parent().unwrap()), ["secret"]);
     }
@@ -1604,6 +2207,75 @@ mod tests {
         assert_eq!(ino(&path), kept);
         assert_eq!(get_xattr(&path, ACL_ACCESS), Some(acl));
         assert_eq!(mode(&path), 0o640);
+        assert_eq!(entries(&dir), ["secret"]);
+        std::fs::remove_dir_all(dir).unwrap();
+      }
+
+      /// `copy_identity` carries the ACL over to a file written beside
+      /// (and the mode it masks).
+      #[test]
+      fn copy_identity_copies_the_acl() {
+        let dir = temp_dir("identity-acl");
+        let (from, to) = (dir.join("from"), dir.join("to"));
+        write(&from, "key").unwrap();
+        let acl = sidecar_acl(&from);
+        if !set_xattr(&from, ACL_ACCESS, &acl) {
+          std::fs::remove_dir_all(dir).unwrap();
+          return;
+        }
+        crate::write::write_new(&to, "key").unwrap();
+        let file = std::fs::File::open(&to).unwrap();
+        crate::write::copy_identity(&from, &file).unwrap();
+        assert_eq!(get_xattr(&to, ACL_ACCESS), Some(acl));
+        assert_eq!(mode(&to), 0o640);
+        std::fs::remove_dir_all(dir).unwrap();
+      }
+
+      /// An ACL the written file got on creation (eg. the directory's
+      /// default ACL) is removed when the source has none.
+      #[test]
+      fn copy_identity_removes_an_acl_the_source_lacks() {
+        let dir = temp_dir("identity-no-acl");
+        let (from, to) = (dir.join("from"), dir.join("to"));
+        write(&from, "key").unwrap();
+        crate::write::write_new(&to, "key").unwrap();
+        let acl = sidecar_acl(&to);
+        if !set_xattr(&to, ACL_ACCESS, &acl) {
+          std::fs::remove_dir_all(dir).unwrap();
+          return;
+        }
+        let file = std::fs::File::open(&to).unwrap();
+        crate::write::copy_identity(&from, &file).unwrap();
+        assert_eq!(get_xattr(&to, ACL_ACCESS), None);
+        assert_eq!(mode(&to), 0o600);
+        std::fs::remove_dir_all(dir).unwrap();
+      }
+
+      /// When the ACL / label can't be given to the new file,
+      /// `replace` fails, rather than write the file in place.
+      #[test]
+      fn replace_fails_when_the_acl_cant_be_kept() {
+        let dir = temp_dir("replace-acl");
+        let path = dir.join("secret");
+        write(&path, "hunter2").unwrap();
+        let acl = sidecar_acl(&path);
+        if !set_xattr(&path, ACL_ACCESS, &acl) {
+          std::fs::remove_dir_all(dir).unwrap();
+          return;
+        }
+        let kept = ino(&path);
+
+        super::super::inject_access_control_failure(&path);
+        let err =
+          crate::write::replace(&path, "hunter3").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("access control"), "{err}");
+        assert_eq!(
+          std::fs::read_to_string(&path).unwrap(),
+          "hunter2"
+        );
+        assert_eq!(ino(&path), kept);
+        assert_eq!(get_xattr(&path, ACL_ACCESS), Some(acl));
         assert_eq!(entries(&dir), ["secret"]);
         std::fs::remove_dir_all(dir).unwrap();
       }
