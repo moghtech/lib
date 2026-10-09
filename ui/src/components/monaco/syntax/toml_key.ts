@@ -15,3 +15,12 @@
  */
 export const TOML_KEY_VALUE_REGEX =
   /(\s*(?:[A-Za-z0-9_+\-]+|"[^"]*"|'[^']*')(?:\s*\.\s*(?:[A-Za-z0-9_+\-]+|"[^"]*"|'[^']*'))*\s*)(=)/;
+
+/**
+ * In a TOML line, a run of whitespace, or of characters none of the
+ * rules starts at, consumed at once after every other rule failed at its
+ * first character (see `PLAIN_RUN_REGEX` of env_key.ts): the key rule
+ * scans such a run (a bare word, dashes, indentation) to its end before
+ * it fails, which retried at each character was quadratic in its length.
+ */
+export const TOML_PLAIN_RUN_REGEX = /\s+|[^\s\[\]{},"'#=]+/;

@@ -37,6 +37,7 @@ export function InputList<T>({
             !disabled && (
               <ActionIcon
                 color="red"
+                aria-label={`Remove ${arg || `item ${i + 1}`}`}
                 onClick={() =>
                   set({
                     [field]: [...values.filter((_, idx) => idx !== i)],

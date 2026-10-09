@@ -1,4 +1,10 @@
-import { Dispatch, SetStateAction, useState } from "react";
+import {
+  Dispatch,
+  SetStateAction,
+  useCallback,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   Alert,
   Anchor,
@@ -15,6 +21,7 @@ import {
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import {
+  QueryState,
   useMutation,
   UseMutationOptions,
   useQuery,
@@ -35,6 +42,7 @@ import {
   brandingLinkProblem,
   brandingProblem,
   brandingSizeProblem,
+  checkSupporterKey,
   DEFAULT_ICON_HEIGHT,
   ICON_MEDIA_TYPES,
   iconDataUrl,
@@ -46,7 +54,7 @@ import {
   newNonce,
   normalizeBranding,
   SUPPORTER_URL,
-  verifySupporterKey,
+  SupporterKeyError,
 } from "mogh_supporter";
 import type {
   Supporter,
@@ -54,7 +62,8 @@ import type {
   Types,
   VerifySupporterKeyOptions,
 } from "mogh_supporter";
-import { guardJwt, sendableJwt } from "../auth/rejected-jwt";
+import { sendWithJwt, useSendableJwt } from "../auth/rejected-jwt";
+import { errorNotificationMessage } from "../errors";
 import {
   Config,
   ConfigInput,
@@ -67,6 +76,7 @@ import { Section, SectionProps } from "../components/section";
 import { SupporterBrandIcon, useShownSupporterBrand } from "./badge";
 
 export * from "./badge";
+export * from "./home-button";
 
 export let SUPPORTER_API_URL: string;
 
@@ -80,9 +90,12 @@ export function setSupporterUrl(url: string) {
   SUPPORTER_API_URL = url;
 }
 
-/** A client of the supporter api, with the user's current token. */
-export function supporterClient() {
-  return MoghSupporterClient(SUPPORTER_API_URL, MoghAuth.LOGIN_TOKENS!.jwt());
+/**
+ * A client of the supporter api, with the user's current token (or
+ * `jwt`).
+ */
+export function supporterClient(jwt = MoghAuth.LOGIN_TOKENS.jwt()) {
+  return MoghSupporterClient(SUPPORTER_API_URL, jwt);
 }
 
 export interface UseSupporterOptions extends Omit<
@@ -94,42 +107,86 @@ export interface UseSupporterOptions extends Omit<
 }
 
 /**
+ * What the page's verification of the key in use (`useSupporter`)
+ * found: the supporter to show a badge for, else `null` and why there
+ * is none, which `SupporterKeyConfig` shows the admin.
+ */
+interface SupporterVerdict {
+  supporter: Supporter | null;
+  /** Why there is no badge. `null` with a supporter. */
+  reason: string | null;
+}
+
+/** The query of the page's verification, by app (`useSupporter`). */
+const SUPPORTER_QUERY = "mogh_supporter";
+
+/**
  * The supporter to show a badge for (`SupporterBadge`): `undefined`
  * while the key is being verified, `null` for no badge. Asks the
  * supporter api for the key in use with a nonce drawn for the
  * request, and verifies the answer in the browser (`mogh_supporter`),
  * once per page load: the result is kept in memory by react-query for
  * the life of the page, never in storage. `SupporterKeyConfig`
- * invalidates it when the key changes.
+ * invalidates it when the key changes, and shows the admin why it
+ * shows no badge (eg. a release date past what the key covers). A page
+ * without WebCrypto (plain http from another host than localhost)
+ * verifies all the same: `mogh_supporter` 1.2 falls back to
+ * JavaScript there.
  *
- * Pass `app`, `releaseDate` (the `YYYY-MM-DD` of the build, never the
- * current date) and `rootKeys`, the root public keys the app trusts:
- * each app hardcodes its own. `revoked` is the package's unless the
- * app has its own list.
+ * Pass `app`, `releaseDate` (the `YYYY-MM-DD` of the release, the
+ * `releaseDate` of the app's package.json through `mogh_supporter/vite`,
+ * never the current date) and `rootKeys`, the root public keys the app
+ * trusts: each app hardcodes its own. `revoked` is the package's unless
+ * the app has its own list.
  */
 export function useSupporter({
   enabled = true,
   ...verify
 }: UseSupporterOptions): Supporter | null | undefined {
-  const jwt = MoghAuth.LOGIN_TOKENS!.jwt();
+  const jwt = useSendableJwt();
   const { data } = useQuery({
-    queryKey: ["mogh_supporter", verify.app],
-    queryFn: async () => {
+    queryKey: [SUPPORTER_QUERY, verify.app],
+    queryFn: async (): Promise<SupporterVerdict> => {
       const nonce = newNonce();
       let response: Types.SignedSupporterKey | null;
       try {
-        response = await guardJwt(jwt, [401, 403], () =>
-          supporterClient().read("GetSupporterKey", {
+        response = await sendWithJwt([401, 403], (jwt) =>
+          supporterClient(jwt).read("GetSupporterKey", {
             nonce: nonce.encoded,
           }),
         );
       } catch (e) {
         console.debug("No supporter badge: GetSupporterKey failed:", e);
-        return null;
+        const error = (e as { result?: { error?: unknown } })?.result?.error;
+        return {
+          supporter: null,
+          reason: `GetSupporterKey failed${typeof error === "string" ? `: ${error}` : ""}`,
+        };
       }
-      return verifySupporterKey({ ...verify, nonce, response });
+      try {
+        const supporter = await checkSupporterKey({
+          ...verify,
+          nonce,
+          response,
+        });
+        return { supporter, reason: null };
+      } catch (e) {
+        console.debug(
+          "No supporter badge:",
+          e instanceof Error ? `${e.name}: ${e.message}` : e,
+        );
+        return {
+          supporter: null,
+          reason:
+            e instanceof SupporterKeyError
+              ? e.message
+              : e instanceof Error
+                ? `${e.name}: ${e.message}`
+                : String(e),
+        };
+      }
     },
-    enabled: enabled && sendableJwt(jwt),
+    enabled: enabled && !!jwt,
     staleTime: Infinity,
     gcTime: Infinity,
     retry: false,
@@ -137,7 +194,29 @@ export function useSupporter({
     refetchOnReconnect: false,
     refetchOnMount: false,
   });
-  return data;
+  return data?.supporter;
+}
+
+/**
+ * The state of the page's verification of the key in use, as
+ * `useSupporter` (the topbar's badge) runs it, without running one:
+ * what this browser makes of the key, which may not be what the server
+ * makes of it. `undefined` while none ran.
+ */
+function useSupporterVerdict(): QueryState<SupporterVerdict> | undefined {
+  const queryClient = useQueryClient();
+  const subscribe = useCallback(
+    (onChange: () => void) => queryClient.getQueryCache().subscribe(onChange),
+    [queryClient],
+  );
+  // The state object is replaced on every change of the query, and
+  // kept otherwise: a snapshot which changes only with it.
+  return useSyncExternalStore(
+    subscribe,
+    () =>
+      queryClient.getQueryCache().findAll({ queryKey: [SUPPORTER_QUERY] })[0]
+        ?.state as QueryState<SupporterVerdict> | undefined,
+  );
 }
 
 /**
@@ -147,14 +226,14 @@ export function useSupporter({
  * the life of the page.
  */
 export function useSupporterBranding(options?: { enabled?: boolean }) {
-  const jwt = MoghAuth.LOGIN_TOKENS!.jwt();
+  const jwt = useSendableJwt();
   return useQuery({
     queryKey: ["GetSupporterBranding"],
     queryFn: () =>
-      guardJwt(jwt, [401, 403], () =>
-        supporterClient().read("GetSupporterBranding", {}),
+      sendWithJwt([401, 403], (jwt) =>
+        supporterClient(jwt).read("GetSupporterBranding", {}),
       ),
-    enabled: (options?.enabled ?? true) && sendableJwt(jwt),
+    enabled: (options?.enabled ?? true) && !!jwt,
     staleTime: Infinity,
     retry: false,
     refetchOnWindowFocus: false,
@@ -192,14 +271,14 @@ export function useSupporterBrand(options: UseSupporterOptions) {
  * badge. Never the key itself. Admin only.
  */
 export function useSupporterKeyInfo(options?: { enabled?: boolean }) {
-  const jwt = MoghAuth.LOGIN_TOKENS!.jwt();
+  const jwt = useSendableJwt();
   return useQuery({
     queryKey: ["GetSupporterKeyInfo"],
     queryFn: () =>
-      guardJwt(jwt, [401], () =>
-        supporterClient().read("GetSupporterKeyInfo", {}),
+      sendWithJwt([401], (jwt) =>
+        supporterClient(jwt).read("GetSupporterKeyInfo", {}),
       ),
-    enabled: (options?.enabled ?? true) && sendableJwt(jwt),
+    enabled: (options?.enabled ?? true) && !!jwt,
     // A user who isn't an admin gets the same answer every time.
     retry: false,
   });
@@ -228,17 +307,9 @@ export function useManageSupporter<
     mutationFn: (params: P) => supporterClient().write<T, R>(type, params),
     onError: (e: SupporterError, ...args) => {
       console.log("Supporter error:", e);
-      const msg = e.result?.error ?? "Unknown error. See console.";
-      // Skip the causes the message already shows.
-      const detail = e.result?.trace
-        ?.filter((cause) => !msg.includes(cause))
-        .map((cause) => cause[0].toUpperCase() + cause.slice(1))
-        .join(" | ");
       notifications.show({
         title: `Supporter request ${type} failed`,
-        message: `${msg[0].toUpperCase() + msg.slice(1)}${
-          detail ? " | " + detail : ""
-        } | See console for details`,
+        message: errorNotificationMessage(e),
         color: "red",
       });
       config?.onError && config.onError(e, ...args);
@@ -260,17 +331,30 @@ export function useManageSupporter<
  * The api behind it is limited to admin users, see
  * `AuthUserImpl::is_admin`. A key from the app configuration is
  * shown, and replaced by one saved here until that is removed.
+ *
+ * Next to the server's verdict on the key it shows this browser's,
+ * from the page's own verification (`useSupporter`, the topbar's
+ * badge): a key the server verifies and serves can still show no
+ * badge here, eg. for a release date past what the key covers, which
+ * only the browser knows.
  */
 export function SupporterKeyConfig(sectionProps: SectionProps) {
   const queryClient = useQueryClient();
   const { data: info, isPending, error } = useSupporterKeyInfo();
+  const verdict = useSupporterVerdict();
+  // Not while the key changes: an invalidated verdict is of the key
+  // before.
+  const browser =
+    verdict?.fetchStatus === "idle" && !verdict.isInvalidated
+      ? verdict.data
+      : undefined;
   const [key, setKey] = useState("");
 
   const invalidate = () =>
     Promise.all([
       queryClient.invalidateQueries({ queryKey: ["GetSupporterKeyInfo"] }),
       // The topbar badge verifies the key in use again.
-      queryClient.invalidateQueries({ queryKey: ["mogh_supporter"] }),
+      queryClient.invalidateQueries({ queryKey: [SUPPORTER_QUERY] }),
     ]);
   const { mutateAsync: set, isPending: setPending } = useManageSupporter(
     "SetSupporterKey",
@@ -325,7 +409,7 @@ export function SupporterKeyConfig(sectionProps: SectionProps) {
         {...sectionProps}
       >
         <Stack gap="xl" mt="md">
-          {info && <SupporterKeyStatus info={info} />}
+          {info && <SupporterKeyStatus info={info} browser={browser} />}
           <Textarea
             label="Supporter key"
             description="Paste the key you received. It is stored by the app and used from now on. The key itself is never shown again."
@@ -711,8 +795,17 @@ function SupporterBrandingConfig({
   );
 }
 
-/** What is configured, as `SupporterKeyConfig` shows it. */
-function SupporterKeyStatus({ info }: { info: Types.SupporterKeyInfo }) {
+/**
+ * What is configured, as `SupporterKeyConfig` shows it, with this
+ * browser's verdict on the key (`browser`), if the page verified it.
+ */
+function SupporterKeyStatus({
+  info,
+  browser,
+}: {
+  info: Types.SupporterKeyInfo;
+  browser: SupporterVerdict | undefined;
+}) {
   const { source, supporter, problem, config_key } = info;
   if (source === "None") {
     return (
@@ -779,6 +872,18 @@ function SupporterKeyStatus({ info }: { info: Types.SupporterKeyInfo }) {
           title="This key does not verify, and shows no badge"
         >
           {problem}
+        </Alert>
+      )}
+      {/* The server verifies and serves the key, the browser verifies
+          it again, and can still refuse it. */}
+      {!problem && supporter && browser?.supporter === null && (
+        <Alert
+          color="yellow"
+          icon={<ShieldAlert size="1rem" />}
+          title="This browser does not verify the key, and shows no badge"
+          data-testid="supporter-key-browser-problem"
+        >
+          {browser.reason}
         </Alert>
       )}
     </Stack>

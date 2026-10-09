@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useDisclosure } from "@mantine/hooks";
 import { Box, Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { Save } from "lucide-react";
@@ -6,12 +6,19 @@ import { ShowHideButton } from "../show-hide-button";
 import { MonacoDiffEditor, MonacoLanguage } from "../monaco";
 import { deepCompare } from "../../utils";
 import { fmtSnakeCaseToUpperSpaceCase } from "../../formatting";
-import { useCtrlKeyListener, useKeyListener } from "../../hooks";
+import {
+  useCtrlKeyListener,
+  useKeyListener,
+  useSingleFlight,
+} from "../../hooks";
 import {
   confirmDialogOpen,
   saveButtonFocus,
   useCountOpenConfirm,
 } from "./confirm-open";
+import { SecretKey, secretKeyOf, secretWasSet } from "./secret-keys";
+
+export type { SecretKey } from "./secret-keys";
 
 export interface ConfirmUpdateProps<T> {
   original: T;
@@ -27,8 +34,8 @@ export interface ConfirmUpdateProps<T> {
   /** See `ConfirmUpdateModalProps.confirmKeyListener`. Default: true */
   confirmKeyListener?: boolean;
   enableFancyToml?: boolean;
-  /** Fields whose values are never shown, see `ConfigProps.secretKeys`. */
-  secretKeys?: (keyof T)[];
+  /** Fields whose values are never shown, see `SecretKey`. */
+  secretKeys?: SecretKey<T>[];
 }
 
 /**
@@ -125,8 +132,8 @@ export interface ConfirmUpdateModalProps<T> {
    */
   confirmKeyListener?: boolean;
   enableFancyToml?: boolean;
-  /** Fields whose values are never shown, see `ConfigProps.secretKeys`. */
-  secretKeys?: (keyof T)[];
+  /** Fields whose values are never shown, see `SecretKey`. */
+  secretKeys?: SecretKey<T>[];
 }
 
 /**
@@ -150,14 +157,11 @@ export function ConfirmUpdateModal<T>({
   secretKeys,
 }: ConfirmUpdateModalProps<T>) {
   const [saving, setSaving] = useState(false);
-  // State lags a render behind, the ref stops a second press in the
-  // same tick (eg. key repeat) from sending the update again.
-  const inFlight = useRef(false);
   useCountOpenConfirm(opened);
 
-  const handleConfirm = async () => {
-    if (disabled || inFlight.current) return;
-    inFlight.current = true;
+  // One save at a time: `saving` lags a render behind, and a second
+  // press in the same tick (eg. key repeat) would send it again.
+  const save = useSingleFlight(async () => {
     setSaving(true);
     try {
       await onConfirm();
@@ -165,9 +169,11 @@ export function ConfirmUpdateModal<T>({
     } catch (e) {
       console.error("Update not saved:", e);
     } finally {
-      inFlight.current = false;
       setSaving(false);
     }
+  });
+  const handleConfirm = () => {
+    if (!disabled) save();
   };
 
   useKeyListener("Enter", (e) => {
@@ -219,7 +225,7 @@ export function ConfirmUpdateModal<T>({
                 language={language}
                 fileContentsLanguage={fileContentsLanguage}
                 enableFancyToml={enableFancyToml}
-                secret={secretKeys?.includes(key as keyof T)}
+                secret={secretKeyOf(secretKeys, key as keyof T)}
               />
             ))}
         </Stack>
@@ -274,16 +280,18 @@ function ConfirmUpdateItem<T>({
   fileContentsKeys?: string[];
   keyValueFields?: string[];
   enableFancyToml?: boolean;
-  secret?: boolean;
+  secret?: SecretKey<T>;
 }) {
   const [show, setShow] = useState(true);
-  if (secret) {
+  if (secret !== undefined) {
+    // A secret the draft can't show says whether one is stored.
+    const stored = secretWasSet(secret, previous, _key);
     return (
       <Stack gap="xs" p="xl" className="bordered-light" bdrs="md">
         <Text c="Neutral">{fmtSnakeCaseToUpperSpaceCase(_key as string)}</Text>
         <Box component="pre" mih={0}>
           <Text component="span" c="Critical">
-            {previous[_key] ? "••••••••" : "None"}
+            {stored ? "••••••••" : "None"}
           </Text>{" "}
           <Text component="span" c="dimmed">
             {"->"}

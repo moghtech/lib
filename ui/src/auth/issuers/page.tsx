@@ -25,20 +25,17 @@ import {
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import * as MoghAuth from "mogh_auth_client";
-import {
-  Config,
-  ConfigItem,
-  ConfirmModal,
-  CopyText,
-  EnableSwitch,
-  EntityHeader,
-  EntityPage,
-  InfoRow,
-  PageGuard,
-  Section,
-  useManageAuth,
-  useTrustedIssuers,
-} from "../..";
+import { Config, ConfigItem } from "../../components/config";
+import { ConfirmModal } from "../../components/confirm-modal";
+import { CopyText } from "../../components/copy-text";
+import { EnableSwitch } from "../../components/enable-switch";
+import { EntityHeader } from "../../components/entity-header";
+import { EntityPage } from "../../components/entity-page";
+import { InfoRow } from "../../components/info-row";
+import { PageGuard } from "../../components/page-guard";
+import { Section } from "../../components/section";
+import { useManageAuth, useTrustedIssuers } from "../hooks";
+import { savedListItem } from "../list-cache";
 import {
   IssuerFormValues,
   KEYS_SOURCES,
@@ -47,7 +44,7 @@ import {
   issuerFormValues,
   newRule,
   trustedIssuer,
-} from "./form";
+} from "./values";
 
 type ListItem = MoghAuth.Types.TrustedIssuerListItem;
 
@@ -91,9 +88,16 @@ export function TrustedIssuerPage({
   const { mutateAsync: update, isPending: updatePending } = useManageAuth(
     "UpdateTrustedIssuer",
     {
-      onSuccess: () => {
+      onSuccess: (saved) => {
         notifications.show({ message: "Saved trusted issuer." });
-        invalidate();
+        // Shown right away, the save resolving once the list is current.
+        return savedListItem(
+          queryClient,
+          ["ListTrustedIssuers"],
+          saved,
+          (item) => item.issuer.id,
+          invalidate,
+        );
       },
     },
   );
@@ -245,9 +249,10 @@ export function TrustedIssuerPage({
 }
 
 /**
- * The issuer's configuration as a config section, the rules
- * edited in place: the draft is checked like the modal form's
- * before it is saved.
+ * The issuer's configuration as a config section, the rules edited
+ * in place. The draft is checked before it is saved
+ * (`issuerFormErrors`): a refused save says why, and from then on
+ * each field shows its error.
  */
 function TrustedIssuerConfig({
   item,
@@ -262,6 +267,11 @@ function TrustedIssuerConfig({
   const original = issuerFormValues(item.issuer);
   const [update, setUpdate] = useState<Partial<IssuerFormValues>>({});
   const values = { ...original, ...update };
+  const errors = issuerFormErrors(values);
+  // Shown at the fields once a save was refused for them, not while
+  // the draft is first filled in.
+  const [showErrors, setShowErrors] = useState(false);
+  const shown = showErrors ? errors : {};
 
   return (
     <Config
@@ -271,8 +281,9 @@ function TrustedIssuerConfig({
       setUpdate={setUpdate}
       disabled={readOnly}
       onSave={async () => {
-        const [message] = issuerFormErrors(values);
+        const [message] = Object.values(errors);
         if (message) {
+          setShowErrors(true);
           notifications.show({ message, color: "red" });
           throw new Error(message);
         }
@@ -300,6 +311,7 @@ function TrustedIssuerConfig({
                 description:
                   "The issuer (iss) of the tokens, eg. https://token.actions.githubusercontent.com, or the issuer url of a Kubernetes cluster.",
                 placeholder: "https://token.actions.githubusercontent.com",
+                error: shown.issuer,
               },
               keys_source: {
                 label: "Signing Keys",
@@ -313,6 +325,7 @@ function TrustedIssuerConfig({
                   "The url of the key set (JWKS), as reachable from the app server.",
                 placeholder: "https://issuer.example.com/keys",
                 hidden: values.keys_source !== "JwksUri",
+                error: shown.keys_url,
               },
               keys_static: (value, set) =>
                 values.keys_source === "Static" ? (
@@ -331,6 +344,8 @@ function TrustedIssuerConfig({
                       maxRows={12}
                       styles={{ input: { fontFamily: "monospace" } }}
                       disabled={readOnly}
+                      aria-label="Static Keys"
+                      error={shown.keys_static}
                       w={{ base: "100%", lg: 600 }}
                     />
                   </ConfigItem>
@@ -348,6 +363,8 @@ function TrustedIssuerConfig({
                     placeholder="Add audience"
                     maxTags={16}
                     disabled={readOnly}
+                    aria-label="Audiences"
+                    error={shown.audiences}
                     w={{ base: "85%", lg: 400 }}
                   />
                 </ConfigItem>
@@ -358,10 +375,12 @@ function TrustedIssuerConfig({
                   description="Only accept tokens issued at most this many seconds ago. 0 accepts them until they expire."
                 >
                   <NumberInput
-                    value={value ?? 0}
+                    value={value}
+                    // Emptied, the field is "": an error, not 0,
+                    // which would accept tokens of any age.
                     onChange={(age) =>
                       set({
-                        max_token_age_secs: typeof age === "number" ? age : 0,
+                        max_token_age_secs: typeof age === "number" ? age : "",
                       })
                     }
                     suffix=" seconds"
@@ -369,6 +388,8 @@ function TrustedIssuerConfig({
                     allowDecimal={false}
                     allowNegative={false}
                     disabled={readOnly}
+                    aria-label="Maximum Token Age"
+                    error={shown.max_token_age_secs}
                     w={{ base: "85%", lg: 400 }}
                   />
                 </ConfigItem>
@@ -386,6 +407,7 @@ function TrustedIssuerConfig({
                   onChange={(rules) => set({ rules })}
                   readOnly={readOnly}
                   groupOptions={groupOptions}
+                  errors={shown}
                 />
               ),
             },
@@ -397,16 +419,19 @@ function TrustedIssuerConfig({
 }
 
 /** The rules of an issuer, edited in place on a config draft. */
-export function RulesEditor({
+function RulesEditor({
   rules,
   onChange,
   readOnly,
   groupOptions,
+  errors,
 }: {
   rules: RuleFormValues[];
   onChange: (rules: RuleFormValues[]) => void;
   readOnly: boolean;
   groupOptions?: string[];
+  /** The errors to show, by path (`issuerFormErrors`). */
+  errors: Record<string, string>;
 }) {
   const setRule = (index: number, changes: Partial<RuleFormValues>) =>
     onChange(
@@ -427,6 +452,7 @@ export function RulesEditor({
               description="Names the user of the rule"
               placeholder="eg. Deploy"
               disabled={readOnly}
+              error={errors[`rules.${r}.name`]}
               style={{ flexGrow: 1 }}
             />
             <EnableSwitch
@@ -442,6 +468,7 @@ export function RulesEditor({
                 size="lg"
                 mb={2}
                 title="Remove rule"
+                aria-label="Remove rule"
                 onClick={() => onChange(rules.filter((_, i) => i !== r))}
               >
                 <Trash size="1rem" />
@@ -459,6 +486,11 @@ export function RulesEditor({
               repository_id over repository), and keep wildcards narrow. Nested
               claims use a dotted path, eg. kubernetes.io.namespace.
             </Text>
+            {errors[`rules.${r}.claims`] && (
+              <Text size="xs" c="red">
+                {errors[`rules.${r}.claims`]}
+              </Text>
+            )}
             {rule.claims.map((condition, c) => (
               <Group key={c} gap="xs" wrap="nowrap" align="start">
                 <TextInput
@@ -473,7 +505,9 @@ export function RulesEditor({
                     })
                   }
                   placeholder="Claim, eg. sub"
+                  aria-label="Claim"
                   disabled={readOnly}
+                  error={errors[`rules.${r}.claims.${c}.claim`]}
                   style={{ flex: 1 }}
                 />
                 <TextInput
@@ -488,7 +522,9 @@ export function RulesEditor({
                     })
                   }
                   placeholder="Value, eg. repo:my-org/my-repo:ref:refs/heads/main"
+                  aria-label="Claim Value"
                   disabled={readOnly}
+                  error={errors[`rules.${r}.claims.${c}.pattern`]}
                   style={{ flex: 2 }}
                 />
                 {!readOnly && (
@@ -497,6 +533,7 @@ export function RulesEditor({
                     variant="subtle"
                     mt={4}
                     title="Remove claim"
+                    aria-label="Remove claim"
                     onClick={() =>
                       setRule(r, {
                         claims: rule.claims.filter((_, i) => i !== c),
@@ -537,9 +574,11 @@ export function RulesEditor({
 
           <NumberInput
             value={rule.token_ttl_secs}
+            // Emptied, the field is "": an error, not 0.
             onChange={(ttl) =>
-              setRule(r, { token_ttl_secs: typeof ttl === "number" ? ttl : 0 })
+              setRule(r, { token_ttl_secs: typeof ttl === "number" ? ttl : "" })
             }
+            error={errors[`rules.${r}.token_ttl_secs`]}
             label="App Token Lifetime"
             description="How long the token given to the workload is valid. 0 and anything longer use the app default."
             suffix=" seconds"

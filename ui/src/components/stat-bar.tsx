@@ -2,16 +2,25 @@ import { Group, Progress, StackProps, Text } from "@mantine/core";
 import { ReactNode } from "react";
 import { hexColorByIntention } from "../color";
 import { InfoCard } from "./info-card";
+import { knownNumber } from "./known-number";
 
 export interface StatBarProps extends StackProps {
   title: string;
   icon: ReactNode;
   description?: ReactNode;
+  /** `undefined` (or not a finite number) while it isn't known. */
   percentage: number | undefined;
   warning: number | undefined;
   critical: number | undefined;
 }
 
+/**
+ * A percentage (eg. CPU or memory usage) with its bar, coloured by its
+ * `warning` / `critical` thresholds. An unknown one (`undefined`, eg. no
+ * stats from an unreachable server, or not a finite number, eg. a used
+ * over a total of 0) shows "N/A" with an empty bar: not a healthy
+ * looking 0.00%, nor "NaN%".
+ */
 export function StatBar({
   title,
   icon,
@@ -21,23 +30,24 @@ export function StatBar({
   critical: _critical,
   ...props
 }: StatBarProps) {
-  const percentage = _percentage ?? 0;
+  const percentage = knownNumber(_percentage);
   const warning = _warning ?? 100;
   const critical = _critical ?? 100;
   const intent =
-    percentage > critical
-      ? "Critical"
-      : percentage > warning
-        ? "Warning"
-        : "Good";
-  const color = hexColorByIntention(intent);
+    percentage === undefined
+      ? undefined
+      : percentage > critical
+        ? "Critical"
+        : percentage > warning
+          ? "Warning"
+          : "Good";
   return (
     <InfoCard
       title={title}
       info={
         <Group gap="xs">
-          <Text c={color} fz="lg">
-            {percentage.toFixed(2)}%
+          <Text c={intent ? hexColorByIntention(intent) : "dimmed"} fz="lg">
+            {percentage === undefined ? "N/A" : `${percentage.toFixed(2)}%`}
           </Text>
           {icon}
         </Group>
@@ -52,7 +62,7 @@ export function StatBar({
           {description}
         </Text>
       )}
-      <Progress color="bw" value={percentage} size="xl" />
+      <Progress color="bw" value={percentage ?? 0} size="xl" />
     </InfoCard>
   );
 }

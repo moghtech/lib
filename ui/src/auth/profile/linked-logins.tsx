@@ -1,16 +1,11 @@
 import { useMemo } from "react";
 import { Badge, Button, Group, Text } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import {
-  authClient,
-  ConfirmModal,
-  DataTable,
-  LoginProviderIcon,
-  LoginProviderKind,
-  Section,
-  useLoginOptions,
-  useManageAuth,
-} from "../..";
+import { ConfirmModal } from "../../components/confirm-modal";
+import { DataTable } from "../../components/data-table";
+import { Section } from "../../components/section";
+import { authClient, useLoginOptions, useManageAuth } from "../hooks";
+import { LoginProviderIcon, type LoginProviderKind } from "../login/providers";
 import { CloudCog, KeyRound, Plus, Unlink } from "lucide-react";
 import { markExternalFlow } from "../external-flow";
 
@@ -200,21 +195,23 @@ export function LinkedLogins({
               if (providerId === undefined) {
                 return <>Set password above to enable.</>;
               }
+              // The url names the provider by its slug. The link begun on
+              // the session is bound to it: the server refuses to start
+              // it at another provider's `/link`.
+              const slug = method.slug ?? providerId;
               return (
                 <Button
                   // Through the mutation for its error notification
                   onClick={() =>
-                    beginLink({}).then(() => {
-                      // The reason a failed link comes back
-                      // with is shown (see `useAuthState`).
-                      markExternalFlow();
-                      location.replace(
-                        authClient().externalLinkUrl(
-                          // The url names the provider by its slug
-                          method.slug ?? providerId,
-                        ),
-                      );
-                    })
+                    beginLink({ slug })
+                      .then(() => {
+                        // The reason a failed link comes back
+                        // with is shown (see `useAuthState`).
+                        markExternalFlow();
+                        location.replace(authClient().externalLinkUrl(slug));
+                      })
+                      // Notified by the mutation.
+                      .catch(() => {})
                   }
                   leftSection={<Plus size="1rem" />}
                   maw={220}

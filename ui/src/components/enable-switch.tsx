@@ -5,6 +5,13 @@ export interface EnableSwitchProps extends SwitchProps {
   onCheckedChange?: (checked: boolean) => void;
   redDisabled?: boolean;
   labelProps?: GroupProps;
+  /**
+   * Enter toggles the switch as Space does, through its own change
+   * handlers (`onChange` / `onCheckedChange`, eg. a form's
+   * `getInputProps`), where it would submit the form around it. Once
+   * per press: a held Enter doesn't flicker it.
+   */
+  toggleOnEnter?: boolean;
 }
 
 export function EnableSwitch({
@@ -13,9 +20,11 @@ export function EnableSwitch({
   label,
   onChange,
   onCheckedChange,
+  onKeyDown,
   disabled,
   redDisabled = true,
   labelProps,
+  toggleOnEnter,
   ...props
 }: EnableSwitchProps) {
   return (
@@ -38,6 +47,18 @@ export function EnableSwitch({
       onChange={(e) => {
         onChange?.(e);
         onCheckedChange?.(e.target.checked);
+      }}
+      onKeyDown={(e) => {
+        onKeyDown?.(e);
+        if (!toggleOnEnter || e.key !== "Enter" || e.defaultPrevented) {
+          return;
+        }
+        // Handled here: not the form's submit, nor its key handlers.
+        e.preventDefault();
+        e.stopPropagation();
+        // The click toggles the input, as Space does, which fires its
+        // change: controlled or not, the switch and its form agree.
+        if (!e.repeat) e.currentTarget.click();
       }}
       {...props}
     />

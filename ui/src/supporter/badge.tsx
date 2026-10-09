@@ -97,6 +97,9 @@ export function SupporterBrandIcon({
     <img
       src={icon}
       alt={brand.name}
+      // An admin set url on any host: it learns nothing of the instance
+      // (eg. an internal host name) from the users loading it.
+      referrerPolicy="no-referrer"
       onError={() => iconFailed(icon)}
       style={{
         height: supporterIconHeight(brand),

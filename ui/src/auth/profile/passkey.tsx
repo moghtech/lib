@@ -1,7 +1,10 @@
 import { Button } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { Fingerprint, Trash } from "lucide-react";
-import { ConfirmModal, useManageAuth } from "../..";
+import { useState } from "react";
+import { ConfirmModal } from "../../components/confirm-modal";
+import { useSingleFlight } from "../../hooks";
+import { useManageAuth } from "../hooks";
 import * as MoghAuth from "mogh_auth_client";
 
 export function EnrollPasskey({
@@ -26,7 +29,7 @@ export function EnrollPasskey({
     },
   );
 
-  const { mutate: confirmEnrollment } = useManageAuth(
+  const { mutateAsync: confirmEnrollment } = useManageAuth(
     "ConfirmPasskeyEnrollment",
     {
       onSuccess: () => {
@@ -39,20 +42,40 @@ export function EnrollPasskey({
     },
   );
 
-  const { mutate: beginEnrollment } = useManageAuth("BeginPasskeyEnrollment", {
-    onSuccess: (challenge) => {
-      navigator.credentials
-        .create(MoghAuth.Passkey.prepareCreationChallengeResponse(challenge))
-        .then((credential) => confirmEnrollment({ credential }))
-        .catch((e) => {
-          console.error(e);
-          notifications.show({
-            title: "Failed to create passkey",
-            message: "See console for details",
-            color: "red",
-          });
+  const { mutateAsync: beginEnrollment } = useManageAuth(
+    "BeginPasskeyEnrollment",
+  );
+
+  // One enrollment at a time, from the begin until its confirm settles:
+  // the session keeps one, which a second begin replaces, so the
+  // passkey the first prompt creates would be confirmed against the
+  // second challenge and fail, left behind in the authenticator.
+  // `enrolling` lags a render behind: a second click in the same tick.
+  const [enrolling, setEnrolling] = useState(false);
+  const enroll = useSingleFlight(async () => {
+    setEnrolling(true);
+    try {
+      const challenge = await beginEnrollment({});
+      let credential: Credential | null;
+      try {
+        credential = await navigator.credentials.create(
+          MoghAuth.Passkey.prepareCreationChallengeResponse(challenge),
+        );
+      } catch (e) {
+        console.error(e);
+        notifications.show({
+          title: "Failed to create passkey",
+          message: "See console for details",
+          color: "red",
         });
-    },
+        return;
+      }
+      await confirmEnrollment({ credential });
+    } catch {
+      // The begin / confirm failure was notified (`useManageAuth`).
+    } finally {
+      setEnrolling(false);
+    }
   });
 
   return (
@@ -60,7 +83,8 @@ export function EnrollPasskey({
       {!passkeyEnrolled && !totpEnrolled && (
         <Button
           leftSection={<Fingerprint size="1rem" />}
-          onClick={() => beginEnrollment({})}
+          onClick={() => enroll()}
+          loading={enrolling}
           w={220}
         >
           Enroll Passkey 2FA

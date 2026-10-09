@@ -20,6 +20,7 @@ import {
   MenuDropdown,
   Modal,
   MultiSelect,
+  Notification,
   PopoverDropdown,
   Progress,
   SegmentedControl,
@@ -247,6 +248,7 @@ function theme({
         defaultProps: {
           position: "top",
           radius: "md",
+          closeButtonProps: { "aria-label": "Close" },
         },
         styles: {
           inner: { justifyContent: "center" },
@@ -255,6 +257,13 @@ function theme({
       Modal: Modal.extend({
         defaultProps: {
           styles: { content: { borderRadius: "var(--mantine-radius-md)" } },
+          // Mantine's close buttons are an icon with no name.
+          closeButtonProps: { "aria-label": "Close" },
+        },
+      }),
+      Notification: Notification.extend({
+        defaultProps: {
+          closeButtonProps: { "aria-label": "Close" },
         },
       }),
       Code: Code.extend({

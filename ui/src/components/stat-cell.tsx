@@ -12,6 +12,7 @@ import {
 } from "@mantine/core";
 import { ReactNode } from "react";
 import { Info } from "lucide-react";
+import { knownNumber } from "./known-number";
 
 export interface StatCellProps extends GroupProps {
   value: number | undefined;
@@ -23,8 +24,12 @@ export interface StatCellProps extends GroupProps {
   infoDisabled?: boolean;
 }
 
+/**
+ * A percentage in a table cell, with its bar: "N/A" while it isn't
+ * known (`undefined`, or not a finite number).
+ */
 export function StatCell({
-  value,
+  value: _value,
   intent,
   textProps,
   barProps,
@@ -33,6 +38,7 @@ export function StatCell({
   infoDisabled,
   ...groupProps
 }: StatCellProps) {
+  const value = knownNumber(_value);
   const ProgressComponent = (
     <Progress
       value={value ?? 0}
@@ -57,7 +63,11 @@ export function StatCell({
           <HoverCard.Target>
             <Group gap="xs" wrap="nowrap">
               {ProgressComponent}
-              <ActionIcon variant="subtle" disabled={infoDisabled}>
+              <ActionIcon
+                variant="subtle"
+                disabled={infoDisabled}
+                aria-label="Details"
+              >
                 <Info size="1rem" />
               </ActionIcon>
             </Group>

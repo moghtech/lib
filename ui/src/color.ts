@@ -1,27 +1,5 @@
 export type ColorIntention =
-  | "Good"
-  | "Neutral"
-  | "Warning"
-  | "Critical"
-  | "Unknown"
-  | "None";
-
-export function colorByIntention(intention: ColorIntention) {
-  switch (intention) {
-    case "Good":
-      return "green";
-    case "Neutral":
-      return "blue";
-    case "Warning":
-      return "yellow";
-    case "Critical":
-      return "red";
-    case "Unknown":
-      return "purple";
-    case "None":
-      return undefined;
-  }
-}
+  "Good" | "Neutral" | "Warning" | "Critical" | "Unknown" | "None";
 
 export function hexColorByIntention(intention: ColorIntention) {
   switch (intention) {

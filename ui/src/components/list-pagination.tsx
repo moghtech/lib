@@ -30,10 +30,10 @@ export function ListPagination({
       {...props}
     >
       <Group gap="0.2rem" justify="center">
-        <Pagination.First />
-        <Pagination.Previous />
+        <Pagination.First aria-label="First page" />
+        <Pagination.Previous aria-label="Previous page" />
         <Pagination.Items />
-        <Pagination.Next />
+        <Pagination.Next aria-label="Next page" />
       </Group>
     </Pagination.Root>
   );

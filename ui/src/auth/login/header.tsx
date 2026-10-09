@@ -1,10 +1,7 @@
 import { Group, Stack, Text } from "@mantine/core";
-import { LoginBrandingProps } from ".";
-import { useLoginOptions } from "../..";
-import {
-  LoginProviderButton,
-  MAX_HEADER_LOGIN_PROVIDERS,
-} from "./providers";
+import type { LoginBrandingProps } from ".";
+import { useLoginOptions } from "../hooks";
+import { LoginProviderButton, MAX_HEADER_LOGIN_PROVIDERS } from "./providers";
 
 export default function LoginHeader({
   secondFactorPending,

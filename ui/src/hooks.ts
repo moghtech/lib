@@ -1,6 +1,6 @@
 import { useCombobox } from "@mantine/core";
 import { useWindowEvent } from "@mantine/hooks";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Called on a matching key press. Return exactly `false` when the press
@@ -61,28 +61,6 @@ export function useCtrlKeyListener(
   useKeyListener(listenKey, onPress, "ctrl");
 }
 
-export type Dimensions = { width: number; height: number };
-export function useWindowDimensions() {
-  const [dimensions, setDimensions] = useState<Dimensions>({
-    width: 0,
-    height: 0,
-  });
-  useEffect(() => {
-    const callback = () => {
-      setDimensions({
-        width: window.screen.availWidth,
-        height: window.screen.availHeight,
-      });
-    };
-    callback();
-    window.addEventListener("resize", callback);
-    return () => {
-      window.removeEventListener("resize", callback);
-    };
-  }, []);
-  return dimensions;
-}
-
 export function useSearchCombobox(props?: {
   onOpen?: () => void;
   onClose?: () => void;
@@ -134,4 +112,29 @@ export function useDebounce<T>(value: T, delay: number): T {
   }, [value, delay]);
 
   return debouncedValue;
+}
+
+/**
+ * `fn`, run one call at a time: a call while another is in flight is
+ * dropped (resolving to `undefined`). A second press (a double click,
+ * Enter held) can land before React renders the loading / disabled
+ * state the first one set, and a confirm dialog would send its request
+ * twice (a second delete of an archived item purges it). The latest
+ * `fn` is called, and the returned function keeps one identity.
+ */
+export function useSingleFlight<A extends unknown[], R>(
+  fn: (...args: A) => Promise<R>,
+): (...args: A) => Promise<R | undefined> {
+  const inFlight = useRef(false);
+  const latest = useRef(fn);
+  latest.current = fn;
+  return useCallback(async (...args: A) => {
+    if (inFlight.current) return undefined;
+    inFlight.current = true;
+    try {
+      return await latest.current(...args);
+    } finally {
+      inFlight.current = false;
+    }
+  }, []);
 }

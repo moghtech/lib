@@ -6,14 +6,6 @@ export function fmtDate(d: Date) {
   }:${minutes > 9 ? minutes : "0" + minutes}`;
 }
 
-export function fmtUtcDate(d: Date) {
-  const hours = d.getUTCHours();
-  const minutes = d.getUTCMinutes();
-  return `${fmtMonth(d.getUTCMonth())} ${d.getUTCDate()} ${
-    hours > 9 ? hours : "0" + hours
-  }:${minutes > 9 ? minutes : "0" + minutes}`;
-}
-
 export function fmtMonth(month: number) {
   switch (month) {
     case 0:
@@ -48,16 +40,31 @@ export const fmtDateWithMinutes = (d: Date) => {
   return d.toLocaleString();
 };
 
+/**
+ * The time from `startTs` to `endTs` (ms timestamps): tenths of a
+ * second under a minute ("12.3 seconds"), then minutes and seconds
+ * ("1 minute 5 seconds"), then hours and minutes ("2 hours 3
+ * minutes"). The duration is rounded once, to the unit shown last,
+ * so a part never reads 60 ("1 minute 59.6 seconds" is "2 minutes 0
+ * seconds"). An end before the start (clock skew) is no time.
+ */
 export function fmtDuration(startTs: number, endTs: number) {
-  const start = new Date(startTs);
-  const end = new Date(endTs);
-  const durr = end.getTime() - start.getTime();
-  const seconds = durr / 1000;
-  const minutes = Math.floor(seconds / 60);
-  const remaining_seconds = seconds % 60;
-  return `${
-    minutes > 0 ? `${minutes} minute${minutes > 1 ? "s" : ""} ` : ""
-  }${remaining_seconds.toFixed(minutes > 0 ? 0 : 1)} seconds`;
+  const ms = Math.max(0, endTs - startTs);
+  const tenths = Math.round(ms / 100);
+  if (tenths < 600) {
+    return `${(tenths / 10).toFixed(1)} seconds`;
+  }
+  const seconds = Math.round(ms / 1_000);
+  if (seconds < 3_600) {
+    return `${plural(Math.floor(seconds / 60), "minute")} ${plural(seconds % 60, "second")}`;
+  }
+  const minutes = Math.round(ms / 60_000);
+  return `${plural(Math.floor(minutes / 60), "hour")} ${plural(minutes % 60, "minute")}`;
+}
+
+/** `count` whole `unit`s: "1 minute", "2 minutes", "0 seconds". */
+function plural(count: number, unit: string) {
+  return `${count} ${unit}${count === 1 ? "" : "s"}`;
 }
 
 const MINUTE_MS = 60_000;

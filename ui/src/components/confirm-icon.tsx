@@ -18,14 +18,27 @@ import {
 export interface ConfirmIconProps extends ActionIconProps {
   onClick?: MouseEventHandler<HTMLButtonElement>;
   onBlur?: FocusEventHandler<HTMLButtonElement>;
+  /**
+   * What the button does (eg. "Remove from group"): its accessible
+   * name and tooltip, "Confirm: <label>" while it waits for the
+   * confirming click. Pass it: the icon alone names nothing.
+   */
+  label?: string;
 }
 
+/**
+ * An icon button which asks for a second click (within 4 seconds) before
+ * it runs `onClick`, showing a check mark in between.
+ */
 export const ConfirmIcon = createPolymorphicComponent<
   "button",
   ConfirmIconProps
 >(
   forwardRef<HTMLButtonElement, ConfirmIconProps>(
-    ({ children, onClick, onBlur, miw, loading, disabled, ...props }, ref) => {
+    (
+      { children, onClick, onBlur, miw, loading, disabled, label, ...props },
+      ref,
+    ) => {
       const [clickedOnce, setClickedOnce] = useState(false);
       useEffect(() => {
         if (clickedOnce) {
@@ -52,6 +65,8 @@ export const ConfirmIcon = createPolymorphicComponent<
           }}
           onPointerDown={(e) => e.stopPropagation()}
           disabled={disabled || loading}
+          title={label}
+          aria-label={label && (clickedOnce ? `Confirm: ${label}` : label)}
           {...props}
           ref={ref}
         >

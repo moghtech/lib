@@ -13,26 +13,23 @@ import { notifications } from "@mantine/notifications";
 import { useQueryClient } from "@tanstack/react-query";
 import { Info, ShieldAlert, Trash } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
-import {
-  Config,
-  ConfigItem,
-  ConfirmModal,
-  CopyText,
-  EntityHeader,
-  EntityPage,
-  InfoRow,
-  PageGuard,
-  Section,
-  useExternalLoginProviders,
-  useManageAuth,
-} from "../..";
+import { Config, ConfigItem, configItemLabel } from "../../components/config";
+import { ConfirmModal } from "../../components/confirm-modal";
+import { CopyText } from "../../components/copy-text";
+import { EntityHeader } from "../../components/entity-header";
+import { EntityPage } from "../../components/entity-page";
+import { InfoRow } from "../../components/info-row";
+import { PageGuard } from "../../components/page-guard";
+import { Section } from "../../components/section";
+import { useExternalLoginProviders, useManageAuth } from "../hooks";
+import { savedListItem } from "../list-cache";
 import { LoginProviderIcon, LoginProviderKind } from "../login/providers";
 import {
   ProviderFormValues,
   providerFormErrors,
   providerFormValues,
   providerUpdate,
-} from "./form";
+} from "./values";
 
 export const LOGIN_PROVIDER_KIND_LABELS = {
   Oidc: "OIDC",
@@ -98,9 +95,16 @@ export function LoginProviderPage({
   const { mutateAsync: update, isPending: updatePending } = useManageAuth(
     "UpdateExternalLoginProvider",
     {
-      onSuccess: () => {
+      onSuccess: (saved) => {
         notifications.show({ message: "Saved login provider." });
-        invalidate();
+        // Shown right away, the save resolving once the lists are current.
+        return savedListItem(
+          queryClient,
+          ["ListExternalLoginProviders"],
+          saved,
+          (item) => item.provider.id,
+          invalidate,
+        );
       },
     },
   );
@@ -264,8 +268,9 @@ type ListItem =
     : never;
 
 /**
- * The provider's configuration as a config section: the draft is
- * checked like the modal form's before it is saved.
+ * The provider's configuration as a config section. The draft is
+ * checked before it is saved (`providerFormErrors`): a refused save
+ * says why, and from then on each field shows its error.
  */
 function LoginProviderConfig({
   item,
@@ -281,6 +286,12 @@ function LoginProviderConfig({
   // Never persisted: the draft may hold the client secret.
   const [update, setUpdate] = useState<Partial<ProviderFormValues>>({});
   const values = { ...original, ...update };
+  const errors = providerFormErrors(item, values);
+  // Shown at the fields once a save was refused for them, not while
+  // the draft is first filled in.
+  const [showErrors, setShowErrors] = useState(false);
+  const error = (field: keyof ProviderFormValues) =>
+    showErrors ? errors[field] : undefined;
   const groupsUsed =
     !!values.groups_claim.trim() ||
     values.allowed_groups.length > 0 ||
@@ -303,6 +314,7 @@ function LoginProviderConfig({
           }
           placeholder={placeholder}
           disabled={readOnly}
+          aria-label={configItemLabel(field)}
           w={{ base: "85%", lg: 400 }}
           {...extra}
         />
@@ -316,11 +328,13 @@ function LoginProviderConfig({
       update={update}
       setUpdate={setUpdate}
       disabled={readOnly}
-      secretKeys={["client_secret"]}
+      // Never sent to the browser: the draft starts empty, whether a
+      // secret is stored or not.
+      secretKeys={[{ key: "client_secret", stored: hasSecret }]}
       onSave={async () => {
-        const errors = providerFormErrors(item, values);
         const [message] = Object.values(errors);
         if (message) {
+          setShowErrors(true);
           notifications.show({ message, color: "red" });
           throw new Error(message);
         }
@@ -342,6 +356,7 @@ function LoginProviderConfig({
                 description:
                   "Names the provider in its login and redirect URIs (/auth/external/{slug}/callback). Lowercase letters, digits and hyphens, unique among the providers. Changing it changes the redirect URI to register at the provider.",
                 placeholder: item.provider.slug ? undefined : item.provider.id,
+                error: error("slug"),
               },
               registration_disabled: {
                 label: "Disable new user registration",
@@ -360,6 +375,7 @@ function LoginProviderConfig({
                   "The issuer address, as reachable from the app server. It must serve /.well-known/openid-configuration.",
                 placeholder: "https://accounts.example.com/application/o/app",
                 hidden: kind !== "Oidc",
+                error: error("provider"),
               },
               client_id: {
                 label: "Client ID",
@@ -390,6 +406,8 @@ function LoginProviderConfig({
                     }
                     autoComplete="new-password"
                     disabled={readOnly || values.clear_client_secret}
+                    aria-label="Client Secret"
+                    error={error("client_secret")}
                     w={{ base: "85%", lg: 400 }}
                   />
                 </ConfigItem>
@@ -402,6 +420,7 @@ function LoginProviderConfig({
                     : "The provider has to be disabled, it can't work without a secret.",
                 // Left empty the secret is kept, removing it has to be explicit
                 hidden: !hasSecret,
+                error: error("clear_client_secret"),
               },
             },
           },
@@ -456,6 +475,7 @@ function LoginProviderConfig({
                 description:
                   "The provider address users are redirected to in their browser, if it differs from the Provider URL. Host only, without a path.",
                 placeholder: "https://accounts.example.com",
+                error: error("redirect_host"),
               },
               additional_audiences: tags(
                 "additional_audiences",
@@ -504,11 +524,13 @@ function LoginProviderConfig({
                       description="Only accept tokens issued at most this many seconds ago. 0 accepts them until they expire, which can be hours. Clients should exchange a token right after receiving it, so a few minutes (eg. 300) is enough."
                     >
                       <NumberInput
-                        value={value ?? 0}
+                        value={value}
+                        // Emptied, the field is "": an error, not 0,
+                        // which would accept tokens of any age.
                         onChange={(age) =>
                           set({
                             token_exchange_max_age_secs:
-                              typeof age === "number" ? age : 0,
+                              typeof age === "number" ? age : "",
                           })
                         }
                         suffix=" seconds"
@@ -516,6 +538,8 @@ function LoginProviderConfig({
                         allowDecimal={false}
                         allowNegative={false}
                         disabled={readOnly}
+                        aria-label="Maximum Token Age"
+                        error={error("token_exchange_max_age_secs")}
                         w={{ base: "85%", lg: 400 }}
                       />
                     </ConfigItem>

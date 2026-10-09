@@ -106,3 +106,25 @@ test("long runs of whitespace tokenize fast", () => {
     }
   }
 });
+
+test("values after a plain run still tokenize", () => {
+  // The run of plain characters is consumed at once: what follows it
+  // is tokenized as before.
+  const cases: [string, string, RegExp][] = [
+    ["KEY=some-value 123", "123", /^number/],
+    ["KEY=some-value # note", "# note", /^comment/],
+    ["KEY=some-value 'quoted'", "'quoted'", /^string/],
+    ['KEY=some-value "quoted"', '"quoted"', /^string/],
+    ["KEY=some-value true", "true", /^constant\.language\.boolean/],
+    ["KEY=some-value nested: 1", "nested", /^key/],
+    ["KEY=some-value NEXT=1", "NEXT", /^key/],
+  ];
+  for (const context of CONTEXTS) {
+    const tokenize = envTokenizer(context);
+    for (const [line, part, type] of cases) {
+      const tokens = tokenize(line);
+      const label = `${context}: ${JSON.stringify(line)}`;
+      assert.match(tokenAt(tokens, line.lastIndexOf(part)) ?? "", type, label);
+    }
+  }
+});

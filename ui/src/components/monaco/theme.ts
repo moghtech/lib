@@ -9,6 +9,12 @@ monaco.editor.defineTheme("light", {
       background: "f5f5f5",
       token: "",
     },
+    // Monaco's yaml names its keys `type`: coloured like the keys of
+    // the other languages (`key`, which `vs` colours 863B00).
+    {
+      foreground: "863B00",
+      token: "type.yaml",
+    },
     {
       foreground: "6a737d",
       token: "comment",
@@ -358,6 +364,12 @@ monaco.editor.defineTheme("dark", {
     {
       background: "15171b",
       token: "",
+    },
+    // Monaco's yaml names its keys `type`: coloured like the keys of
+    // the other languages (`key`, which `vs-dark` colours 9CDCFE).
+    {
+      foreground: "9CDCFE",
+      token: "type.yaml",
     },
     {
       foreground: "959da5",

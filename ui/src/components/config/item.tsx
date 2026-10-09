@@ -2,6 +2,8 @@ import {
   Button,
   createPolymorphicComponent,
   Group,
+  PasswordInput,
+  PasswordInputProps,
   Select,
   SelectProps,
   Stack,
@@ -26,13 +28,25 @@ export interface ConfigItemProps extends StackProps {
   children?: ReactNode;
 }
 
+/**
+ * The text a string `label` of a `ConfigItem` shows (snake case
+ * spaced and capitalized), else `undefined`. The inputs of
+ * `ConfigInput`, `ConfigSelector` and `ConfigSwitch` take it as their
+ * accessible name by default: the item's label is no `<label>`.
+ */
+export function configItemLabel(label: ReactNode): string | undefined {
+  return typeof label === "string"
+    ? fmtSnakeCaseToUpperSpaceCase(label)
+    : undefined;
+}
+
 export const ConfigItem = createPolymorphicComponent<"div", ConfigItemProps>(
   forwardRef<HTMLDivElement, ConfigItemProps>(
     ({ label, labelExtra, description, children, ...props }, ref) => {
       const labelDescription = (label || description) && (
         <Stack gap="0">
           {typeof label === "string" && (
-            <Text fz="h3">{fmtSnakeCaseToUpperSpaceCase(label)}</Text>
+            <Text fz="h3">{configItemLabel(label)}</Text>
           )}
           {label && typeof label !== "string" && label}
           {description && (
@@ -96,6 +110,7 @@ export function ConfigInput({
         onValueChange?.(e.target.value);
       }}
       onBlur={(e) => onBlur?.(e.target.value)}
+      aria-label={configItemLabel(itemProps.label)}
       {...inputProps}
     />
   );
@@ -114,6 +129,46 @@ export function ConfigInput({
   );
 }
 
+/**
+ * A config field holding a credential (eg. a webhook secret, a url with
+ * a token in it): masked, with a toggle to show it, so it isn't on
+ * screen whenever the page is (a screen share, a recording). A
+ * `Config` field with `secret: true` renders it, and keeps it out of
+ * the confirm dialog; a custom field using it directly lists its key in
+ * the Config's `secretKeys`.
+ */
+export function ConfigSecretInput({
+  value,
+  disabled,
+  placeholder,
+  onValueChange,
+  inputProps,
+  ...itemProps
+}: {
+  value: string | undefined;
+  disabled?: boolean;
+  placeholder?: string;
+  onValueChange?: (value: string) => void;
+  inputProps?: PasswordInputProps;
+} & Omit<ConfigItemProps, "children">) {
+  return (
+    <ConfigItem {...itemProps}>
+      <PasswordInput
+        w={{ base: "85%", lg: 400 }}
+        value={value ?? ""}
+        placeholder={placeholder}
+        disabled={disabled}
+        onChange={(e) => onValueChange?.(e.target.value)}
+        aria-label={configItemLabel(itemProps.label)}
+        // Not the user's own password: a browser must not fill that in
+        // (it ignores "off" on a password input).
+        autoComplete="new-password"
+        {...inputProps}
+      />
+    </ConfigItem>
+  );
+}
+
 export function ConfigSelector({
   value,
   options,
@@ -124,7 +179,6 @@ export function ConfigSelector({
   inputLeft,
   inputRight,
   inputProps,
-  email,
   ...itemProps
 }: {
   value: string | undefined;
@@ -136,7 +190,6 @@ export function ConfigSelector({
   inputLeft?: ReactNode;
   inputRight?: ReactNode;
   inputProps?: SelectProps;
-  email?: boolean;
 } & Omit<ConfigItemProps, "children">) {
   const inputNode = (
     <Select
@@ -152,6 +205,7 @@ export function ConfigSelector({
         value && onValueChange?.(value);
       }}
       onBlur={(e) => onBlur?.(e.target.value)}
+      aria-label={configItemLabel(itemProps.label)}
       {...inputProps}
     />
   );
@@ -188,6 +242,7 @@ export function ConfigSwitch({
         checked={value}
         onCheckedChange={onCheckedChange}
         disabled={disabled}
+        aria-label={configItemLabel(itemProps.label)}
         {...switchProps}
       />
     </ConfigItem>

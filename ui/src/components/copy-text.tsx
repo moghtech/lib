@@ -1,5 +1,6 @@
 import { Group, GroupProps, Text, TextProps } from "@mantine/core";
-import { CopyButton, sendCopyNotification } from "./copy-button";
+import { copyToClipboard } from "./clipboard";
+import { CopyButton } from "./copy-button";
 
 export interface CopyTextProps extends TextProps {
   content: string;
@@ -27,15 +28,12 @@ export function CopyText({
         }}
         className="text-ellipsis bordered-light"
         size="sm"
-        onClick={() => {
-          navigator.clipboard.writeText(content);
-          sendCopyNotification(label);
-        }}
+        onClick={() => copyToClipboard(content, label)}
         {...textProps}
       >
         {content}
       </Text>
-      <CopyButton content={content} />
+      <CopyButton content={content} label={label} />
     </Group>
   );
 }

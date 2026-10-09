@@ -12,23 +12,17 @@ import { useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Trash } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import * as MoghAuth from "mogh_auth_client";
-import {
-  ConfirmModal,
-  CopyText,
-  CreateModal,
-  DataTable,
-  filterBySplit,
-  ItemLink,
-  SearchInput,
-  Section,
-  SectionProps,
-  useExternalLoginProviders,
-  useManageAuth,
-} from "../..";
+import { ConfirmModal } from "../../components/confirm-modal";
+import { CopyText } from "../../components/copy-text";
+import { CreateModal } from "../../components/create-modal";
+import { DataTable } from "../../components/data-table";
+import { ItemLink } from "../../components/item-link";
+import { SearchInput } from "../../components/search-input";
+import { Section, type SectionProps } from "../../components/section";
+import { filterBySplit } from "../../utils";
+import { useExternalLoginProviders, useManageAuth } from "../hooks";
 import { LoginProviderIcon, LoginProviderKind } from "../login/providers";
-import { LoginProviderModal } from "./form";
 
-export * from "./form";
 export * from "./page";
 
 type ListItem = MoghAuth.Types.ExternalLoginProviderListItem;
@@ -53,10 +47,9 @@ function newProviderConfig(
  * Manage the external login providers (OIDC, Github, Google)
  * users can use to log in. For use in app settings pages.
  *
- * With `link`, the names link to the app's `LoginProviderPage`
- * route and a new provider opens there; without it the providers
- * are viewed and edited in a modal (`LoginProviderModal`), a new
- * one included.
+ * Each provider is viewed and edited on its page, the app's route of
+ * `LoginProviderPage` (`link`): the names link there, and a new
+ * provider (its kind and name) continues there for its configuration.
  *
  * The API behind it is limited to admin users, see `AuthUserImpl::is_admin`.
  * Providers from the app configuration are listed read only.
@@ -65,21 +58,12 @@ export function LoginProvidersTable({
   link,
   ...sectionProps
 }: {
-  /**
-   * The route of a provider's page, by its id.
-   * Without it, providers open in a modal.
-   */
-  link?: (id: string) => string;
+  /** The route of a provider's page (`LoginProviderPage`), by its id. */
+  link: (id: string) => string;
 } & SectionProps) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { data: providers, isPending, error } = useExternalLoginProviders();
-
-  const [opened, setOpened] = useState<{
-    id: string;
-    justCreated?: boolean;
-  }>();
-  const openedItem = providers?.find((item) => item.provider.id === opened?.id);
 
   // The login page and linked logins show the enabled providers
   const invalidate = () =>
@@ -89,8 +73,6 @@ export function LoginProvidersTable({
       }),
       queryClient.invalidateQueries({ queryKey: ["GetLoginOptions"] }),
     ]);
-
-  const open = (id: string) => (link ? navigate(link(id)) : setOpened({ id }));
 
   const [newKind, setNewKind] = useState<LoginProviderKind>("Oidc");
   const [newName, setNewName] = useState("");
@@ -145,13 +127,9 @@ export function LoginProvidersTable({
                 await invalidate();
                 // Continue to the full configuration, which
                 // shows the redirect URI of the new provider.
-                if (link) {
-                  navigate(link(item.provider.id), {
-                    state: { justCreated: true },
-                  });
-                } else {
-                  setOpened({ id: item.provider.id, justCreated: true });
-                }
+                navigate(link(item.provider.id), {
+                  state: { justCreated: true },
+                });
                 return true;
               })
               .catch(() => false)
@@ -184,30 +162,19 @@ export function LoginProvidersTable({
         noResults={
           <Text c="dimmed">No external login providers configured.</Text>
         }
-        onRowClick={(item) => open(item.provider.id)}
+        onRowClick={(item) => navigate(link(item.provider.id))}
         columns={[
           {
             header: "Name",
             accessorFn: (item: ListItem) => item.provider.name,
-            cell: ({ row: { original: item } }) => {
-              const icon = (
-                <LoginProviderIcon kind={item.provider.config.kind} />
-              );
-              // Without a page, the row click opens the modal.
-              return link ? (
-                <ItemLink
-                  name={item.provider.name}
-                  icon={icon}
-                  to={link(item.provider.id)}
-                  gap="0.5rem"
-                />
-              ) : (
-                <Group gap="0.5rem" wrap="nowrap" className="hover-underline">
-                  {icon}
-                  {item.provider.name}
-                </Group>
-              );
-            },
+            cell: ({ row: { original: item } }) => (
+              <ItemLink
+                name={item.provider.name}
+                icon={<LoginProviderIcon kind={item.provider.config.kind} />}
+                to={link(item.provider.id)}
+                gap="0.5rem"
+              />
+            ),
           },
           {
             header: "Kind",
@@ -296,13 +263,6 @@ export function LoginProvidersTable({
             ),
           },
         ]}
-      />
-
-      <LoginProviderModal
-        item={openedItem}
-        justCreated={opened?.justCreated}
-        onClose={() => setOpened(undefined)}
-        onSaved={invalidate}
       />
     </Section>
   );

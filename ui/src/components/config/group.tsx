@@ -1,8 +1,16 @@
-import { Fragment, useState } from "react";
-import { ConfigFieldArgs, ConfigGroupArgs } from ".";
-import { ConfigInput, ConfigItem, ConfigSelector, ConfigSwitch } from "./item";
-import { Group, NumberInput, Stack } from "@mantine/core";
+import { Fragment } from "react";
+import type { ConfigFieldArgs, ConfigGroupArgs } from ".";
+import {
+  ConfigInput,
+  ConfigItem,
+  configItemLabel,
+  ConfigSecretInput,
+  ConfigSelector,
+  ConfigSwitch,
+} from "./item";
+import { Group, Stack } from "@mantine/core";
 import { CircleQuestionMark } from "lucide-react";
+import { ConfigNumberInput } from "./number-input";
 
 export function ConfigGroup<T>({
   config,
@@ -33,6 +41,24 @@ export function ConfigGroup<T>({
             return null;
           }
 
+          if (args?.secret) {
+            // A string, also while it's unset.
+            return (
+              <ConfigSecretInput
+                key={key}
+                label={args.label ?? key}
+                value={typeof value === "string" ? value : undefined}
+                onValueChange={(value) =>
+                  setUpdate({ [key]: value } as Partial<T>)
+                }
+                disabled={args.disabled || disabled}
+                placeholder={args.placeholder}
+                description={args.description}
+                inputProps={{ error: args.error }}
+              />
+            );
+          }
+
           switch (
             value !== undefined && value !== null ? typeof value : args?.type
           ) {
@@ -50,6 +76,7 @@ export function ConfigGroup<T>({
                     disabled={args?.disabled || disabled}
                     placeholder={args?.placeholder}
                     description={args?.description}
+                    inputProps={{ error: args?.error }}
                   />
                 );
               } else {
@@ -64,6 +91,7 @@ export function ConfigGroup<T>({
                     disabled={args?.disabled || disabled}
                     placeholder={args?.placeholder}
                     description={args?.description}
+                    inputProps={{ error: args?.error }}
                   />
                 );
               }
@@ -82,6 +110,8 @@ export function ConfigGroup<T>({
                     }
                     disabled={args?.disabled || disabled}
                     placeholder={args?.placeholder}
+                    aria-label={configItemLabel(args?.label ?? key)}
+                    error={args?.error}
                   />
                 </ConfigItem>
               );
@@ -97,6 +127,7 @@ export function ConfigGroup<T>({
                   }
                   disabled={args?.disabled || disabled}
                   description={args?.description}
+                  switchProps={{ error: args?.error }}
                 />
               );
 
@@ -113,47 +144,5 @@ export function ConfigGroup<T>({
         }
       })}
     </Stack>
-  );
-}
-
-/**
- * Only complete numbers reach `onValueChange`: partial input ('' or
- * '-') stays in the input instead of becoming 0. On blur, the input
- * shows the stored value again, so it never disagrees with what Save
- * sends.
- */
-function ConfigNumberInput({
-  value,
-  onValueChange,
-  disabled,
-  placeholder,
-}: {
-  value: number | undefined;
-  onValueChange: (value: number) => void;
-  disabled: boolean | undefined;
-  placeholder: string | undefined;
-}) {
-  // The text while it isn't the stored number. NumberInput passes
-  // strings for partial input, and for text it keeps as typed
-  // ('1.', '0.10', 14+ digits).
-  const [draft, setDraft] = useState<string>();
-  return (
-    <NumberInput
-      w={{ base: "85%", lg: 400 }}
-      value={draft ?? value ?? ""}
-      onChange={(input) => {
-        setDraft(typeof input === "string" ? input : undefined);
-        const number =
-          typeof input === "number"
-            ? input
-            : input.trim() === ""
-              ? NaN
-              : Number(input);
-        if (Number.isFinite(number)) onValueChange(number);
-      }}
-      onBlur={() => setDraft(undefined)}
-      disabled={disabled}
-      placeholder={placeholder}
-    />
   );
 }

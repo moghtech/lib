@@ -38,7 +38,11 @@ export function EntityHeader({
       if (name === newName) {
         setEditingName(false);
       } else {
-        _onRename(newName).then(() => setEditingName(false));
+        _onRename(newName)
+          .then(() => setEditingName(false))
+          // The name stays in edit to retry; the failure was notified by
+          // whoever made the request.
+          .catch(() => {});
       }
     });
   return (
@@ -73,7 +77,7 @@ export function EntityHeader({
                   <Text fz="h1" fw="bolder">
                     {name}
                   </Text>
-                  <ActionIcon title="Rename">
+                  <ActionIcon title="Rename" aria-label="Rename">
                     <Edit size="1rem" />
                   </ActionIcon>
                 </>
@@ -82,6 +86,7 @@ export function EntityHeader({
                 <>
                   <TextInput
                     placeholder="Enter name"
+                    aria-label="Name"
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && onRename()}
@@ -94,6 +99,7 @@ export function EntityHeader({
                     color="blue"
                     onClick={onRename}
                     loading={renamePending}
+                    aria-label="Save name"
                   >
                     <Save size="1rem" />
                   </ActionIcon>
@@ -104,6 +110,7 @@ export function EntityHeader({
                       setNewName(name);
                       setEditingName(false);
                     }}
+                    aria-label="Cancel rename"
                   >
                     <X size="1rem" />
                   </ActionIcon>

@@ -1,7 +1,7 @@
 import { Button, ButtonProps, useComputedColorScheme } from "@mantine/core";
 import { KeyRound } from "lucide-react";
 import * as MoghAuth from "mogh_auth_client";
-import { externalLogin } from "../..";
+import { externalLogin } from "../hooks";
 
 /**
  * The login header has room for this many provider buttons.

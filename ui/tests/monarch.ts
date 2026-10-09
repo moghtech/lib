@@ -10,18 +10,31 @@ import { registerHooks } from "node:module";
 // static imports are all resolved before any module runs.
 const monarch: Record<string, unknown> = {};
 (globalThis as { __moghMonarch?: unknown }).__moghMonarch = monarch;
+/** The themes the syntax files define, by name. */
+export const themes: Record<
+  string,
+  { rules: { token: string; foreground?: string }[] }
+> = {};
+(globalThis as { __moghThemes?: unknown }).__moghThemes = themes;
 const MONACO_STUB = `
 const captured = globalThis.__moghMonarch;
 export const languages = {
   register() {},
   setLanguageConfiguration() {},
   setMonarchTokensProvider(id, language) { captured[id] = language; },
+  IndentAction: { None: 0, Indent: 1, IndentOutdent: 2, Outdent: 3 },
 };
-export const editor = {};
+export const editor = {
+  defineTheme(name, theme) { globalThis.__moghThemes[name] = theme; },
+};
 `;
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier === "monaco-editor") {
+    if (
+      specifier === "monaco-editor" ||
+      // What Monaco's own language definitions import it as
+      specifier.endsWith("/editor/editor.api.js")
+    ) {
       return {
         url: "data:text/javascript," + encodeURIComponent(MONACO_STUB),
         shortCircuit: true,
@@ -40,10 +53,28 @@ registerHooks({
 
 const SYNTAX = new URL("../src/components/monaco/syntax/", import.meta.url);
 
+/** Loads (defines) mogh_ui's Monaco themes into `themes`. */
+export async function loadThemes() {
+  await import(new URL("../theme.ts", SYNTAX).href);
+}
+
 /** Loads (registers) syntax files, eg. `loadSyntax("toml")`. */
 export async function loadSyntax(...names: string[]) {
   for (const name of names) {
     await import(new URL(`${name}.ts`, SYNTAX).href);
+  }
+}
+
+/**
+ * Loads languages monaco-editor ships, which mogh_ui uses as they are
+ * (eg. `loadBuiltin("yaml", "shell")`).
+ */
+export async function loadBuiltin(...names: string[]) {
+  for (const name of names) {
+    const { language } = await import(
+      `monaco-editor/languages/definitions/${name}/${name}.js`
+    );
+    monarch[name] = language;
   }
 }
 

@@ -2,11 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 
-// Runs `useAuthState` / `externalLogin` of src/auth/index.ts in Node, as
+// Runs `useAuthState` / `externalLogin` of src/auth/hooks.ts in Node, as
 // a plain function: react, react-query, the notifications and the auth
-// client are stubs recording what the hook does with them, and the auth
-// pages (tsx, left for the bundler) aren't loaded. Each `pageLoad` gets
-// its own copy of the auth modules (and so of their page load state).
+// client are stubs recording what the hook does with them. The hooks
+// import no page (tsx, left for the bundler). Each `pageLoad` gets its
+// own copy of the auth modules (and so of their page load state).
 
 interface Recorder {
   mutations: Record<string, MutationOptions>;
@@ -41,6 +41,8 @@ const STUBS: Record<string, string> = {
   react: `
 export const useState = (init) =>
   [typeof init === "function" ? init() : init, () => {}];
+export const useSyncExternalStore = (_subscribe, snapshot) => snapshot();
+export const useRef = (current) => ({ current });
 `,
   "@tanstack/react-query": `
 const recorder = globalThis.__moghAuthTest;
@@ -73,7 +75,8 @@ export const MoghAuthClient = () => ({
 export const isReauthenticationRequired = () => false;
 `,
 };
-const PAGES = ["./issuers", "./login", "./profile", "./providers"];
+/** The sources: their relative imports load the page load's copies. */
+const SRC = new URL("../src/", import.meta.url).href;
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -86,12 +89,10 @@ registerHooks({
     const parent = context.parentURL ?? "";
     const parentPath = parent.split("?")[0];
     if (
-      parentPath.endsWith("/src/auth/index.ts") &&
-      PAGES.includes(specifier)
+      specifier.startsWith(".") &&
+      parentPath.startsWith(SRC) &&
+      parentPath.endsWith(".ts")
     ) {
-      return { url: "data:text/javascript,", shortCircuit: true };
-    }
-    if (specifier.startsWith("./") && parentPath.endsWith(".ts")) {
       // The page load's copy of the module.
       const query = parent.includes("?")
         ? parent.slice(parent.indexOf("?"))
@@ -163,8 +164,9 @@ function sessionStore<T>(use: () => T): T {
   removeItem: (key: string) => sessionStore(() => void storage.delete(key)),
 };
 
-type Auth = typeof import("../src/auth/index.ts");
+type Auth = typeof import("../src/auth/hooks.ts");
 type ExternalFlow = typeof import("../src/auth/external-flow.ts");
+type Utils = typeof import("../src/auth/utils.ts");
 
 let loads = 0;
 /** A new page load of the app at `path`. */
@@ -178,7 +180,7 @@ async function pageLoad(path: string) {
   recorder.tokens = [];
   recorder.jwt = "";
   recorder.warnings = [];
-  const auth: Auth = await import(`../src/auth/index.ts?load=${loads}`);
+  const auth: Auth = await import(`../src/auth/hooks.ts?load=${loads}`);
   const flow: ExternalFlow = await import(
     `../src/auth/external-flow.ts?load=${loads}`
   );
@@ -388,22 +390,23 @@ test("the url is only tidied up: a refused replaceState doesn't throw", async ()
 });
 
 test("the second factor's end keeps the fragment", async () => {
-  const { auth } = await pageLoad("/docs?a=1&totp=true#install");
-  auth.sanitizeQuery();
+  await pageLoad("/docs?a=1&totp=true#install");
+  const { sanitizeQuery }: Utils = await import("../src/auth/utils.ts");
+  sanitizeQuery();
   assert.deepEqual(navigations, [`${ORIGIN}/docs?a=1#install`]);
 
   // A path starting with `//` stays on this origin.
   await pageLoad("//x/?passkey=e30#h");
-  auth.sanitizeQuery();
+  sanitizeQuery();
   assert.deepEqual(navigations, [`${ORIGIN}//x/#h`]);
 
   // Nothing to remove (eg. after a local login's second factor): the page
   // is still loaded again, `replace` would only scroll to the fragment.
   await pageLoad("/notes#frag");
-  auth.sanitizeQuery();
+  sanitizeQuery();
   assert.deepEqual(navigations, ["reload"]);
   await pageLoad("/notes");
-  auth.sanitizeQuery();
+  sanitizeQuery();
   assert.deepEqual(navigations, [`${ORIGIN}/notes`]);
 });
 

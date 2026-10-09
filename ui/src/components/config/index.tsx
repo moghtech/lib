@@ -12,7 +12,7 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
-import { ConfirmUpdateModal } from "./confirm";
+import { ConfirmUpdateModal, SecretKey } from "./confirm";
 import { confirmDialogOpen } from "./confirm-open";
 import { Bookmark, History, Save } from "lucide-react";
 import { ConfigGroup } from "./group";
@@ -25,6 +25,7 @@ export * from "./confirm";
 export * from "./group";
 export * from "./item";
 export * from "./layout";
+export * from "./number-input";
 export * from "./unsaved-changes";
 
 export interface ConfigFieldArgs {
@@ -45,6 +46,15 @@ export interface ConfigFieldArgs {
   placeholder?: string;
   hidden?: boolean;
   disabled?: boolean;
+  /** Shown at the input, eg. why the value can't be saved. */
+  error?: ReactNode;
+  /**
+   * A string holding a credential (eg. a webhook secret): a masked
+   * input with a toggle to show it (`ConfigSecretInput`), and the
+   * confirm dialog shows that it changed, never its values (as for
+   * `secretKeys`).
+   */
+  secret?: boolean;
 }
 
 export interface ConfigGroupArgs<T> {
@@ -75,9 +85,10 @@ export interface ConfigProps<T> extends SectionProps {
   enableFancyToml?: boolean;
   /**
    * Fields holding secrets (a credential being set): the confirm
-   * dialog shows that they change, never their values.
+   * dialog shows that they change, never their values (see
+   * `SecretKey`).
    */
-  secretKeys?: (keyof T)[];
+  secretKeys?: SecretKey<T>[];
   groups: Record<
     string, // Section key
     ConfigGroupArgs<T>[] | false | undefined
@@ -128,6 +139,21 @@ export function Config<T>({
     () => Object.entries(_groups).filter(([_, groupArgs]) => !!groupArgs),
     [_groups],
   );
+
+  // The fields marked `secret`, never shown in the confirm dialog either.
+  const allSecretKeys = useMemo(() => {
+    const fieldKeys = groups.flatMap(([_, groupArgs]) =>
+      (groupArgs as ConfigGroupArgs<T>[]).flatMap(({ fields }) =>
+        Object.entries(fields)
+          .filter(
+            ([_, field]) =>
+              typeof field === "object" && (field as ConfigFieldArgs).secret,
+          )
+          .map(([key]) => key as keyof T),
+      ),
+    );
+    return [...(secretKeys ?? []), ...fieldKeys];
+  }, [groups, secretKeys]);
 
   const GroupsComponent = useMemo(
     () =>
@@ -226,7 +252,7 @@ export function Config<T>({
       disabled={disabled}
       fileContentsLanguage={fileContentsLanguage}
       enableFancyToml={enableFancyToml}
-      secretKeys={secretKeys}
+      secretKeys={allSecretKeys}
     />
   );
 

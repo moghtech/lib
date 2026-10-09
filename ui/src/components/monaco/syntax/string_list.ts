@@ -14,7 +14,7 @@ const string_list_conf: monaco.languages.LanguageConfiguration = {
   ],
 };
 
-const string_list_language = <monaco.languages.IMonarchLanguage>{
+const string_list_language: monaco.languages.IMonarchLanguage = {
   defaultToken: "",
   tokenPostfix: ".string_list",
 

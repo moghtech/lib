@@ -18,18 +18,17 @@ import { useEffect, useState } from "react";
 import { useInRouterContext } from "react-router-dom";
 import LoginHeader from "./header";
 import { LoginProviderButton, MAX_HEADER_LOGIN_PROVIDERS } from "./providers";
-import { externalLoginState, isLoginPath } from "../external-flow";
+import {
+  externalLoginState,
+  flowReturnParam,
+  isLoginPath,
+} from "../external-flow";
+import { type PasskeyRequest, passkeyRequestFromParam } from "../passkey-login";
 
 export * from "./providers";
-import {
-  BackButton,
-  backtoPath,
-  externalLogin,
-  sanitizeQuery,
-  useLogin,
-  useLoginOptions,
-  useUserId,
-} from "../..";
+import { BackButton } from "../../components/back-button";
+import { externalLogin, useLogin, useLoginOptions, useUserId } from "../hooks";
+import { backtoPath, sanitizeQuery } from "../utils";
 
 export interface LoginBrandingProps {
   appName: string;
@@ -95,7 +94,7 @@ export function LoginPage({
     : undefined;
 
   const onSuccess = ({ jwt }: MoghAuth.Types.JwtResponse) => {
-    MoghAuth.LOGIN_TOKENS!.add_and_change(jwt);
+    MoghAuth.LOGIN_TOKENS.add_and_change(jwt);
     onLogin?.();
     maybeNavigate?.();
   };
@@ -116,12 +115,48 @@ export function LoginPage({
     onSuccess: secondFactorOnSuccess,
   });
 
+  // The passkey request of the pending login, kept for "Try Again" when
+  // the prompt was dismissed, timed out or failed: rather than starting
+  // the login over (the password, or the provider's round trip). After
+  // an external login it is in the url, which `useAuthState` prompts for
+  // first.
+  const [passkeyRequest, setPasskeyRequest] = useState<
+    PasskeyRequest | undefined
+  >(() => {
+    const encoded = _passkeyIsPending
+      ? flowReturnParam(new URLSearchParams(location.search), "passkey")
+      : null;
+    try {
+      return encoded ? passkeyRequestFromParam(encoded) : undefined;
+    } catch {
+      // `useAuthState` says so.
+      return undefined;
+    }
+  });
+  const [passkeyPrompt, setPasskeyPrompt] = useState(false);
+  const providePasskey = (request: PasskeyRequest) => {
+    setPasskeyPrompt(true);
+    navigator.credentials
+      .get(request)
+      .then((credential) => completePasskeyLogin({ credential }))
+      .catch((e) => {
+        console.error(e);
+        notifications.show({
+          title: "Failed to select passkey",
+          message: "See console for details",
+          color: "red",
+        });
+      })
+      .finally(() => setPasskeyPrompt(false));
+  };
+
   // Entering a recovery code in place of the authenticator code.
   const [useRecoveryCode, setUseRecoveryCode] = useState(false);
 
   /** Back to the first factor, eg. to log in as somebody else. */
   const cancelSecondFactor = () => {
     setPasskeyPending(false);
+    setPasskeyRequest(undefined);
     setTotpPending(false);
     setUseRecoveryCode(false);
     // After an external login the second factor is asked for by the url.
@@ -167,19 +202,13 @@ export function LoginPage({
         switch (type) {
           case "Jwt":
             return onSuccess(data);
-          case "Passkey":
+          case "Passkey": {
+            const request =
+              MoghAuth.Passkey.prepareRequestChallengeResponse(data);
+            setPasskeyRequest(request);
             setPasskeyPending(true);
-            return navigator.credentials
-              .get(MoghAuth.Passkey.prepareRequestChallengeResponse(data))
-              .then((credential) => completePasskeyLogin({ credential }))
-              .catch((e) => {
-                console.error(e);
-                notifications.show({
-                  title: "Failed to select passkey",
-                  message: "See console for details",
-                  color: "red",
-                });
-              });
+            return providePasskey(request);
+          }
           case "Totp":
             return setTotpPending(true);
         }
@@ -272,7 +301,7 @@ export function LoginPage({
               {...localForm.getInputProps("password")}
               label="Password"
               placeholder="Enter password"
-              autoComplete="password"
+              autoComplete="current-password"
               autoCapitalize="off"
               autoCorrect="off"
               key={localForm.key("password")}
@@ -334,6 +363,15 @@ export function LoginPage({
               <Button variant="default" onClick={cancelSecondFactor}>
                 Cancel
               </Button>
+              {passkeyRequest && (
+                <Button
+                  leftSection={<KeyRound size="1rem" />}
+                  loading={passkeyPrompt}
+                  onClick={() => providePasskey(passkeyRequest)}
+                >
+                  Try Again
+                </Button>
+              )}
             </Group>
           </>
         )}

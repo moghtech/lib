@@ -68,10 +68,10 @@ loader.config({ monaco });
 
 // Load the themes
 import "./theme";
-// Load the parsers
-import "./syntax/yaml";
+// Load the parsers. yaml and shell are Monaco's own (monaco-editor
+// registers every language it ships): its yaml keys get their colour
+// from the themes (`type.yaml`).
 import "./syntax/toml";
 import "./syntax/fancy_toml";
-import "./syntax/shell";
 import "./syntax/key_value";
 import "./syntax/string_list";

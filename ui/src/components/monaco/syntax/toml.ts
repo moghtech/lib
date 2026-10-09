@@ -1,10 +1,10 @@
 import * as monaco from "monaco-editor";
-import { TOML_KEY_VALUE_REGEX } from "./toml_key";
+import { TOML_KEY_VALUE_REGEX, TOML_PLAIN_RUN_REGEX } from "./toml_key";
 
-/* -------------------------------------------------
- *  Language configuration  (unchanged)
- * ------------------------------------------------- */
-const toml_conf: monaco.languages.LanguageConfiguration = {
+// TOML. `fancy_toml` (fancy_toml.ts) is this, with yaml / environment
+// variables inside its triple quoted strings.
+
+export const toml_conf: monaco.languages.LanguageConfiguration = {
   comments: { lineComment: "#" },
   brackets: [
     ["{", "}"],
@@ -29,17 +29,13 @@ const toml_conf: monaco.languages.LanguageConfiguration = {
   ],
 };
 
-/* -------------------------------------------------
- *  Monarch tokenizer – TOML-only
- * ------------------------------------------------- */
-const toml_language: monaco.languages.IMonarchLanguage = {
+export const toml_language: monaco.languages.IMonarchLanguage = {
   defaultToken: "",
   tokenPostfix: ".toml",
 
   escapes: /\\(?:[btnfr"'\\\/]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})/,
 
   tokenizer: {
-    /* ---------- root ---------- */
     root: [
       { include: "@comments" },
 
@@ -72,9 +68,11 @@ const toml_language: monaco.languages.IMonarchLanguage = {
 
       /* Values */
       { include: "@values" },
+
+      /* Anything else, a run at once (not quadratic in its length) */
+      [TOML_PLAIN_RUN_REGEX, ""],
     ],
 
-    /* ---------- inline table ---------- */
     inlineTable: [
       [/\}/, { token: "punctuation.definition.table.inline", next: "@pop" }],
       { include: "@comments" },
@@ -82,15 +80,11 @@ const toml_language: monaco.languages.IMonarchLanguage = {
       { include: "@values" },
     ],
 
-    /* ---------- values ---------- */
     values: [
-      /* Strings ---------------------------------------------------- */
-      [/"""/, { token: "string", next: "@tripleBasicString" }],
-      [/"/, { token: "string", next: "@basicString" }],
-      [/'''/, { token: "string", next: "@tripleLiteralString" }],
-      [/'/, { token: "string", next: "@literalStringSingle" }],
+      /* Strings: their own state, which fancy_toml replaces */
+      { include: "@strings" },
 
-      /* Dates, times, booleans ------------------------------------ */
+      /* Dates, times, booleans */
       [
         /\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/,
         "constant.other.time.datetime.offset",
@@ -103,26 +97,31 @@ const toml_language: monaco.languages.IMonarchLanguage = {
       [/\d{2}:\d{2}:\d{2}(?:\.\d+)?/, "constant.other.time.time"],
       [/\b(true|false)\b/, "constant.language.boolean"],
 
-      /* Numbers ---------------------------------------------------- */
+      /* Numbers, not the digits inside a word */
       [/[+-]?(0x[0-9A-Fa-f_]+|0o[0-7_]+|0b[01_]+)/, "number.hex"],
       [
-        /[+-]?(?:\d(?:_?\d)*)(?:\.\d(?:_?\d)*)?(?:[eE][+-]?\d(?:_?\d)*)?/,
+        /(?<!\w)([+-]?(0|([1-9](([0-9]|_[0-9])+)?))(?:(?:\.(0|([1-9](([0-9]|_[0-9])+)?)))?[eE][+-]?[1-9]_?[0-9]*|(?:\.[0-9_]*)))(?!\w)/,
         "number.float",
       ],
-      [/[+-]?\d(?:_?\d)*/, "number"],
+      [/(?<!\w)((?:[+-]?(0|([1-9](([0-9]|_[0-9])+)?))))(?!\w)/, "number"],
 
-      /* Arrays ----------------------------------------------------- */
+      /* Arrays */
       [/\[/, { token: "punctuation.definition.array", next: "@array" }],
     ],
 
-    /* ---------- arrays ---------- */
+    strings: [
+      [/"""/, { token: "string", next: "@tripleBasicString" }],
+      [/"/, { token: "string", next: "@basicString" }],
+      [/'''/, { token: "string", next: "@tripleLiteralString" }],
+      [/'/, { token: "string", next: "@literalStringSingle" }],
+    ],
+
     array: [
       [/\]/, { token: "punctuation.definition.array", next: "@pop" }],
       [/,/, "punctuation.separator.array"],
       { include: "@values" },
     ],
 
-    /* ---------- strings ---------- */
     basicString: [
       [/[^\\"]+/, "string"],
       [/@escapes/, "string.escape"],
@@ -147,14 +146,10 @@ const toml_language: monaco.languages.IMonarchLanguage = {
       [/[^']+/, "string"],
     ],
 
-    /* ---------- misc helpers ---------- */
     comments: [[/\s*((#).*)$/, "comment"]],
   },
 };
 
-/* -------------------------------------------------
- *  Register with Monaco
- * ------------------------------------------------- */
 monaco.languages.register({ id: "toml" });
 monaco.languages.setLanguageConfiguration("toml", toml_conf);
 monaco.languages.setMonarchTokensProvider("toml", toml_language);

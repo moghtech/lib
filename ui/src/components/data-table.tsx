@@ -44,6 +44,7 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { ArrowDown, ArrowUp, Info, Minus } from "lucide-react";
+import { dataTableRowId } from "./data-table-row-id";
 
 // All built-in sort fns are registered so consumer columns can keep
 // using `sortFn: "auto"` (the default) or any built-in name.
@@ -100,6 +101,15 @@ export interface DataTableProps<
   tableKey: string;
   columns: (ColumnDef<DataTableFeatures, TData, TValue> | false | undefined)[];
   data: TData[];
+  /**
+   * A stable id of a row, eg. its resource's id. React keys the rows
+   * and their cells by it, so a cell with state of its own (an input
+   * with a draft, a selector) stays with its row when the rows are
+   * filtered, sorted or reordered. Default: the row's index, which
+   * hands such a cell to whatever row moves into its place. With
+   * `selectOptions` the rows are keyed by its `selectKey`.
+   */
+  getRowId?: (row: TData, index: number) => string;
   loading?: boolean;
   onRowClick?: (row: TData) => void;
   /** Called when a row is right clicked. The consumer decides whether to
@@ -140,6 +150,7 @@ export function DataTable<TData extends RowData, TValue>({
   tableKey,
   columns,
   data,
+  getRowId,
   loading,
   onRowClick,
   onRowContextMenu,
@@ -190,7 +201,7 @@ export function DataTable<TData extends RowData, TValue>({
     },
     sortDescFirst,
     onRowSelectionChange: setRowSelection,
-    getRowId: selectOptions?.selectKey,
+    getRowId: dataTableRowId(selectOptions?.selectKey, getRowId),
     enableRowSelection: canSelectRow,
   });
 
@@ -237,6 +248,7 @@ export function DataTable<TData extends RowData, TValue>({
                 }}
               >
                 <Checkbox
+                  aria-label="Select all rows"
                   color={selectOptions.color ?? "Neutral"}
                   disabled={canSelectRow === false}
                   checked={table.getIsAllRowsSelected()}
@@ -312,6 +324,23 @@ export function DataTable<TData extends RowData, TValue>({
                 onContextMenu={
                   onRowContextMenu
                     ? (e) => onRowContextMenu(row.original, e)
+                    : undefined
+                }
+                // A row which opens something opens by keyboard too:
+                // focusable, Enter / Space on the row itself (not on a
+                // link or button inside it, which do their own thing).
+                tabIndex={onRowClick ? 0 : undefined}
+                onKeyDown={
+                  onRowClick
+                    ? (e) => {
+                        if (
+                          e.target === e.currentTarget &&
+                          (e.key === "Enter" || e.key === " ")
+                        ) {
+                          e.preventDefault();
+                          onRowClick(row.original);
+                        }
+                      }
                     : undefined
                 }
                 {...extraRowProps}
