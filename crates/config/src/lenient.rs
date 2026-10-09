@@ -679,7 +679,7 @@ mod tests {
   #[test]
   fn coercion_errors_carry_no_values_after_redaction() {
     let err = from::<u16>(json!("hunter2secret")).unwrap_err();
-    let message = crate::redact_serde_error(&err);
+    let message = crate::error::redact_serde_error(&err);
     assert!(!message.contains("hunter2secret"), "{message}");
     assert!(message.contains("expected u16"), "{message}");
   }

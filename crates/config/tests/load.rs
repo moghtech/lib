@@ -76,22 +76,85 @@ fn extension_matching_is_case_insensitive() {
   assert_eq!(config, serde_json::json!({ "a": 1 }));
 }
 
+/// A file named as a path or by an include line is loaded or an
+/// error: a `config.txt` used to be skipped with a warning, and the
+/// app started without it.
 #[test]
-fn unsupported_extension_is_skipped_with_warning() {
+fn a_named_file_of_an_unsupported_type_is_an_error() {
   let dir = TestDir::new("unsupported_ext");
   let txt = dir.write("config.txt", "a = 1");
   let toml = dir.write("config.toml", "b = 2");
-  // The .txt file fails to parse and is skipped, rest still loads.
-  let config = load(&[&txt, &toml], &[], false, false);
-  assert_eq!(config, serde_json::json!({ "b": 2 }));
+  let err =
+    try_load::<serde_json::Value>(&[&txt, &toml], &[], false, false)
+      .unwrap_err();
+  assert!(
+    matches!(&err, mogh_config::Error::UnsupportedFileType { path } if path == &txt),
+    "{err}"
+  );
+  // Named by an include line.
+  let main = TestDir::new("unsupported_ext_include");
+  main.write("main.toml", "c = 3");
+  main.write(".include", &format!("{}\n", txt.display()));
+  let err = try_load::<serde_json::Value>(
+    &[&main.0],
+    &["*.toml"],
+    false,
+    false,
+  )
+  .unwrap_err();
+  assert!(
+    matches!(&err, mogh_config::Error::UnsupportedFileType { path } if path == &txt),
+    "{err}"
+  );
 }
 
+/// A directory scan picks files by pattern: one it finds which is
+/// no config file type (a backup matching `*config.*`) was never
+/// asked for in particular, and is skipped with a warning.
+#[test]
+fn a_scanned_file_of_an_unsupported_type_is_skipped() {
+  let dir = TestDir::new("scanned_unsupported");
+  dir.write("core.config.toml", "a = 1");
+  dir.write("core.config.toml.bak", "a = = broken");
+  dir.write("README.md", "# notes");
+  let config = load(&[&dir.0], &["*config.*"], false, false);
+  assert_eq!(config, serde_json::json!({ "a": 1 }));
+  // Without wildcards a scan finds every file but env files.
+  let config = load(&[&dir.0], &[], false, false);
+  assert_eq!(config, serde_json::json!({ "a": 1 }));
+}
+
+/// A path which doesn't exist is skipped (deliberate: an app may
+/// list optional paths), listed or named by an include line.
 #[test]
 fn missing_paths_are_skipped() {
   let dir = TestDir::new("missing_path");
   let toml = dir.write("config.toml", "a = 1");
   let missing = dir.0.join("does_not_exist.toml");
-  let config = load(&[&missing, &toml], &[], false, false);
+  // Through a file: not a directory, so missing too.
+  let through_file = toml.join("nested.toml");
+  let config =
+    load(&[&missing, &through_file, &toml], &[], false, false);
+  assert_eq!(config, serde_json::json!({ "a": 1 }));
+  let main = TestDir::new("missing_include");
+  main.write("main.toml", "b = 2");
+  main.write(
+    ".include",
+    &format!("{}\n{}\n", missing.display(), through_file.display()),
+  );
+  let config = load(&[&main.0], &["*.toml"], false, false);
+  assert_eq!(config, serde_json::json!({ "b": 2 }));
+}
+
+/// A path which is no file or directory, like `/dev/null` listed to
+/// load nothing, has no config to load.
+#[cfg(unix)]
+#[test]
+fn a_path_which_is_no_file_or_directory_is_skipped() {
+  let dir = TestDir::new("dev_null");
+  let toml = dir.write("config.toml", "a = 1");
+  let config =
+    load(&[Path::new("/dev/null"), &toml], &[], false, false);
   assert_eq!(config, serde_json::json!({ "a": 1 }));
 }
 
@@ -619,13 +682,25 @@ fn string_values_coerce_from_interpolation_too() {
 #[test]
 fn env_file_errors_name_the_line_not_the_value() {
   let dir = TestDir::new("env_file_errors");
-  // A malformed file is reported and skipped like a malformed toml.
-  let bad = dir.write(".env", "DB_PASSWORD=x\nnot an entry\n");
+  // A malformed file is an error naming the file and the line, like
+  // a malformed toml.
+  let bad =
+    dir.write(".env", "DB_PASSWORD=hunter2secret\nnot an entry\n");
   let good = dir.write(
     "app.env",
     "DB_PASSWORD=hunter2secret\nPORT=notaport\nDEBUG=true\n",
   );
-  let err = load_typed(&[&bad, &good]).unwrap_err().to_string();
+  let err = load_typed(&[&bad, &good]).unwrap_err();
+  let mogh_config::Error::ParseEnvFile { e, path } = &err else {
+    panic!("expected an env file error, got {err}");
+  };
+  assert_eq!(e.line, 2);
+  assert_eq!(path, &bad);
+  for message in [err.to_string(), format!("{err:?}")] {
+    assert!(!message.contains("hunter2secret"), "{message}");
+  }
+  // A value which doesn't coerce names its field, not the value.
+  let err = load_typed(&[&good]).unwrap_err().to_string();
   assert!(err.contains("at 'port'"), "{err}");
   assert!(err.contains("expected u16"), "{err}");
   assert!(!err.contains("notaport"), "{err}");
@@ -682,16 +757,18 @@ fn dotted_env_names_nest_into_structs() {
       },
     }
   );
-  // A conflicting file is refused (reported and skipped, like a
-  // malformed toml), and the error names the line, not the value.
+  // A conflicting file is an error, like a malformed toml, naming
+  // the line, not the value.
   let bad = dir
     .write("bad.env", "DATABASE=secretvalue\nDATABASE.ADDRESS=x\n");
-  let err = mogh_config::parse_env_file_object(
-    &std::fs::read_to_string(&bad).unwrap(),
-  )
-  .unwrap_err();
-  assert_eq!(err.line, 2);
-  assert!(!err.to_string().contains("secretvalue"));
+  let err =
+    try_load::<serde_json::Value>(&[&toml, &bad], &[], true, false)
+      .unwrap_err();
+  let mogh_config::Error::ParseEnvFile { e, .. } = &err else {
+    panic!("expected an env file error, got {err}");
+  };
+  assert_eq!(e.line, 2);
+  assert!(!err.to_string().contains("secretvalue"), "{err}");
 }
 
 /// Cicada accepts secret names which cannot nest on dots (a
@@ -739,14 +816,19 @@ fn env_names_that_cannot_nest_stay_flat_keys() {
   );
   // Two names which collide after lowercasing still fail, naming
   // the line and both names (never a value).
+  let conflict =
+    dir.write("conflict.env", "DB=secretvalue\ndb=other\n");
   let err =
-    mogh_config::parse_env_file_object("DB=secretvalue\ndb=other")
+    try_load::<serde_json::Value>(&[&conflict], &[], true, false)
       .unwrap_err();
-  assert_eq!(err.line, 2);
+  let mogh_config::Error::ParseEnvFile { e, .. } = &err else {
+    panic!("expected an env file error, got {err}");
+  };
   assert_eq!(
-    err.to_string(),
+    e.to_string(),
     "line 2: `db` conflicts with `DB` (line 1): names are case insensitive"
   );
+  assert!(!err.to_string().contains("secretvalue"), "{err}");
 }
 
 #[test]
@@ -1231,4 +1313,343 @@ fn commands_with_arguments_are_kept_as_written() {
       "ran": "",
     })
   );
+}
+
+/// A config file which exists but doesn't parse used to be skipped
+/// with a warning, starting the app without the settings in it (a
+/// key duplicated by an edit dropped the whole file, its
+/// `disable_user_registration` with it). Listed, found by a scan or
+/// included, it is an error naming the file, never a value in it.
+#[test]
+fn files_which_do_not_parse_are_an_error() {
+  let dir = TestDir::new("unparseable");
+  let defaults = dir.write("defaults.toml", "port = 1");
+  for (file, contents) in [
+    (
+      "duplicate.toml",
+      "disable_user_registration = true\ndisable_user_registration = \"hunter2\"",
+    ),
+    ("broken.toml", "secret = \"hunter2"),
+    ("broken.yaml", "secret: [hunter2"),
+    ("list.yaml", "- hunter2"),
+    ("scalar.yaml", "hunter2"),
+    ("broken.json", "{ \"secret\": \"hunter2\" "),
+    ("list.json", "[\"hunter2\"]"),
+    ("broken.env", "SECRET=hunter2\nnot an entry"),
+  ] {
+    let path = dir.write(file, contents);
+    let err = try_load::<serde_json::Value>(
+      &[&defaults, &path],
+      &[],
+      true,
+      false,
+    )
+    .unwrap_err();
+    let parsed_path = match &err {
+      mogh_config::Error::ParseToml { path, .. }
+      | mogh_config::Error::ParseYaml { path, .. }
+      | mogh_config::Error::ParseJson { path, .. }
+      | mogh_config::Error::ParseEnvFile { path, .. } => path,
+      _ => panic!("{file}: expected a parse error, got {err}"),
+    };
+    assert_eq!(parsed_path, &path, "{file}");
+    for message in [err.to_string(), format!("{err:?}")] {
+      assert!(!message.contains("hunter2"), "{file}: {message}");
+    }
+    std::fs::remove_file(&path).unwrap();
+  }
+
+  // Found by a directory scan, or through an include file.
+  let scanned = TestDir::new("unparseable_scanned");
+  scanned.write("core.config.toml", "port = 1");
+  let local = scanned.write("local.config.toml", "port = = 2");
+  let included = TestDir::new("unparseable_included");
+  included.write("core.config.toml", "port = 1");
+  included.write(".include", &format!("{}\n", scanned.0.display()));
+  for path in [&scanned.0, &included.0] {
+    let err = try_load::<serde_json::Value>(
+      &[path],
+      &["*config.*"],
+      true,
+      false,
+    )
+    .unwrap_err();
+    assert!(
+      matches!(&err, mogh_config::Error::ParseToml { path, .. } if path.file_name() == local.file_name()),
+      "{err}"
+    );
+  }
+}
+
+/// A placeholder holds no settings: an empty source, never an
+/// error. Blank or comments only in any format, a yaml file whose
+/// every line is commented out, a `null` document.
+#[test]
+fn files_holding_no_settings_are_empty_sources() {
+  let dir = TestDir::new("no_settings");
+  let defaults = dir.write("defaults.toml", "port = 1");
+  for (file, contents) in [
+    ("blank.toml", ""),
+    ("comments.toml", "# port = 2\n"),
+    ("blank.yaml", "\n"),
+    ("comments.yaml", "# port: 2\n"),
+    ("markers.yaml", "---\n# port: 2\n...\n"),
+    ("null.yaml", "~\n"),
+    ("null.yml", "--- null\n"),
+    ("empty.yaml", "{}"),
+    ("blank.json", " \n"),
+    ("null.json", "null"),
+    ("empty.json", "{}"),
+    ("blank.env", ""),
+    ("comments.env", "# PORT=2\n"),
+  ] {
+    let path = dir.write(file, contents);
+    let config = try_load::<serde_json::Value>(
+      &[&defaults, &path],
+      &[],
+      true,
+      false,
+    )
+    .unwrap_or_else(|e| panic!("{file}: {e}"));
+    assert_eq!(config, serde_json::json!({ "port": 1 }), "{file}");
+  }
+}
+
+/// A file which can't be read (here not utf-8) used to be skipped.
+#[test]
+fn a_file_which_can_not_be_read_is_an_error() {
+  let dir = TestDir::new("not_utf8");
+  let binary = dir.0.join("binary.toml");
+  std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+  let err =
+    try_load::<serde_json::Value>(&[&binary], &[], true, false)
+      .unwrap_err();
+  assert!(
+    matches!(&err, mogh_config::Error::ReadFileContents { path, .. } if path == &binary),
+    "{err}"
+  );
+  // Found by a scan.
+  let err = try_load::<serde_json::Value>(
+    &[&dir.0],
+    &["*.toml"],
+    true,
+    false,
+  )
+  .unwrap_err();
+  assert!(
+    matches!(&err, mogh_config::Error::ReadFileContents { path, .. } if path.file_name() == binary.file_name()),
+    "{err}"
+  );
+}
+
+/// Takes all permissions from a path, giving them back on drop (also
+/// when an assertion fails, so the test directory can be removed).
+#[cfg(unix)]
+struct Locked(PathBuf);
+
+#[cfg(unix)]
+impl Locked {
+  /// `None` when the lock isn't enforced (running as root).
+  fn new(path: &Path) -> Option<Locked> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(
+      path,
+      std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let locked = Locked(path.to_path_buf());
+    let enforced = if path.is_dir() {
+      std::fs::read_dir(path).is_err()
+    } else {
+      std::fs::File::open(path).is_err()
+    };
+    enforced.then_some(locked)
+  }
+}
+
+#[cfg(unix)]
+impl Drop for Locked {
+  fn drop(&mut self) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _ = std::fs::set_permissions(
+      &self.0,
+      std::fs::Permissions::from_mode(0o755),
+    );
+  }
+}
+
+/// A file, directory or include file which exists but can't be
+/// read, or a path whose metadata can't be (permission denied on a
+/// parent), used to be skipped like a missing one, without a word.
+#[cfg(unix)]
+#[test]
+fn paths_without_permission_are_an_error() {
+  let dir = TestDir::new("permissions");
+  let file = dir.write("locked.toml", "port = 1");
+  let Some(_lock) = Locked::new(&file) else {
+    println!("permissions aren't enforced (root): skipped");
+    return;
+  };
+  let err = try_load::<serde_json::Value>(&[&file], &[], true, false)
+    .unwrap_err();
+  assert!(
+    matches!(&err, mogh_config::Error::FileOpen { path, .. } if path == &file),
+    "{err}"
+  );
+  drop(_lock);
+
+  // A directory listed, and one included.
+  let locked_dir = dir.0.join("locked_dir");
+  std::fs::create_dir(&locked_dir).unwrap();
+  std::fs::write(locked_dir.join("core.config.toml"), "port = 1")
+    .unwrap();
+  let main = TestDir::new("permissions_main");
+  main.write("core.config.toml", "port = 2");
+  main.write(".include", &format!("{}\n", locked_dir.display()));
+  let lock = Locked::new(&locked_dir).unwrap();
+  for path in [&locked_dir, &main.0] {
+    let err = try_load::<serde_json::Value>(
+      &[path],
+      &["*config.*"],
+      true,
+      false,
+    )
+    .unwrap_err();
+    assert!(
+      matches!(&err, mogh_config::Error::ReadDir { path, .. } if path == &locked_dir),
+      "{err}"
+    );
+  }
+  // A path under it: its metadata can't be read. Listed, or named by
+  // an include line.
+  let under = locked_dir.join("core.config.toml");
+  let err =
+    try_load::<serde_json::Value>(&[&under], &[], true, false)
+      .unwrap_err();
+  assert!(
+    matches!(&err, mogh_config::Error::ReadPathMetaData { path, .. } if path == &under),
+    "{err}"
+  );
+  main.write(".include", &format!("{}\n", under.display()));
+  let err = try_load::<serde_json::Value>(
+    &[&main.0],
+    &["*config.*"],
+    true,
+    false,
+  )
+  .unwrap_err();
+  assert!(
+    matches!(&err, mogh_config::Error::ReadPathMetaData { path, .. } if path == &under),
+    "{err}"
+  );
+  drop(lock);
+
+  // An include file which can't be read.
+  let include = main.0.join(".include");
+  let _lock = Locked::new(&include).unwrap();
+  let err = try_load::<serde_json::Value>(
+    &[&main.0],
+    &["*config.*"],
+    true,
+    false,
+  )
+  .unwrap_err();
+  assert!(
+    matches!(&err, mogh_config::Error::FileOpen { path, .. } if path.file_name() == include.file_name()),
+    "{err}"
+  );
+}
+
+/// A scanned file whose name isn't utf-8 used to be skipped without
+/// a word: wildcards match it as bytes now.
+#[cfg(target_os = "linux")]
+#[test]
+fn scanned_file_names_need_not_be_utf8() {
+  use std::os::unix::ffi::OsStrExt as _;
+  let dir = TestDir::new("non_utf8_name");
+  let name = std::ffi::OsStr::from_bytes(b"caf\xe9.config.toml");
+  std::fs::write(dir.0.join(name), "port = 1").unwrap();
+  let config = load(&[&dir.0], &["*config.*"], false, false);
+  assert_eq!(config, serde_json::json!({ "port": 1 }));
+}
+
+/// A dangling symlink in a scanned directory (a Kubernetes mount
+/// mid update) is a missing file, not an error.
+#[cfg(unix)]
+#[test]
+fn dangling_symlinks_in_scanned_directories_are_skipped() {
+  let dir = TestDir::new("dangling_symlink");
+  dir.write("core.config.toml", "port = 1");
+  std::os::unix::fs::symlink(
+    dir.0.join("gone.toml"),
+    dir.0.join("local.config.toml"),
+  )
+  .unwrap();
+  let config = load(&[&dir.0], &["*config.*"], false, false);
+  assert_eq!(config, serde_json::json!({ "port": 1 }));
+}
+
+/// What Cicada Core serializes (its `cicada://.env` exports) loads
+/// as a config source unchanged: one grammar, in one place.
+#[test]
+fn serialized_env_files_load_as_config_sources() {
+  #[derive(serde::Deserialize, Debug, PartialEq)]
+  struct Database {
+    address: String,
+  }
+  #[derive(serde::Deserialize, Debug, PartialEq)]
+  struct Config {
+    db_password: String,
+    port: u16,
+    hosts: Vec<String>,
+    template: String,
+    note: String,
+    database: Database,
+  }
+  let entry = |name: &str, value: &str, description: &str| {
+    mogh_config::EnvFileEntry {
+      name: name.to_string(),
+      value: value.to_string(),
+      description: description.to_string(),
+      ..Default::default()
+    }
+  };
+  let env_file = mogh_config::serialize_env_file([
+    entry("DB_PASSWORD", " p4ss \"w0rd\" \\ #x\n", "the database"),
+    entry("PORT", "8080", ""),
+    entry("HOSTS", "a.example.com, b.example.com", ""),
+    entry("TEMPLATE", "${HOME} $(whoami)", "kept as written"),
+    entry("NOTE", "it's $5", "multi\nline"),
+    entry("DATABASE.ADDRESS", "db:5432", ""),
+  ])
+  .unwrap();
+  let dir = TestDir::new("serialized_env_file");
+  let env = dir.write(".env", &env_file);
+  let config = ConfigLoader {
+    paths: &[&env],
+    match_wildcards: &[],
+    include_file_name: ".include",
+    merge_nested: true,
+    extend_array: false,
+    debug_print: false,
+  }
+  .load::<Config>()
+  .unwrap();
+  assert_eq!(
+    config,
+    Config {
+      db_password: " p4ss \"w0rd\" \\ #x\n".into(),
+      port: 8080,
+      hosts: vec!["a.example.com".into(), "b.example.com".into()],
+      template: "${HOME} $(whoami)".into(),
+      note: "it's $5".into(),
+      database: Database {
+        address: "db:5432".into()
+      },
+    }
+  );
+  // And the entries, descriptions included, parse back.
+  let parsed = mogh_config::parse_env_file(&env_file).unwrap();
+  assert_eq!(parsed[0].description, "the database");
+  assert_eq!(parsed[4].description, "multi\nline");
 }

@@ -16,10 +16,6 @@ static SHELL: LazyLock<&'static str> = LazyLock::new(|| {
 static ENV_REGEX: LazyLock<Regex> =
   LazyLock::new(|| Regex::new(r"\$\{([A-Za-z0-9_]+)\}").unwrap());
 
-/// `$(command)` syntax: a single command word, no arguments.
-static SHELL_REGEX: LazyLock<Regex> =
-  LazyLock::new(|| Regex::new(r"\$\(([A-Za-z0-9_]+)\)").unwrap());
-
 /// Either syntax, for a single pass over the input.
 static ENV_OR_SHELL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
   Regex::new(r"\$\{([A-Za-z0-9_]+)\}|\$\(([A-Za-z0-9_]+)\)").unwrap()
@@ -31,7 +27,7 @@ static ANY_INTERPOLATION_REGEX: LazyLock<Regex> =
   LazyLock::new(|| Regex::new(r"\$\([^)]*\)|\$\{[^}]*\}").unwrap());
 
 /// Whether the string contains anything to interpolate.
-pub fn needs_interpolation(input: &str) -> bool {
+pub(crate) fn needs_interpolation(input: &str) -> bool {
   input.contains("${") || input.contains("$(")
 }
 
@@ -132,7 +128,7 @@ pub fn interpolate_env_and_shell(input: &str) -> String {
 /// Applies [interpolate_env_and_shell] to every string in the
 /// value, including object keys, in place. Objects are only
 /// rebuilt when one of their keys needs interpolation.
-pub fn interpolate_value(value: &mut serde_json::Value) {
+pub(crate) fn interpolate_value(value: &mut serde_json::Value) {
   match value {
     serde_json::Value::String(s) => {
       if needs_interpolation(s) {
@@ -155,21 +151,6 @@ pub fn interpolate_value(value: &mut serde_json::Value) {
   }
 }
 
-/// - Supports '${VAR}' -> Env var extended
-pub fn interpolate_env(input: &str, shell: &str) -> String {
-  let first_env_pass = ENV_REGEX
-    .replace_all(input, |caps: &Captures| {
-      try_get_env_extended(&caps[1], shell)
-    });
-
-  // Do it twice in case any env vars expand again to env vars
-  ENV_REGEX
-    .replace_all(&first_env_pass, |caps: &Captures| {
-      try_get_env_extended(&caps[1], shell)
-    })
-    .into_owned()
-}
-
 fn try_get_env_extended(var_name: &str, shell: &str) -> String {
   if let Ok(value) = std::env::var(var_name)
     && !value.is_empty()
@@ -187,16 +168,6 @@ fn try_get_env_extended(var_name: &str, shell: &str) -> String {
     .map(|value| value.trim().to_string())
     .inspect_err(|e| println!("{}: Failed to parse shell stdout for ${var_name} as utf-8: {e}", "WARN".yellow()))
     .unwrap_or_default()
-}
-
-/// - Supports '$(command)' -> the command's output, for a single
-///   command word (letters, digits, '_') without arguments
-pub fn interpolate_shell(input: &str, shell: &str) -> String {
-  SHELL_REGEX
-    .replace_all(input, |caps: &Captures| {
-      run_shell_command(&caps[1], shell)
-    })
-    .into_owned()
 }
 
 fn run_shell_command(command: &str, shell: &str) -> String {

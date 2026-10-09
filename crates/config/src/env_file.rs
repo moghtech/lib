@@ -2,14 +2,18 @@
 //! of `NAME=value` entries, the format Cicada renders a stack of
 //! secret environments in and the one dotenv files use.
 //!
-//! The grammar is Cicada's (a serialized secret export parses back
-//! unchanged): `#` lines are comments, blank lines are skipped, an
-//! `export ` prefix is accepted, and a value is unquoted (taken
-//! literally to the end of the line, trimmed), single quoted
-//! (literal) or double quoted with `\n` / `\r` / `\t` / `\"` / `\\`
-//! escapes. Nothing is substituted inside a value: `${VAR}` and
-//! `$(cmd)` are kept as written, since env file values are secrets
-//! and never templates.
+//! The grammar is Cicada's, and both directions live here: Cicada
+//! Core renders its secret exports with [serialize_env_file] and
+//! reads imports with [parse_env_file], and every app reads the
+//! export (`cicada://.env`) through the same parser, so a file
+//! serialized here parses back unchanged. `#` lines are comments
+//! (those directly above an entry are its description), blank lines
+//! are skipped, an `export ` prefix is accepted, and a value is
+//! unquoted (taken literally to the end of the line, trimmed),
+//! single quoted (literal) or double quoted with `\n` / `\r` / `\t`
+//! / `\"` / `\\` escapes. Nothing is substituted inside a value:
+//! `${VAR}` and `$(cmd)` are kept as written, since env file values
+//! are secrets and never templates.
 //!
 //! As a configuration source ([parse_env_file_object]) names are
 //! lowercased to match struct fields, and dots nest:
@@ -49,18 +53,105 @@ fn error(line: usize, message: impl Into<String>) -> EnvFileError {
   }
 }
 
-/// Parses an env file into `(name, value)` pairs in file order,
-/// names as written. A name given twice is an error (which of the
-/// two the author meant is anyone's guess).
+/// One `NAME=value` entry of an env file, with the description held
+/// by the `#` comment lines directly above it.
+///
+/// Its `Debug` leaves the value out: env file values are secrets.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct EnvFileEntry {
+  /// The 1-based line of the `NAME=value` in the parsed file.
+  /// [serialize_env_file] ignores it.
+  pub line: usize,
+  /// As written, trimmed and without an `export ` prefix.
+  pub name: String,
+  /// Unquoted and unescaped.
+  pub value: String,
+  /// The `#` comment lines directly above the entry (no blank line
+  /// in between), one description line per comment line, each
+  /// without the `#` and the one space after it. Empty when there
+  /// are none. As [normalize_env_description] has it: a line break
+  /// inside a comment line (a lone `\r`) breaks the description
+  /// there too.
+  pub description: String,
+}
+
+impl std::fmt::Debug for EnvFileEntry {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("EnvFileEntry")
+      .field("line", &self.line)
+      .field("name", &self.name)
+      .field("value", &"[redacted]")
+      .field("description", &self.description)
+      .finish()
+  }
+}
+
+/// Parses an env file into its entries in file order, names as
+/// written, each with its line and description. A name given twice
+/// is an error (which of the two the author meant is anyone's
+/// guess). Names aren't checked further: an import creating
+/// secrets from them holds them to [representable_env_name].
 pub fn parse_env_file(
   content: &str,
-) -> Result<Vec<(String, String)>, EnvFileError> {
-  Ok(
-    parse_entries(content)?
-      .into_iter()
-      .map(|entry| (entry.name, entry.value))
-      .collect(),
-  )
+) -> Result<Vec<EnvFileEntry>, EnvFileError> {
+  // A byte order mark (hand written on Windows) is not part of the
+  // first name.
+  let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+  let mut entries: Vec<EnvFileEntry> = Vec::new();
+  let mut names = std::collections::HashSet::<&str>::new();
+  // The comment lines since the last entry or blank line.
+  let mut comments = Vec::<&str>::new();
+  for (idx, raw) in content.lines().enumerate() {
+    let number = idx + 1;
+    let line = raw.trim();
+    // A blank line detaches the comments above it.
+    if line.is_empty() {
+      comments.clear();
+      continue;
+    }
+    if let Some(comment) = line.strip_prefix('#') {
+      // A serialized description line is `# <line>`: strip the
+      // single separating space, keeping any further indentation.
+      comments.push(comment.strip_prefix(' ').unwrap_or(comment));
+      continue;
+    }
+    // Real env files often carry `export NAME=value`.
+    let line = line
+      .strip_prefix("export ")
+      .map(str::trim_start)
+      .unwrap_or(line);
+    let Some((name, value)) = line.split_once('=') else {
+      return Err(error(
+        number,
+        "expected `NAME=value`, a `#` comment, or a blank line",
+      ));
+    };
+    let name = name.trim();
+    if name.is_empty() {
+      return Err(error(number, "missing name before `=`"));
+    }
+    if !names.insert(name) {
+      return Err(error(
+        number,
+        format!("duplicate entry for `{name}`"),
+      ));
+    }
+    // As serialize_env_file writes it, so a description imported
+    // from a hand written file is exported unchanged.
+    let description = if comments.is_empty() {
+      String::new()
+    } else {
+      normalize_env_description(&comments.join("\n"))
+    };
+    entries.push(EnvFileEntry {
+      line: number,
+      name: name.to_string(),
+      value: parse_value(value.trim(), name, number)?,
+      description,
+    });
+    comments.clear();
+  }
+  Ok(entries)
 }
 
 /// Parses an env file into the configuration object it describes:
@@ -80,7 +171,7 @@ pub fn parse_env_file(
 /// both a value and an object (`DATABASE=x` next to
 /// `DATABASE.ADDRESS=y`), and two spellings of one name (`Db` and
 /// `DB`).
-pub fn parse_env_file_object(
+pub(crate) fn parse_env_file_object(
   content: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>, EnvFileError>
 {
@@ -92,7 +183,7 @@ pub fn parse_env_file_object(
   // one or the other, so the two never share a path.
   let mut origins =
     std::collections::HashMap::<String, (String, usize)>::new();
-  for entry in parse_entries(content)? {
+  for entry in parse_env_file(content)? {
     let name = entry.name.to_lowercase();
     let segments = if name.split('.').any(str::is_empty)
       || name.split('.').nth(MAX_NESTED_SEGMENTS).is_some()
@@ -147,7 +238,7 @@ pub fn parse_env_file_object(
 /// A conflict between `entry` and the earlier entry `origin` (its
 /// name and line), naming both.
 fn conflict(
-  entry: &Entry,
+  entry: &EnvFileEntry,
   (origin, origin_line): &(String, usize),
   message: String,
 ) -> EnvFileError {
@@ -158,54 +249,6 @@ fn conflict(
       entry.name
     ),
   )
-}
-
-struct Entry {
-  line: usize,
-  name: String,
-  value: String,
-}
-
-fn parse_entries(content: &str) -> Result<Vec<Entry>, EnvFileError> {
-  // A byte order mark (hand written on Windows) is not part of the
-  // first name.
-  let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
-  let mut entries: Vec<Entry> = Vec::new();
-  let mut names = std::collections::HashSet::<&str>::new();
-  for (idx, raw) in content.lines().enumerate() {
-    let number = idx + 1;
-    let line = raw.trim();
-    if line.is_empty() || line.starts_with('#') {
-      continue;
-    }
-    // Real env files often carry `export NAME=value`.
-    let line = line
-      .strip_prefix("export ")
-      .map(str::trim_start)
-      .unwrap_or(line);
-    let Some((name, value)) = line.split_once('=') else {
-      return Err(error(
-        number,
-        "expected `NAME=value`, a `#` comment, or a blank line",
-      ));
-    };
-    let name = name.trim();
-    if name.is_empty() {
-      return Err(error(number, "missing name before `=`"));
-    }
-    if !names.insert(name) {
-      return Err(error(
-        number,
-        format!("duplicate entry for `{name}`"),
-      ));
-    }
-    entries.push(Entry {
-      line: number,
-      name: name.to_string(),
-      value: parse_value(value.trim(), name, number)?,
-    });
-  }
-  Ok(entries)
 }
 
 /// A value after `=`, already trimmed: unquoted (taken literally to
@@ -284,10 +327,178 @@ fn parse_value(
   }
 }
 
+/// Whether [serialize_env_file] can write a name such that
+/// [parse_env_file] reads it back: not empty, without whitespace
+/// around it (names are trimmed), not starting with `#` (a comment),
+/// `export ` (a prefix, stripped once) or a byte order mark
+/// (stripped at the start of a file), and without `=` (the first one
+/// ends the name) or a line break.
+pub fn representable_env_name(name: &str) -> bool {
+  name.trim() == name
+    && !name.is_empty()
+    && !name.starts_with('#')
+    && !name.starts_with("export ")
+    && !name.starts_with('\u{FEFF}')
+    && !name.contains(['=', '\n', '\r'])
+}
+
+/// An entry [serialize_env_file] can't write such that
+/// [parse_env_file] reads it back. Names an entry, never a value.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EnvFileSerializeError {
+  /// See [representable_env_name].
+  #[error(
+    "{name:?} can't be an env file name: it is empty, has whitespace around it, starts with '#', 'export ' or a byte order mark, or holds '=' or a line break"
+  )]
+  UnrepresentableName { name: String },
+  /// [parse_env_file] refuses a name given twice.
+  #[error("duplicate entry for `{name}`")]
+  DuplicateName { name: String },
+}
+
+/// Writes entries as an env file, in the order given, which
+/// [parse_env_file] reads back to the same names, values and
+/// descriptions, each description as [normalize_env_description]
+/// has it. The entries' `line` is ignored.
+///
+/// - An entry with a description gets its comment lines directly
+///   above it (`# <line>`, a lone `#` for an empty line), separated
+///   from the entry before by a blank line, so the comments attach
+///   to it unambiguously. The description is written normalized:
+///   a comment line keeps no whitespace at its end, and a line
+///   break inside one (a lone `\r`, U+2028) would end the comment
+///   for other dotenv parsers, which would read the rest of the
+///   line as an entry.
+/// - A value holding `$` is single quoted when it can be (no `'`,
+///   no line break): Compose's `env_file:`, systemd and dotenv
+///   libraries take a single quoted value literally, where they
+///   would substitute `$NAME` / `${NAME}` in an unquoted or double
+///   quoted one.
+/// - Any other value is double quoted, with `\n` / `\r` / `\t` /
+///   `\"` / `\\` escapes, when it wouldn't survive unquoted
+///   (surrounding whitespace is trimmed, `#` starts a comment in
+///   some dotenv dialects, a leading quote would be read as
+///   quoting), else written as is.
+///
+/// Errors on a name the syntax can't hold, see
+/// [representable_env_name], and on a name given twice.
+pub fn serialize_env_file<E: std::borrow::Borrow<EnvFileEntry>>(
+  entries: impl IntoIterator<Item = E>,
+) -> Result<String, EnvFileSerializeError> {
+  let mut out = String::new();
+  let mut names = std::collections::HashSet::new();
+  for entry in entries {
+    let entry = entry.borrow();
+    if !representable_env_name(&entry.name) {
+      return Err(EnvFileSerializeError::UnrepresentableName {
+        name: entry.name.clone(),
+      });
+    }
+    if !names.insert(entry.name.clone()) {
+      return Err(EnvFileSerializeError::DuplicateName {
+        name: entry.name.clone(),
+      });
+    }
+    let description = normalize_env_description(&entry.description);
+    if !description.is_empty() {
+      if !out.is_empty() {
+        out.push('\n');
+      }
+      for line in description.split('\n') {
+        if line.is_empty() {
+          out.push_str("#\n");
+        } else {
+          out.push_str("# ");
+          out.push_str(line);
+          out.push('\n');
+        }
+      }
+    }
+    out.push_str(&entry.name);
+    out.push('=');
+    write_value(&mut out, &entry.value);
+    out.push('\n');
+  }
+  Ok(out)
+}
+
+/// A description as [serialize_env_file] writes it, and so as
+/// [parse_env_file] reads it back: every line break a `\n`, and no
+/// line ending in whitespace (the parser trims comment lines).
+/// `\r\n` is one line break, and so is each other character some
+/// dotenv parser ends a line at: a lone `\r`, U+2028 and U+2029,
+/// and VT, FF, FS, GS, RS and NEL (Python's `str.splitlines`).
+/// Normalizing again changes nothing.
+///
+/// An app storing descriptions (Cicada's secrets) normalizes them
+/// with this when it writes them: an export and import round trip
+/// then gives back the stored description unchanged, and an import
+/// comparing descriptions to tell what changed sees no change in a
+/// file nobody edited.
+pub fn normalize_env_description(description: &str) -> String {
+  description
+    .replace("\r\n", "\n")
+    .split(is_line_break)
+    .map(str::trim_end)
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+/// Whether some dotenv parser ends a line at `c`: `\n`; a lone `\r`
+/// (python-dotenv, PHP's dotenv and systemd, and Node's dotenv,
+/// which turns `\r\n?` into `\n`); U+2028 / U+2029 (line terminators
+/// to the multiline regex of Node's dotenv); and the other line
+/// boundaries of Python's `str.splitlines` (django-environ splits
+/// with it): VT, FF, FS, GS, RS and NEL.
+fn is_line_break(c: char) -> bool {
+  matches!(
+    c,
+    '\n'
+      | '\r'
+      | '\x0b'
+      | '\x0c'
+      | '\x1c'
+      | '\x1d'
+      | '\x1e'
+      | '\u{85}'
+      | '\u{2028}'
+      | '\u{2029}'
+  )
+}
+
+/// Writes a value, quoted as [serialize_env_file] describes.
+fn write_value(out: &mut String, value: &str) {
+  if value.contains('$') && !value.contains(['\'', '\n', '\r']) {
+    out.push('\'');
+    out.push_str(value);
+    out.push('\'');
+    return;
+  }
+  let needs_quoting = value.chars().any(|c| {
+    c.is_whitespace() || matches!(c, '"' | '\'' | '#' | '\\')
+  });
+  if !needs_quoting {
+    out.push_str(value);
+    return;
+  }
+  out.push('"');
+  for c in value.chars() {
+    match c {
+      '\n' => out.push_str("\\n"),
+      '\r' => out.push_str("\\r"),
+      '\t' => out.push_str("\\t"),
+      '"' => out.push_str("\\\""),
+      '\\' => out.push_str("\\\\"),
+      c => out.push(c),
+    }
+  }
+  out.push('"');
+}
+
 /// Whether a config path is an env file: named `.env`, or with the
 /// `env` extension (`app.env`). `Path::extension` is `None` for
 /// `.env`, hence the file name check.
-pub fn is_env_file(path: &std::path::Path) -> bool {
+pub(crate) fn is_env_file(path: &std::path::Path) -> bool {
   let name = path
     .file_name()
     .and_then(|name| name.to_str())
@@ -302,6 +513,35 @@ pub fn is_env_file(path: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn entry(
+    line: usize,
+    name: &str,
+    value: &str,
+    description: &str,
+  ) -> EnvFileEntry {
+    EnvFileEntry {
+      line,
+      name: name.to_string(),
+      value: value.to_string(),
+      description: description.to_string(),
+    }
+  }
+
+  /// The entries without their lines, compared with their values
+  /// (an [EnvFileEntry]'s `Debug` leaves the value out).
+  fn triples(entries: &[EnvFileEntry]) -> Vec<(&str, &str, &str)> {
+    entries
+      .iter()
+      .map(|entry| {
+        (
+          entry.name.as_str(),
+          entry.value.as_str(),
+          entry.description.as_str(),
+        )
+      })
+      .collect()
+  }
 
   #[test]
   fn parses_the_cicada_grammar() {
@@ -318,25 +558,360 @@ UNQUOTED=$(not run) ${NOT_EXPANDED} # not a comment
 ";
     let entries = parse_env_file(file).unwrap();
     assert_eq!(
-      entries,
-      vec![
-        ("DB_PASSWORD".to_string(), "hunter2".to_string()),
-        ("PORT".to_string(), "8080".to_string()),
+      triples(&entries),
+      [
+        ("DB_PASSWORD", "hunter2", "A comment"),
+        ("PORT", "8080", ""),
         (
-          "B".to_string(),
-          "escaped\nnewline \"quoted\" \\ #tag".to_string()
+          "B",
+          "escaped\nnewline \"quoted\" \\ #tag",
+          "The description of B"
         ),
+        ("SINGLE", "it's literal ${NOT_EXPANDED}", ""),
+        ("EMPTY", "", ""),
         (
-          "SINGLE".to_string(),
-          "it's literal ${NOT_EXPANDED}".to_string()
-        ),
-        ("EMPTY".to_string(), String::new()),
-        (
-          "UNQUOTED".to_string(),
-          "$(not run) ${NOT_EXPANDED} # not a comment".to_string()
+          "UNQUOTED",
+          "$(not run) ${NOT_EXPANDED} # not a comment",
+          ""
         ),
       ]
     );
+    assert_eq!(
+      entries.iter().map(|entry| entry.line).collect::<Vec<_>>(),
+      [2, 3, 6, 7, 8, 9]
+    );
+  }
+
+  #[test]
+  fn parses_comments_as_descriptions() {
+    let parsed = parse_env_file(
+      "KEY=value\n\
+      \n\
+      # Comments are one to one with\n\
+      # the secret below's description\n\
+      #\n\
+      #   indented\n\
+      I_HAVE=\"a description\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+      parsed,
+      [
+        entry(1, "KEY", "value", ""),
+        entry(
+          7,
+          "I_HAVE",
+          "a description",
+          "Comments are one to one with\n\
+          the secret below's description\n\
+          \n  indented"
+        ),
+      ]
+    );
+  }
+
+  #[test]
+  fn a_blank_line_detaches_comments() {
+    let parsed =
+      parse_env_file("# floating comment\n\nKEY=1\n# trailing\n")
+        .unwrap();
+    assert_eq!(parsed, [entry(3, "KEY", "1", "")]);
+  }
+
+  #[test]
+  fn serializes_descriptions_above_their_entries() {
+    let out = serialize_env_file([
+      entry(0, "KEY", "value", ""),
+      entry(0, "I_HAVE", "a description", "A described secret"),
+      entry(0, "LINES", "x", "multi\n\nline"),
+    ])
+    .unwrap();
+    assert_eq!(
+      out,
+      "KEY=value\n\
+      \n\
+      # A described secret\n\
+      I_HAVE=\"a description\"\n\
+      \n\
+      # multi\n\
+      #\n\
+      # line\n\
+      LINES=x\n"
+    );
+    // A first entry's description starts the file.
+    assert_eq!(
+      serialize_env_file([entry(0, "A", "1", "first")]).unwrap(),
+      "# first\nA=1\n"
+    );
+    assert_eq!(
+      serialize_env_file(Vec::<EnvFileEntry>::new()),
+      Ok(String::new())
+    );
+  }
+
+  #[test]
+  fn single_quotes_dollar_values() {
+    let out = serialize_env_file([
+      entry(0, "A", "pa$$word", ""),
+      entry(0, "B", "${HOME}/x y", ""),
+      entry(0, "C", "a\\$b", ""),
+      // Not representable single quoted: double quoted.
+      entry(0, "D", "it's $5", ""),
+      entry(0, "E", "$a\nb", ""),
+      entry(0, "F", "$a\rb", ""),
+      // No `$`: quoted only when it must be.
+      entry(0, "G", "plain", ""),
+      entry(0, "H", "has space", ""),
+    ])
+    .unwrap();
+    assert_eq!(
+      out,
+      "A='pa$$word'\n\
+      B='${HOME}/x y'\n\
+      C='a\\$b'\n\
+      D=\"it's $5\"\n\
+      E=\"$a\\nb\"\n\
+      F=\"$a\\rb\"\n\
+      G=plain\n\
+      H=\"has space\"\n"
+    );
+  }
+
+  /// A serialized file parses back to the same entries: Cicada
+  /// Core serializes its exports here, and every app reads them with
+  /// this parser.
+  #[test]
+  fn serialized_entries_parse_back_unchanged() {
+    let entries = vec![
+      entry(0, "PLAIN", "value", ""),
+      entry(0, "EMPTY", "", ""),
+      entry(0, "SPACED", "  keeps  spaces  ", "multi\nline\n\ndesc"),
+      entry(
+        0,
+        "ESCAPES",
+        "line1\nline2\ttabbed \"quoted\" \\ #tag",
+        "",
+      ),
+      entry(0, "SINGLE", "it's quoted", "described"),
+      entry(0, "HASH", "not # a comment", ""),
+      entry(0, "DOLLAR", "pa$$word", ""),
+      entry(0, "DOLLAR_SPACED", " ${HOME} \\ #x\t$ ", ""),
+      entry(0, "DOLLAR_QUOTE", "it's $5", ""),
+      entry(0, "DOLLAR_LINES", "$a\n$b\r", ""),
+      entry(0, "export\tTAB", "x", "  indented\n#hash"),
+      entry(0, "export", "=", ""),
+      entry(0, "a.b", "nested", ""),
+    ];
+    let serialized = serialize_env_file(&entries).unwrap();
+    let parsed = parse_env_file(&serialized).unwrap();
+    assert_eq!(triples(&parsed), triples(&entries), "{serialized}");
+
+    // Every character, alone, doubled, between others, around
+    // whitespace, next to quotes and `$`.
+    let chars = (0..=0x7f_u8)
+      .map(char::from)
+      .chain(['\u{85}', '\u{a0}', '\u{2028}', '\u{3000}', '\u{feff}'])
+      .chain(['é', '€', '😀']);
+    let mut entries = Vec::new();
+    for c in chars {
+      for value in [
+        format!("{c}"),
+        format!("{c}{c}"),
+        format!("a{c}b"),
+        format!(" {c} "),
+        format!("${c}"),
+        format!("'{c}'"),
+        format!("\"{c}\""),
+        format!("{c}$'"),
+      ] {
+        entries.push(entry(
+          0,
+          &format!("N{}", entries.len()),
+          &value,
+          &format!("{c}x{c}"),
+        ));
+      }
+    }
+    let serialized = serialize_env_file(&entries).unwrap();
+    // A value's CR is escaped, a description's is a line break.
+    assert!(!serialized.contains('\r'));
+    let parsed = parse_env_file(&serialized).unwrap();
+    assert_eq!(parsed.len(), entries.len());
+    for (parsed, entry) in parsed.iter().zip(&entries) {
+      assert_eq!(parsed.name, entry.name);
+      assert_eq!(parsed.value, entry.value, "{:?}", entry.value);
+      assert_eq!(
+        parsed.description,
+        normalize_env_description(&entry.description),
+        "{:?}",
+        entry.description
+      );
+    }
+    assert_eq!(serialize_env_file(&parsed).unwrap(), serialized);
+  }
+
+  /// A description is written as the one it parses back to: no line
+  /// of it ends in whitespace (the parser trims lines), and no line
+  /// break but `\n` is written. A lone CR ends the line for
+  /// python-dotenv and Node's dotenv, U+2028 / U+2029 for Node's
+  /// too: the text after one would be an entry to them.
+  #[test]
+  fn descriptions_parse_back_as_they_were_written() {
+    for (description, written) in [
+      ("Database password ", "Database password"),
+      ("trailing\t \nlines  ", "trailing\nlines"),
+      ("windows\r\nline endings\r\n", "windows\nline endings\n"),
+      (
+        "rotated monthly\rAPI_URL=https://evil.example",
+        "rotated monthly\nAPI_URL=https://evil.example",
+      ),
+      ("old mac\r\rbreaks", "old mac\n\nbreaks"),
+      ("space before \r a break", "space before\n a break"),
+      (
+        "unicode\u{2028}line\u{2029}breaks\u{85}too",
+        "unicode\nline\nbreaks\ntoo",
+      ),
+      (
+        "vertical\x0btab\x0cform feed\x1cand\x1dseparators\x1e",
+        "vertical\ntab\nform feed\nand\nseparators\n",
+      ),
+      ("   ", ""),
+      ("\r", "\n"),
+      // Already as written: unchanged.
+      ("  indented\n\n#hash\nkept", "  indented\n\n#hash\nkept"),
+      ("", ""),
+    ] {
+      let serialized =
+        serialize_env_file([entry(0, "KEY", "value", description)])
+          .unwrap();
+      for line in serialized.split('\n') {
+        assert_eq!(line, line.trim_end(), "{serialized:?}");
+        assert!(
+          !line.contains([
+            '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}',
+            '\u{2028}', '\u{2029}'
+          ]),
+          "{serialized:?}"
+        );
+      }
+      let parsed = parse_env_file(&serialized).unwrap();
+      assert_eq!(
+        triples(&parsed),
+        [("KEY", "value", written)],
+        "{description:?}"
+      );
+      // The export of an import is the same file: a round trip of
+      // an unedited file changes nothing.
+      assert_eq!(serialize_env_file(&parsed).unwrap(), serialized);
+      assert_eq!(normalize_env_description(description), written);
+      assert_eq!(normalize_env_description(written), written);
+    }
+  }
+
+  /// A hand written file's comment holding a line break of another
+  /// parser reads as the description the serializer writes for it,
+  /// so its first export already parses back to the same.
+  #[test]
+  fn parsed_descriptions_are_normalized() {
+    let parsed = parse_env_file(
+      "# windows \r\n# old mac\rline\u{2028}break\n# kept \nKEY=value\n",
+    )
+    .unwrap();
+    assert_eq!(
+      triples(&parsed),
+      [("KEY", "value", "windows\nold mac\nline\nbreak\nkept")]
+    );
+    let serialized = serialize_env_file(&parsed).unwrap();
+    assert_eq!(
+      triples(&parse_env_file(&serialized).unwrap()),
+      triples(&parsed)
+    );
+  }
+
+  /// The lines other dotenv parsers read: each line break of any of
+  /// them inside a description stays inside a comment line, so no
+  /// text of a description is an entry to them.
+  #[test]
+  fn descriptions_are_comments_to_other_parsers() {
+    let serialized = serialize_env_file([
+      entry(
+        0,
+        "KEY",
+        "value",
+        "rotated monthly\rAPI_URL=https://evil.example\r\n\
+        B=2\u{2028}C=3\u{2029}D=4\u{85}E=5\x0bF=6\x0cG=7\x1cH=8",
+      ),
+      entry(0, "OTHER", "x", ""),
+    ])
+    .unwrap();
+    let lines = serialized
+      .split([
+        '\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}',
+        '\u{2028}', '\u{2029}',
+      ])
+      .filter(|line| !line.is_empty())
+      .collect::<Vec<_>>();
+    assert_eq!(
+      lines,
+      [
+        "# rotated monthly",
+        "# API_URL=https://evil.example",
+        "# B=2",
+        "# C=3",
+        "# D=4",
+        "# E=5",
+        "# F=6",
+        "# G=7",
+        "# H=8",
+        "KEY=value",
+        "OTHER=x",
+      ]
+    );
+  }
+
+  #[test]
+  fn refuses_names_which_do_not_parse_back() {
+    for name in [
+      "",
+      " PAD ",
+      "PAD ",
+      "#NAME",
+      "A=B",
+      "NEW\nLINE",
+      "CR\rNAME",
+      "export NAME",
+      "\u{FEFF}NAME",
+    ] {
+      assert!(!representable_env_name(name), "{name:?}");
+      let err =
+        serialize_env_file([entry(0, name, "secretvalue", "")])
+          .unwrap_err();
+      assert_eq!(
+        err,
+        EnvFileSerializeError::UnrepresentableName {
+          name: name.to_string()
+        }
+      );
+      assert!(!err.to_string().contains("secretvalue"), "{err}");
+    }
+    for name in ["A", "a.b", "export", "exportA", "x#y", "é"] {
+      assert!(representable_env_name(name), "{name:?}");
+    }
+    // The parser refuses a name given twice.
+    let err = serialize_env_file([
+      entry(0, "A", "1", ""),
+      entry(0, "A", "2", ""),
+    ])
+    .unwrap_err();
+    assert_eq!(err.to_string(), "duplicate entry for `A`");
+  }
+
+  #[test]
+  fn debug_leaves_the_value_out() {
+    let entry = entry(3, "DB_PASSWORD", "hunter2", "the database");
+    let debug = format!("{entry:?}");
+    assert!(!debug.contains("hunter2"), "{debug}");
+    assert!(debug.contains("DB_PASSWORD"), "{debug}");
   }
 
   #[test]
@@ -406,10 +981,12 @@ UNQUOTED=$(not run) ${NOT_EXPANDED} # not a comment
   fn a_byte_order_mark_is_not_part_of_the_first_name() {
     assert_eq!(
       parse_env_file("\u{FEFF}A=1\nB=2").unwrap(),
-      vec![
-        ("A".to_string(), "1".to_string()),
-        ("B".to_string(), "2".to_string()),
-      ]
+      [entry(1, "A", "1", ""), entry(2, "B", "2", "")]
+    );
+    // Before a description line, the comment still attaches.
+    assert_eq!(
+      parse_env_file("\u{FEFF}# described\nA=1\n").unwrap(),
+      [entry(2, "A", "1", "described")]
     );
   }
 

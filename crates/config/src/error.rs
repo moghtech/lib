@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 
 /// The json type name of a value, for error messages
 /// which must not include the value itself.
-pub fn value_type(value: &serde_json::Value) -> &'static str {
+pub(crate) fn value_type(value: &serde_json::Value) -> &'static str {
   match value {
     serde_json::Value::Null => "null",
     serde_json::Value::Bool(_) => "boolean",
@@ -22,7 +22,7 @@ pub fn value_type(value: &serde_json::Value) -> &'static str {
 /// field is redacted whole, whatever it holds (serde doesn't escape
 /// it), keeping the names expected after it:
 /// `unknown variant [redacted], expected `fast` or `safe``.
-pub fn redact_serde_error(e: &serde_json::Error) -> String {
+pub(crate) fn redact_serde_error(e: &serde_json::Error) -> String {
   redact_message(&e.to_string(), false)
 }
 
@@ -158,23 +158,60 @@ fn line_column(
 /// Deserialize the merged config into the final type, mapping
 /// failures to [Error::ParseFinalJson] with the path of the
 /// offending field and the type found there, never its value.
+///
 /// String values coerce into the requested type the way `envy`
-/// reads the process environment (numbers, booleans, comma
-/// separated lists, `Option`, unit enum variants), see
-/// [crate::lenient].
+/// reads the process environment, since configuration arrives as
+/// strings from env file sources and `${VAR}` interpolation, and a
+/// `port: u16` field must accept `PORT=8080` all the same:
+///
+/// - `bool`, integers and floats parse from the (trimmed) string; a
+///   `char` is the string's single character, untrimmed.
+/// - A sequence (`Vec<T>`, tuples) splits a string on commas,
+///   entries trimmed and empty ones dropped, so `""` is an empty
+///   list; each entry coerces in turn. A tuple or `[T; N]` given
+///   more entries than it has is an error.
+/// - `Option<T>` is `Some` (only `null` is `None`).
+/// - A unit enum variant matches the string.
+/// - A map key coerces into the map's key type the same way, as
+///   serde_json reads keys (`{ "8080": "api" }` into a
+///   `HashMap<u16, String>`).
+///
+/// Out of reach: anything serde buffers before deserializing it
+/// (`#[serde(flatten)]` fields, untagged and internally / adjacently
+/// tagged enums), where a string stays a string, so a numeric field
+/// inside them must arrive typed (toml / yaml / json), not from an
+/// env file.
 pub fn deserialize_final<T: DeserializeOwned>(
   value: &serde_json::Value,
+) -> crate::Result<T> {
+  deserialize_final_with_env(value, None)
+}
+
+/// [deserialize_final], naming the variable of `env` which set the
+/// value a failure is about ([Error::ParseEnv]).
+pub(crate) fn deserialize_final_with_env<T: DeserializeOwned>(
+  value: &serde_json::Value,
+  env: Option<&crate::env::EnvValues>,
 ) -> crate::Result<T> {
   serde_path_to_error::deserialize(crate::lenient::Lenient(
     value.clone(),
   ))
   .map_err(|e| {
     let path = e.path();
+    let message = redact_serde_error(e.inner());
+    if let Some(variable) = env.and_then(|env| env.variable_at(path))
+    {
+      return Error::ParseEnv {
+        variable: variable.to_string(),
+        path: path.to_string(),
+        message,
+      };
+    }
     let found = value_at(value, path).map(value_type);
     Error::ParseFinalJson {
       path: path.to_string(),
       found,
-      message: redact_serde_error(e.inner()),
+      message,
     }
   })
 }
@@ -190,7 +227,7 @@ fn value_at<'a>(
       Segment::Map { key } | Segment::Enum { variant: key } => {
         value.get(key)?
       }
-      // A sequence split out of a string (see [crate::lenient]):
+      // A sequence split out of a string (see [deserialize_final]):
       // the string is what was found there.
       Segment::Seq { .. } if value.is_string() => return Some(value),
       Segment::Seq { index } => value.get(index)?,
@@ -222,9 +259,13 @@ pub enum Error {
     found: &'static str,
   },
 
+  /// A config file (or include file) which exists but can't be
+  /// opened, eg. permission denied. See [crate::ConfigLoader::load].
   #[error("Failed to open file at {path} | {e:?}")]
   FileOpen { e: std::io::Error, path: PathBuf },
 
+  /// A config file (or include file) which opened but can't be read,
+  /// eg. not utf-8. See [crate::ConfigLoader::load].
   #[error("Failed to read contents of file at {path} | {e:?}")]
   ReadFileContents { e: std::io::Error, path: PathBuf },
 
@@ -232,8 +273,9 @@ pub enum Error {
   #[error("Failed to parse toml file at {path} | {message}")]
   ParseToml {
     path: PathBuf,
-    /// The parser's message with values redacted
-    /// ([redact_serde_error]), and the line and column.
+    /// The parser's message with values redacted (strings,
+    /// numbers, an unknown variant or field name), and the line and
+    /// column.
     message: String,
   },
 
@@ -241,8 +283,9 @@ pub enum Error {
   #[error("Failed to parse yaml file at {path} | {message}")]
   ParseYaml {
     path: PathBuf,
-    /// The parser's message with values redacted
-    /// ([redact_serde_error]), and the line and column.
+    /// The parser's message with values redacted (strings,
+    /// numbers, an unknown variant or field name), and the line and
+    /// column.
     message: String,
   },
 
@@ -250,8 +293,9 @@ pub enum Error {
   #[error("Failed to parse json file at {path} | {message}")]
   ParseJson {
     path: PathBuf,
-    /// The parser's message with values redacted
-    /// ([redact_serde_error]), and the line and column.
+    /// The parser's message with values redacted (strings,
+    /// numbers, an unknown variant or field name), and the line and
+    /// column.
     message: String,
   },
 
@@ -263,11 +307,17 @@ pub enum Error {
     path: PathBuf,
   },
 
-  #[error("Unsupported file type at {path}")]
+  /// A file named as a config path or by an include line which is
+  /// no config file type (toml, yaml, yml, json, or an env file).
+  /// One a directory scan finds is skipped with a warning instead.
+  #[error(
+    "Unsupported file type at {path} | expected a toml, yaml, yml or json extension, or an env file (.env, *.env)"
+  )]
   UnsupportedFileType { path: PathBuf },
 
   /// See [deserialize_final]. The message has values redacted
-  /// ([redact_serde_error]); `found` is the json type at `path`.
+  /// (strings, numbers, an unknown variant or field name); `found`
+  /// is the json type at `path`.
   #[error(
     "Failed to parse merged config into final type at '{path}' | found {} | {message}",
     found.unwrap_or("nothing")
@@ -283,15 +333,21 @@ pub enum Error {
   #[error("Failed to serialize config to json string | {e:?}")]
   SerializeJson { e: serde_json::Error },
 
-  #[error("Failed to read directory at {path:?}")]
+  /// A config directory which exists but can't be read, eg.
+  /// permission denied. See [crate::ConfigLoader::load].
+  #[error("Failed to read directory at {path:?} | {e:?}")]
   ReadDir { path: PathBuf, e: std::io::Error },
 
-  #[error("Failed to get file handle for file in directory {path:?}")]
+  /// An entry of a config directory which can't be read while
+  /// listing it. See [crate::ConfigLoader::load].
+  #[error("Failed to read an entry of directory {path:?} | {e:?}")]
   DirFile { e: std::io::Error, path: PathBuf },
 
-  #[error("Failed to get file name for file at {path:?}")]
-  GetFileName { path: PathBuf },
-
+  /// A config path (listed, an include line, or a matching file in
+  /// a scanned directory) which may exist but whose metadata can't
+  /// be read, eg. permission denied on a parent directory. A path
+  /// which doesn't exist is skipped instead. See
+  /// [crate::ConfigLoader::load].
   #[error("Failed to get metadata for path {path:?} | {e:?}")]
   ReadPathMetaData { path: PathBuf, e: std::io::Error },
 
@@ -324,6 +380,52 @@ pub enum Error {
     /// The path as listed, `cicada://...`.
     path: PathBuf,
     /// The loader's error chain.
+    message: String,
+  },
+
+  /// An [EnvSource][crate::EnvSource] whose table doesn't hold
+  /// together: a variable named twice, a config path inside
+  /// another's, an alias of no variable of the table. A mistake of
+  /// the app, not of the environment.
+  #[error("Invalid environment config source | {message}")]
+  InvalidEnvSource { message: String },
+
+  /// A variable of the [EnvSource][crate::EnvSource] whose value is
+  /// not valid UTF-8.
+  #[error("Environment variable {variable} is not valid UTF-8")]
+  EnvNotUnicode { variable: String },
+
+  /// A variable of the [EnvSource][crate::EnvSource] set twice, under
+  /// names which only differ in case (which `envy` refuses too).
+  #[error(
+    "Environment variable {variable} is set twice, also as {other}: remove one"
+  )]
+  EnvVarSetTwice { variable: String, other: String },
+
+  /// The file a `_FILE` variable of the
+  /// [EnvSource][crate::EnvSource] names, which can't be read
+  /// (missing, permission denied, not UTF-8).
+  #[error(
+    "Failed to read the file {variable} names at {path:?} | {e:?}"
+  )]
+  EnvFile {
+    variable: String,
+    path: PathBuf,
+    e: std::io::Error,
+  },
+
+  /// A value from the environment (see
+  /// [EnvSource][crate::EnvSource]) which the config field it sets
+  /// can't take. The message has the value redacted, like
+  /// [Error::ParseFinalJson]'s.
+  #[error(
+    "Failed to parse environment variable {variable} into '{path}' | {message}"
+  )]
+  ParseEnv {
+    /// As it was set, eg. `APP_PORT` or `APP_PORT_FILE`.
+    variable: String,
+    /// Dot separated path to the offending field.
+    path: String,
     message: String,
   },
 }

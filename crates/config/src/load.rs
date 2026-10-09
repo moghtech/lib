@@ -12,9 +12,8 @@ use crate::{
   Error, Result,
   env_file::{is_env_file, parse_env_file_object},
   error::{redact_serde_error, redact_toml_error, redact_yaml_error},
-  includes::IncludesLoader,
-  interpolate::unsupported_interpolations,
-  interpolate_value,
+  includes::read_includes,
+  interpolate::{interpolate_value, unsupported_interpolations},
   merge::merge_source,
 };
 
@@ -28,29 +27,91 @@ pub(crate) fn is_cicada_path(path: &Path) -> bool {
   path.to_string_lossy().starts_with("cicada:")
 }
 
-/// Collects config files under `path` into `files` in priority
-/// order (later overrides earlier):
+/// A config file found by [load_config_files].
+pub(crate) struct FoundFile {
+  /// As listed, as an include line names it, or as a directory scan
+  /// found it (under the canonical directory). Not canonicalized: a
+  /// symlink keeps the name its type is detected from.
+  pub(crate) path: PathBuf,
+  /// Named as a path or by an include line, rather than found by a
+  /// directory scan. A named file is loaded or an error, whatever
+  /// its name. A scan skips a file it finds which is no config file
+  /// type (a `config.toml.bak` matching `*config.*`), as nobody
+  /// asked for that file in particular.
+  pub(crate) named: bool,
+}
+
+/// Whether an io error means the path doesn't exist (also through a
+/// file: `app.toml/x`, or a dangling symlink).
+pub(crate) fn is_missing(e: &std::io::Error) -> bool {
+  matches!(
+    e.kind(),
+    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+  )
+}
+
+/// The metadata of a path, following symlinks, or `None` when it
+/// doesn't exist. A missing path is skipped (deliberate: an app may
+/// list optional paths, eg. a mount which isn't always there). Any
+/// other failure (permission denied on a parent directory) is an
+/// error ([Error::ReadPathMetaData]): the path may well hold
+/// configuration, and skipping it would start the app without it.
+fn metadata_if_exists(
+  path: &Path,
+  debug_print: bool,
+) -> Result<Option<std::fs::Metadata>> {
+  match std::fs::metadata(path) {
+    Ok(metadata) => Ok(Some(metadata)),
+    Err(e) if is_missing(&e) => {
+      if debug_print {
+        println!(
+          "{}: {}: {path:?} | {e:?}",
+          "DEBUG".cyan(),
+          "Skipping missing path".dimmed()
+        );
+      }
+      Ok(None)
+    }
+    Err(e) => Err(Error::ReadPathMetaData {
+      path: path.to_path_buf(),
+      e,
+    }),
+  }
+}
+
+/// Collects the config files at `path` (a listed path, or an
+/// include line) into `files` in priority order (later overrides
+/// earlier):
 ///
-/// 1. The directory's own matching files, ordered by the matched
-///    wildcard (later wildcards override earlier; a file matching
-///    several takes the priority of the last one), then by name.
-/// 2. Each path listed in the directory's include file, in the
-///    order listed, recursively. Later includes override earlier
-///    ones, and every include overrides the directory's own files.
-///    A `cicada:` include is a source like a `cicada:` path, an
-///    error ([Error::CicadaFeatureDisabled]) without the feature.
+/// - A `cicada:` path is a source of its own, an error
+///   ([Error::CicadaFeatureDisabled]) without the feature.
+/// - A missing path is skipped, see [metadata_if_exists], and so is
+///   one which is no file or directory (`/dev/null`).
+/// - A file is a file to load.
+/// - A directory contributes, in this order:
+///   1. Its own matching files, ordered by the matched wildcard
+///      (later wildcards override earlier; a file matching several
+///      takes the priority of the last one), then by name.
+///   2. Each path listed in its include file, in the order listed,
+///      recursively. Later includes override earlier ones, and
+///      every include overrides the directory's own files.
+///
+/// A directory which exists but can't be read ([Error::ReadDir],
+/// [Error::DirFile]), or a matching entry whose metadata can't be
+/// read ([Error::ReadPathMetaData]), is an error rather than a
+/// directory without config files.
 ///
 /// A path included more than once (eg two includes sharing a
 /// common include) is emitted each time, so its last occurrence
 /// takes the highest priority. Only true recursion (a directory
 /// including itself, directly or indirectly) is cut.
 ///
-/// Files are emitted at the path they were found at (by the scan,
-/// or as an include line names them), not canonicalized, so a
+/// Files are emitted at the path they were found at (listed, by the
+/// scan, or as an include line names them), not canonicalized, so a
 /// symlink is loaded by its own name (which names its type).
 /// [crate::ConfigLoader] dedupes them by their canonical path.
-pub fn load_config_files(
-  files: &mut Vec<PathBuf>,
+pub(crate) fn load_config_files(
+  files: &mut Vec<FoundFile>,
   // canonical directories on the current include stack
   visiting: &mut HashSet<PathBuf>,
   path: &Path,
@@ -58,7 +119,7 @@ pub fn load_config_files(
   include_file_name: &'static str,
   debug_print: bool,
 ) -> Result<()> {
-  // Cicada base case (from an include file).
+  // Cicada base case.
   if is_cicada_path(path) {
     #[cfg(not(feature = "cicada"))]
     return Err(Error::CicadaFeatureDisabled {
@@ -66,24 +127,45 @@ pub fn load_config_files(
     });
     #[cfg(feature = "cicada")]
     {
-      files.push(path.to_path_buf());
+      files.push(FoundFile {
+        path: path.to_path_buf(),
+        named: true,
+      });
       return Ok(());
     }
   }
 
-  // File base case.
-  if path.is_file() {
-    files.push(path.to_path_buf());
-    return Ok(());
-  }
-
-  if !path.is_dir() {
-    return Ok(());
-  }
-
-  let Ok(folder) = path.canonicalize() else {
+  let Some(metadata) = metadata_if_exists(path, debug_print)? else {
     return Ok(());
   };
+
+  // File base case.
+  if metadata.is_file() {
+    files.push(FoundFile {
+      path: path.to_path_buf(),
+      named: true,
+    });
+    return Ok(());
+  }
+
+  // Neither a file nor a directory, eg. `/dev/null` listed to load
+  // nothing: no config to load.
+  if !metadata.is_dir() {
+    if debug_print {
+      println!(
+        "{}: {}: {path:?}",
+        "DEBUG".cyan(),
+        "Skipping path which is no file or directory".dimmed()
+      );
+    }
+    return Ok(());
+  }
+
+  let folder =
+    path.canonicalize().map_err(|e| Error::ReadPathMetaData {
+      path: path.to_path_buf(),
+      e,
+    })?;
   if !visiting.insert(folder.clone()) {
     if debug_print {
       println!(
@@ -94,70 +176,79 @@ pub fn load_config_files(
     }
     return Ok(());
   }
-  let Ok(read_dir) = std::fs::read_dir(&folder) else {
-    visiting.remove(&folder);
-    return Ok(());
-  };
+  let read_dir =
+    std::fs::read_dir(&folder).map_err(|e| Error::ReadDir {
+      path: folder.clone(),
+      e,
+    })?;
 
   // Collect any config files in the current dir,
   // with the index of the matched wildcard.
   let mut dir_files = Vec::new();
-  for dir_entry in read_dir.flatten() {
+  for dir_entry in read_dir {
+    let dir_entry = dir_entry.map_err(|e| Error::DirFile {
+      path: folder.clone(),
+      e,
+    })?;
     let path = dir_entry.path();
-    // Follows symlinks (eg Kubernetes ConfigMap mounts),
-    // unlike DirEntry::metadata.
-    let Ok(metadata) = std::fs::metadata(&path) else {
+    let file_name = dir_entry.file_name();
+    // The include file is never a config file.
+    if file_name == include_file_name {
+      continue;
+    }
+    // An env file next to the config (a compose `.env`) is only
+    // a config source when a wildcard asks for it, or when it is
+    // listed as a path itself.
+    if keywords.is_empty() && is_env_file(&path) {
+      if debug_print {
+        println!(
+          "{}: {}: {path:?} (match it with a wildcard to load it)",
+          "DEBUG".cyan(),
+          "Skipping env file".dimmed()
+        );
+      }
+      continue;
+    }
+    // Ensure file name matches a wildcard keyword. A file
+    // matching several takes the last (highest priority) one, so
+    // `["*config.*", "*config.local.*"]` puts the local override
+    // above the base file. Matched as bytes, so a name which isn't
+    // utf-8 is matched (and loaded) like any other.
+    let index = if keywords.is_empty() {
+      0
+    } else if let Some(index) = keywords
+      .iter()
+      .rposition(|wc| wc.is_match(file_name.as_encoded_bytes()))
+    {
+      index
+    } else {
       continue;
     };
-    if metadata.is_file() {
-      let file_name = dir_entry.file_name();
-      let Some(file_name) = file_name.to_str() else {
-        continue;
-      };
-      // The include file is never a config file.
-      if file_name == include_file_name {
-        continue;
-      }
-      // An env file next to the config (a compose `.env`) is only
-      // a config source when a wildcard asks for it, or when it is
-      // listed as a path itself.
-      if keywords.is_empty() && is_env_file(&path) {
-        if debug_print {
-          println!(
-            "{}: {}: {path:?} (match it with a wildcard to load it)",
-            "DEBUG".cyan(),
-            "Skipping env file".dimmed()
-          );
-        }
-        continue;
-      }
-      // Ensure file name matches a wildcard keyword. A file
-      // matching several takes the last (highest priority) one, so
-      // `["*config.*", "*config.local.*"]` puts the local override
-      // above the base file.
-      let index = if keywords.is_empty() {
-        0
-      } else if let Some(index) = keywords
-        .iter()
-        .rposition(|wc| wc.is_match(file_name.as_bytes()))
-      {
-        index
-      } else {
-        continue;
-      };
-      // As found (absolute, under the canonical folder), not the
-      // canonical path: a symlink (`app.env` -> `secret`) keeps the
-      // name its type is detected from.
-      dir_files.push((index, path));
+    // Follows symlinks (eg Kubernetes ConfigMap mounts), unlike
+    // DirEntry::metadata. A dangling symlink is a missing file.
+    let Some(metadata) = metadata_if_exists(&path, debug_print)?
+    else {
+      continue;
+    };
+    // Subdirectories are only loaded through an include file.
+    if !metadata.is_file() {
+      continue;
     }
+    // As found (absolute, under the canonical folder), not the
+    // canonical path: a symlink (`app.env` -> `secret`) keeps the
+    // name its type is detected from.
+    dir_files.push((index, path));
   }
   // Wildcard priority only applies within this directory.
   dir_files.sort();
-  files.extend(dir_files.into_iter().map(|(_, path)| path));
+  files.extend(
+    dir_files
+      .into_iter()
+      .map(|(_, path)| FoundFile { path, named: false }),
+  );
 
   // Collect any paths specified in 'includes'
-  let includes =
-    IncludesLoader::init(&folder, include_file_name).finish();
+  let includes = read_includes(&folder, include_file_name)?;
   if includes.is_empty() {
     visiting.remove(&folder);
     return Ok(());
@@ -238,11 +329,19 @@ pub fn parse_cicada_path(
 /// provided user configures `CICADA_...` env vars.
 /// See [parse_cicada_path] for the environment syntax.
 ///
-/// A local file which fails to open or parse is reported and
-/// skipped. A cicada source which fails to load or parse is an
-/// error ([Error::CicadaLoad], or the parse error): skipping it
-/// would start the app with defaults where the operator expects
-/// their configuration.
+/// A file which fails to open, read or parse is an error
+/// ([Error::FileOpen], [Error::ReadFileContents], [Error::ParseToml]
+/// and the other parse errors), named or found by a directory scan:
+/// skipping it would start the app without the settings in it (a
+/// `disable_user_registration`, the `trusted_proxies`). So is a
+/// cicada source which fails to load ([Error::CicadaLoad]), eg.
+/// Core briefly unreachable at an exit-on-change restart. A file
+/// holding no settings (blank, comments only) is an empty source,
+/// see [parse_config_contents]. The one file skipped (with a
+/// warning) is one a directory scan finds which is no config file
+/// type, such as a `config.toml.bak` matching `*config.*`; named
+/// as a path or by an include line, it is an error
+/// ([Error::UnsupportedFileType]).
 ///
 /// A source which parsed is never skipped: it merges over the
 /// sources before it key by key (see [crate::ConfigLoader]), and a
@@ -255,53 +354,58 @@ pub fn parse_cicada_path(
 /// templates (Core interpolated a cicada file's `[[SECRET]]`
 /// placeholders already), and a secret must not be able to run a
 /// command in the process reading it.
-pub fn load_parse_config_files<T: DeserializeOwned>(
-  files: &[PathBuf],
+///
+/// Returns the merged sources, for the final deserialization
+/// ([crate::deserialize_final]), after the environment's values
+/// when there is an [crate::EnvSource].
+pub(crate) fn load_parse_config_files(
+  files: &[FoundFile],
   merge_nested: bool,
   extend_array: bool,
-) -> Result<T> {
+) -> Result<serde_json::Map<String, serde_json::Value>> {
   let mut target = serde_json::Map::new();
 
-  for file in files {
+  for FoundFile { path: file, named } in files {
     // The source, whether to interpolate it, and whether it is an
     // env file (whose comma separated lists extend arrays).
     #[cfg(feature = "cicada")]
-    let (source, interpolate, env_file) =
-      if let Some((node, environments)) = parse_cicada_path(file) {
-        // Never skipped, unlike a local file: eg. Core briefly
-        // unreachable at an exit-on-change restart must not start
-        // the app with its defaults.
-        let contents = cicada_loader::load(&node, environments)
-          .map_err(|e| Error::CicadaLoad {
-            path: file.clone(),
-            message: format!("{e:#}"),
-          })?;
-        let source = parse_config_contents(&node, &contents)?;
-        (Ok(source), false, is_env_file(&node))
-      } else {
-        let env_file = is_env_file(file);
-        (load_parse_config_file(file), !env_file, env_file)
-      };
+    if let Some((node, environments)) = parse_cicada_path(file) {
+      let contents = cicada_loader::load(&node, environments)
+        .map_err(|e| Error::CicadaLoad {
+          path: file.clone(),
+          message: format!("{e:#}"),
+        })?;
+      let source = parse_config_contents(&node, &contents)?;
+      merge_source(
+        &mut target,
+        source,
+        merge_nested,
+        extend_array,
+        is_env_file(&node),
+      );
+      continue;
+    }
 
-    #[cfg(not(feature = "cicada"))]
-    let (source, interpolate, env_file) = {
-      let env_file = is_env_file(file);
-      (load_parse_config_file(file), !env_file, env_file)
-    };
-
+    if !has_config_type(file) {
+      if *named {
+        return Err(Error::UnsupportedFileType {
+          path: file.clone(),
+        });
+      }
+      println!(
+        "{}: {file:?} is not loaded: it is no config file type (toml, yaml, yml, json, or an env file). Narrow the config wildcards to leave it out.",
+        "WARN".yellow(),
+      );
+      continue;
+    }
+    let env_file = is_env_file(file);
     let source: serde_json::Map<String, serde_json::Value> =
-      match source {
-        Ok(source) => source,
-        Err(e) => {
-          println!("{}: {e}", "WARN".yellow());
-          continue;
-        }
-      };
+      load_parse_config_file(file)?;
 
     // Interpolate each string leaf (and key) individually, rather
     // than the serialized document, so values containing quotes,
     // backslashes or newlines cannot break or inject into the json.
-    let source = if !interpolate {
+    let source = if env_file {
       source
     } else {
       let mut source = serde_json::Value::Object(source);
@@ -328,26 +432,32 @@ pub fn load_parse_config_files<T: DeserializeOwned>(
     );
   }
 
-  crate::error::deserialize_final(&serde_json::Value::Object(target))
+  Ok(target)
+}
+
+/// Reads a file to a string: a failure to open it is
+/// [Error::FileOpen], to read it (a directory, not utf-8)
+/// [Error::ReadFileContents]. Neither carries the contents.
+pub(crate) fn read_file(path: &Path) -> Result<String> {
+  let mut file = File::open(path).map_err(|e| Error::FileOpen {
+    e,
+    path: path.to_path_buf(),
+  })?;
+  let mut contents = String::new();
+  file.read_to_string(&mut contents).map_err(|e| {
+    Error::ReadFileContents {
+      e,
+      path: path.to_path_buf(),
+    }
+  })?;
+  Ok(contents)
 }
 
 /// Loads and parses a single config file
-pub fn load_parse_config_file<T: DeserializeOwned>(
+pub(crate) fn load_parse_config_file<T: DeserializeOwned>(
   file: &Path,
 ) -> Result<T> {
-  let mut file_handle =
-    File::open(file).map_err(|e| Error::FileOpen {
-      e,
-      path: file.to_path_buf(),
-    })?;
-  let mut contents = String::new();
-  file_handle.read_to_string(&mut contents).map_err(|e| {
-    Error::ReadFileContents {
-      e,
-      path: file.to_path_buf(),
-    }
-  })?;
-  parse_config_contents(file, &contents)
+  parse_config_contents(file, &read_file(file)?)
 }
 
 /// Whether [parse_config_contents] can parse the file by its name:
@@ -370,7 +480,13 @@ pub(crate) fn has_config_type(file: &Path) -> bool {
 /// `database.address`, the way `envy` would read the process
 /// environment. A name with an empty segment (`.dockerconfigjson`)
 /// stays one flat key.
-pub fn parse_config_contents<T: DeserializeOwned>(
+///
+/// Contents holding no settings are an empty config (`{}`), so a
+/// placeholder doesn't stop the app: blank or comments only in any
+/// format, and a yaml or json `null` document (`~`, a yaml file
+/// whose every line is commented out). Anything else must parse
+/// into an object.
+pub(crate) fn parse_config_contents<T: DeserializeOwned>(
   file: &Path,
   contents: &str,
 ) -> Result<T> {
@@ -391,18 +507,24 @@ pub fn parse_config_contents<T: DeserializeOwned>(
     .extension()
     .and_then(|e| e.to_str())
     .map(str::to_ascii_lowercase);
-  let config = match extension.as_deref() {
-    Some("toml") => {
-      toml::from_str(contents).map_err(|e| Error::ParseToml {
+  // `None` for a document holding no settings.
+  let config: Option<T> = match extension.as_deref() {
+    // Blank or comments only is an empty table already.
+    Some("toml") => Some(toml::from_str(contents).map_err(|e| {
+      Error::ParseToml {
         path: file.to_path_buf(),
         message: redact_toml_error(&e, contents),
-      })?
-    }
+      }
+    })?),
+    // Blank or comments only is an empty document already, `null`
+    // (`~`, `--- ~`) is `None`.
     Some("yaml") | Some("yml") => serde_yaml_ng::from_str(contents)
       .map_err(|e| Error::ParseYaml {
       path: file.to_path_buf(),
       message: redact_yaml_error(&e),
     })?,
+    // json has no comments: blank is no document at all.
+    Some("json") if contents.trim().is_empty() => None,
     Some("json") => serde_json::from_str(contents).map_err(|e| {
       Error::ParseJson {
         path: file.to_path_buf(),
@@ -415,7 +537,16 @@ pub fn parse_config_contents<T: DeserializeOwned>(
       });
     }
   };
-  Ok(config)
+  match config {
+    Some(config) => Ok(config),
+    None => serde_json::from_value(serde_json::Value::Object(
+      Default::default(),
+    ))
+    .map_err(|e| Error::ParseJson {
+      path: file.to_path_buf(),
+      message: redact_serde_error(&e),
+    }),
+  }
 }
 
 #[cfg(all(test, feature = "cicada"))]
