@@ -58,12 +58,24 @@
 //! a static ip. Listing the whole container network is not enough:
 //! it includes the gateway the forwarded traffic arrives from.
 //!
+//! # A list which misses the proxy
+//!
+//! When the trusted proxies miss the real proxy (a list naming
+//! another address, `none` behind a proxy, a proxy outside the
+//! private ranges of the default), its forwarding headers are
+//! ignored and every client is seen as the proxy: they all share one
+//! rate limit budget, and match ip whitelists as the proxy's ip. The
+//! first request from a peer which is not trusted but sends
+//! `X-Forwarded-For` / `X-Real-IP` is logged as a warning, once per
+//! process, naming the peer and the trusted proxies. A client
+//! sending the headers itself triggers it too.
+//!
 //! The [cidr] module provides CIDR set parsing and matching,
 //! also used to restrict requests by source ip.
 
 use std::{
   net::{IpAddr, SocketAddr},
-  sync::LazyLock,
+  sync::{LazyLock, Once},
 };
 
 use anyhow::{Context as _, anyhow};
@@ -314,6 +326,13 @@ pub fn get_ip_from_headers_and_extensions(
 /// proxy must append to (or overwrite) `X-Forwarded-For`, see the
 /// [crate docs](crate#what-the-trusted-proxy-must-do).
 ///
+/// The first request from a peer which is not trusted but sends
+/// forwarding headers is logged as a warning (once per process),
+/// naming the peer and the trusted proxies: when the peer is the
+/// reverse proxy, every client is seen as the proxy, see the
+/// [crate docs](crate#a-list-which-misses-the-proxy). The headers
+/// are ignored all the same.
+///
 /// Errors with `401 Unauthorized` when the peer is unknown (no
 /// `ConnectInfo`, ie the app is not served with
 /// `into_make_service_with_connect_info`) and the policy is not
@@ -327,6 +346,26 @@ pub fn get_client_ip(
   peer: Option<IpAddr>,
   trusted_proxies: &TrustedProxies,
 ) -> mogh_error::Result<IpAddr> {
+  client_ip(
+    headers,
+    peer,
+    trusted_proxies,
+    &IGNORED_FORWARDING_LOGGED,
+  )
+}
+
+/// Whether ignored forwarding headers were logged, see
+/// [log_ignored_forwarding].
+static IGNORED_FORWARDING_LOGGED: Once = Once::new();
+
+/// [get_client_ip], logging ignored forwarding headers once per
+/// `logged`.
+fn client_ip(
+  headers: &HeaderMap,
+  peer: Option<IpAddr>,
+  trusted_proxies: &TrustedProxies,
+  logged: &Once,
+) -> mogh_error::Result<IpAddr> {
   let peer = peer.map(|ip| ip.to_canonical());
 
   let peer_trusted = match (trusted_proxies, peer) {
@@ -337,6 +376,12 @@ pub fn get_client_ip(
   };
 
   if !peer_trusted {
+    if let Some(peer) = peer
+      && (headers.contains_key("x-forwarded-for")
+        || headers.contains_key("x-real-ip"))
+    {
+      log_ignored_forwarding(logged, peer, trusted_proxies);
+    }
     return peer
       .context("No socket peer address available for the request (serve the app with 'into_make_service_with_connect_info', eg via mogh_server::serve_app), and forwarding headers cannot be trusted without one.")
       .status_code(StatusCode::UNAUTHORIZED);
@@ -367,6 +412,40 @@ pub fn get_client_ip(
   peer
     .context("No socket peer address available for the request, and no forwarding headers were sent.")
     .status_code(StatusCode::UNAUTHORIZED)
+}
+
+/// Logs, once per `logged`, that the forwarding headers of a request
+/// from `peer`, which is not a trusted proxy, were ignored.
+///
+/// They are rightly ignored when a client sent them itself. But when
+/// `peer` is the reverse proxy, the trusted proxies miss it (a list
+/// naming another address, `none` behind a proxy, a proxy outside
+/// the private ranges of the default) and every client is seen as
+/// the proxy: all of them share one rate limit budget, and match ip
+/// whitelists as the proxy's ip. Nothing else would tell. Once per
+/// process is enough to notice, and keeps clients sending the
+/// headers themselves from filling the log. The header values are
+/// not logged: a client chose them.
+fn log_ignored_forwarding(
+  logged: &Once,
+  peer: IpAddr,
+  trusted_proxies: &TrustedProxies,
+) {
+  logged.call_once(|| {
+    let trusted = match trusted_proxies {
+      TrustedProxies::None => String::from("none"),
+      TrustedProxies::All => String::from("all"),
+      TrustedProxies::Cidrs(set) => set
+        .networks()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", "),
+    };
+    tracing::warn!(
+      "Ignored the X-Forwarded-For / X-Real-IP headers of a request from {peer}, which is not a trusted proxy (trusted_proxies: {trusted}). If {peer} is a reverse proxy in front of this server, add its address to trusted_proxies: until then every client is seen as {peer}, sharing one rate limit budget and matching ip whitelists as the proxy. Logged once"
+    );
+  });
 }
 
 /// Walk a forwarding header from the nearest hop back to the
@@ -902,6 +981,121 @@ mod tests {
     )
     .unwrap_err();
     assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+  }
+
+  /// A writer the log lines are captured into.
+  #[derive(Clone, Default)]
+  struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+  impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+      self.0.lock().unwrap().extend_from_slice(buf);
+      Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+      Ok(())
+    }
+  }
+
+  impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Captured;
+    fn make_writer(&'a self) -> Captured {
+      self.clone()
+    }
+  }
+
+  /// Forwarding headers from a peer which is not a trusted proxy are
+  /// ignored, as before, and the first such request is logged: when
+  /// the peer is the reverse proxy, the trusted proxies miss it and
+  /// every client is seen as the proxy, which nothing else tells.
+  /// Once (per process), naming the peer and the trusted proxies,
+  /// never the header values a client chose.
+  #[test]
+  fn ignored_forwarding_headers_are_logged_once() {
+    let captured = Captured::default();
+    let subscriber = tracing_subscriber::fmt()
+      .with_writer(captured.clone())
+      .with_ansi(false)
+      .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let log = || {
+      String::from_utf8(captured.0.lock().unwrap().clone()).unwrap()
+    };
+
+    // Komodo behind nginx at 172.18.0.7, configured with another
+    // address.
+    let trusted = proxies(&["172.18.0.5"]);
+    let nginx = ip("172.18.0.7");
+    let logged = Once::new();
+    // Nothing to log: no headers, a trusted peer, no peer.
+    let forwarded = headers(&[("x-forwarded-for", "203.0.113.7")]);
+    for (headers, peer) in [
+      (HeaderMap::new(), Some(nginx)),
+      (forwarded.clone(), Some(ip("172.18.0.5"))),
+      (forwarded.clone(), None),
+    ] {
+      let _ = client_ip(&headers, peer, &trusted, &logged);
+    }
+    assert_eq!(log(), "");
+
+    for (name, value) in [
+      ("x-forwarded-for", "203.0.113.7"),
+      ("x-real-ip", "198.51.100.9"),
+    ] {
+      let headers = headers(&[(name, value)]);
+      // Ignored, as before.
+      assert_eq!(
+        client_ip(&headers, Some(nginx), &trusted, &logged).unwrap(),
+        nginx
+      );
+    }
+    assert_eq!(
+      client_ip(
+        &forwarded,
+        Some(ip("203.0.113.50")),
+        &TrustedProxies::None,
+        &logged
+      )
+      .unwrap(),
+      ip("203.0.113.50")
+    );
+    let log = log();
+    let lines = log.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "{log}");
+    assert!(lines[0].contains("WARN"), "{log}");
+    assert!(lines[0].contains("172.18.0.7"), "{log}");
+    assert!(
+      lines[0].contains("trusted_proxies: 172.18.0.5/32"),
+      "{log}"
+    );
+    for value in ["203.0.113.7", "198.51.100.9", "203.0.113.50"] {
+      assert!(!log.contains(value), "{log}");
+    }
+
+    // `none` names itself, the default its ranges.
+    for (trusted, named) in [
+      (TrustedProxies::None, "trusted_proxies: none"),
+      (
+        TrustedProxies::default(),
+        "trusted_proxies: 127.0.0.0/8, ::1/128, 10.0.0.0/8",
+      ),
+    ] {
+      let captured = Captured::default();
+      let subscriber = tracing_subscriber::fmt()
+        .with_writer(captured.clone())
+        .with_ansi(false)
+        .finish();
+      let _guard = tracing::subscriber::set_default(subscriber);
+      let _ = client_ip(
+        &forwarded,
+        Some(ip("203.0.113.50")),
+        &trusted,
+        &Once::new(),
+      );
+      let log = String::from_utf8(captured.0.lock().unwrap().clone())
+        .unwrap();
+      assert!(log.contains(named), "{log}");
+    }
   }
 
   #[tokio::test]

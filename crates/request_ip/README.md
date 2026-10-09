@@ -52,6 +52,17 @@ adds its own `X-Real-IP` line rather than replacing a client-sent one (eg
 HAProxy `http-request add-header`), since the first line is used. List the
 proxy address instead.
 
+## A list which misses the proxy
+
+When the trusted proxies miss the real proxy (a list naming another
+address, `["none"]` behind a proxy, a proxy outside the private ranges of
+the default), its forwarding headers are ignored and every client is seen
+as the proxy: they all share one rate limit budget, and match ip whitelists
+as the proxy's ip. The first request from a peer which is not trusted but
+sends `X-Forwarded-For` / `X-Real-IP` is logged as a warning, once per
+process, naming the peer and the trusted proxies (never the header values).
+A client sending the headers itself triggers it too.
+
 ## Usage
 
 ```rust
@@ -77,6 +88,9 @@ let app = Router::new()
 ```rust
 // Restrict requests to a CIDR whitelist. Entries may be
 // CIDR ranges or bare ips, and an empty whitelist allows all.
+// IPv4-mapped IPv6 entries and ips (`::ffff:10.0.0.0/104`,
+// `::ffff:10.1.2.3`) match as their IPv4 form, also in a
+// `CidrSet` collected from `IpNet`s parsed elsewhere.
 use mogh_request_ip::cidr::check_cidr_whitelist;
 
 async fn restricted_request(
@@ -87,3 +101,14 @@ async fn restricted_request(
   check_cidr_whitelist(ip, &whitelist)
 }
 ```
+
+## Since 3.0
+
+- Built on `mogh_error` 2.0: `get_client_ip`,
+  `get_ip_from_headers_and_extensions`, `cidr::check_cidr_whitelist` and
+  the `RequestIp` rejection are `mogh_error` 2.0 types, so an app upgrades
+  both together.
+- A `CidrSet` collected from `IpNet`s canonicalizes IPv4-mapped networks,
+  as parsed entries are.
+- The first request from a peer which is not trusted but sends forwarding
+  headers is logged (once per process), see above.

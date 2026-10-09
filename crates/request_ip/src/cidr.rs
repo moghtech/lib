@@ -37,7 +37,8 @@ impl CidrSet {
       .map(CidrSet)
   }
 
-  /// The parsed networks.
+  /// The parsed networks, IPv4-mapped IPv6 ones in their IPv4 form
+  /// (see [parse_cidr]).
   pub fn networks(&self) -> &[IpNet] {
     &self.0
   }
@@ -59,9 +60,14 @@ impl CidrSet {
   }
 }
 
+/// Collects networks parsed elsewhere, canonicalized as
+/// [parse_cidr] does: an IPv4-mapped IPv6 network
+/// (`::ffff:10.0.0.0/104`) is kept in its IPv4 form, as
+/// [CidrSet::contains] matches canonicalized ips and an IPv6
+/// network never contains an IPv4 address.
 impl FromIterator<IpNet> for CidrSet {
   fn from_iter<T: IntoIterator<Item = IpNet>>(iter: T) -> Self {
-    CidrSet(iter.into_iter().collect())
+    CidrSet(iter.into_iter().map(canonicalize_net).collect())
   }
 }
 
@@ -230,6 +236,35 @@ mod tests {
     // A v6 prefix shorter than 96 bits is kept as v6.
     let wide = CidrSet::parse(["::ffff:0:0/64"]).unwrap();
     assert!(matches!(wide.networks()[0], IpNet::V6(_)));
+  }
+
+  /// Networks collected into a set (pre-parsed elsewhere) are
+  /// canonicalized as parsed entries are: an `IpNet::V6` never
+  /// contains an IPv4 address, so a mapped network kept as given
+  /// matched no client at all, plain or mapped.
+  #[test]
+  fn collected_ipv4_mapped_networks_match_ipv4_ips() {
+    let entries =
+      ["::ffff:10.0.0.0/104", "::ffff:192.168.1.10", "fd00::/8"];
+    let collected = entries
+      .iter()
+      .map(|entry| {
+        entry
+          .parse::<IpNet>()
+          .unwrap_or_else(|_| IpNet::from(ip(entry)))
+      })
+      .collect::<CidrSet>();
+    assert!(collected.contains(ip("10.1.2.3")));
+    assert!(collected.contains(ip("::ffff:10.1.2.3")));
+    assert!(collected.contains(ip("192.168.1.10")));
+    assert!(!collected.contains(ip("192.168.1.11")));
+    assert!(collected.contains(ip("fd00::1")));
+    // The same set parsing the entries gives.
+    assert_eq!(collected, CidrSet::parse(entries).unwrap());
+    // So trusted as proxies the same way.
+    let proxies = crate::TrustedProxies::Cidrs(collected);
+    assert!(proxies.trusts(ip("10.0.0.1")));
+    assert!(proxies.trusts(ip("::ffff:10.0.0.1")));
   }
 
   #[test]
