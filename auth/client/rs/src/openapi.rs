@@ -127,6 +127,49 @@ fn header_security_scheme(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::api::manage::{
+    ACCOUNT_REQUEST_FORBIDDEN, ADMIN_LIST_FORBIDDEN,
+    KEY_DELETION_FORBIDDEN, RESOURCE_REQUEST_FORBIDDEN,
+  };
+
+  /// The manage requests which need no recent login, as
+  /// mogh_auth_server's `requires_recent_login` lists them: every
+  /// other one does, also one added later.
+  const NO_RECENT_LOGIN: [&str; 5] = [
+    "GetUserId",
+    "ListExternalLoginProviders",
+    "ListTrustedIssuers",
+    "DeleteApiKey",
+    "DeleteSigningKey",
+  ];
+
+  /// The admin requests which credentials without a login (api keys,
+  /// signing keys) may make, as mogh_auth_server's
+  /// `manages_resources` lists them.
+  const MANAGES_RESOURCES: [&str; 6] = [
+    "CreateExternalLoginProvider",
+    "UpdateExternalLoginProvider",
+    "DeleteExternalLoginProvider",
+    "CreateTrustedIssuer",
+    "UpdateTrustedIssuer",
+    "DeleteTrustedIssuer",
+  ];
+
+  /// The 403 a manage request is declared with. Only `GetUserId` is
+  /// never refused so, not even to a disabled or workload user.
+  fn manage_forbidden(request: &str) -> Option<&'static str> {
+    if request == "GetUserId" {
+      None
+    } else if request.starts_with("List") {
+      Some(ADMIN_LIST_FORBIDDEN)
+    } else if NO_RECENT_LOGIN.contains(&request) {
+      Some(KEY_DELETION_FORBIDDEN)
+    } else if MANAGES_RESOURCES.contains(&request) {
+      Some(RESOURCE_REQUEST_FORBIDDEN)
+    } else {
+      Some(ACCOUNT_REQUEST_FORBIDDEN)
+    }
+  }
 
   #[test]
   fn test_spec_paths() {
@@ -176,6 +219,42 @@ mod tests {
           );
         }
       }
+    }
+
+    // Every manage request needs credentials, and is declared with
+    // the 403 of what the server refuses it for.
+    let manage = paths
+      .iter()
+      .filter_map(|(path, item)| {
+        Some((path.strip_prefix("/manage/")?, &item["post"]))
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(manage.len(), 25);
+    for request in NO_RECENT_LOGIN.iter().chain(&MANAGES_RESOURCES) {
+      assert!(
+        manage.iter().any(|(path, _)| path == request),
+        "{request}"
+      );
+    }
+    for (request, operation) in manage {
+      let responses = &operation["responses"];
+      assert_eq!(
+        responses["401"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/Serror",
+        "{request}"
+      );
+      let forbidden = responses["403"]["description"].as_str();
+      assert_eq!(forbidden, manage_forbidden(request), "{request}");
+      // Clients recognize the refusal by the start of its message.
+      assert_eq!(
+        forbidden.is_some_and(|description| {
+          description.starts_with(
+            crate::api::manage::REAUTHENTICATION_REQUIRED,
+          )
+        }),
+        !NO_RECENT_LOGIN.contains(&request),
+        "{request}"
+      );
     }
 
     let schemes =

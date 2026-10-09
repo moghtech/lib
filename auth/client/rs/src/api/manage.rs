@@ -33,6 +33,30 @@ pub trait MoghAuthManageRequest: HasResponse {}
 pub const REAUTHENTICATION_REQUIRED: &str =
   "Reauthentication required";
 
+// The `403` responses of the OpenAPI spec, by what the server refuses
+// a request for. Every request but `GetUserId` is refused to a
+// disabled user and a workload user. The account requests (all but
+// the ones listed below) need a recent login, which a credential
+// without a login (an api key, a signing key) never is. The admin
+// requests need an admin, their changes a recent login of a session,
+// while credentials without a login may make them. Listing, and
+// deleting a key, need neither. `openapi::tests` holds the spec to
+// these lists, which follow the server's `requires_recent_login` and
+// `manages_resources` (mogh_auth_server's `api::manage`).
+
+#[cfg(feature = "utoipa")]
+pub(crate) const ACCOUNT_REQUEST_FORBIDDEN: &str = "Reauthentication required: this needs a login within the reauthentication window of the server, log in again and retry. Api keys and signing keys are refused it. Also refused to a disabled user or a workload user.";
+
+#[cfg(feature = "utoipa")]
+pub(crate) const RESOURCE_REQUEST_FORBIDDEN: &str = "Reauthentication required: a session needs a login within the reauthentication window of the server, log in again and retry (api keys and signing keys are accepted). Also refused to a user who is no admin, a disabled user or a workload user.";
+
+#[cfg(feature = "utoipa")]
+pub(crate) const ADMIN_LIST_FORBIDDEN: &str = "Refused to a user who is no admin, a disabled user or a workload user.";
+
+#[cfg(feature = "utoipa")]
+pub(crate) const KEY_DELETION_FORBIDDEN: &str =
+  "Refused to a disabled user or a workload user.";
+
 //
 
 #[allow(unused)]
@@ -79,6 +103,7 @@ pub struct GetUserIdResponse {
   responses(
     (status = 200, description = "Username updated", body = UpdateUsernameResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -111,6 +136,7 @@ pub type UpdateUsernameResponse = NoData;
   responses(
     (status = 200, description = "Password updated", body = UpdatePasswordResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -154,6 +180,7 @@ pub type UpdatePasswordResponse = NoData;
   responses(
     (status = 200, description = "Creation challenge", body = BeginPasskeyEnrollmentResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -185,6 +212,7 @@ pub type BeginPasskeyEnrollmentResponse = CreationChallengeResponse;
   responses(
     (status = 200, description = "Enrolled in Passkey 2FA", body = ConfirmPasskeyEnrollmentResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -218,6 +246,7 @@ pub type ConfirmPasskeyEnrollmentResponse = NoData;
   responses(
     (status = 200, description = "Unenrolled in Passkey 2FA", body = UnenrollPasskeyResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -251,6 +280,7 @@ pub type UnenrollPasskeyResponse = NoData;
   responses(
     (status = 200, description = "Creation challenge", body = BeginTotpEnrollmentResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -302,6 +332,7 @@ impl std::fmt::Debug for BeginTotpEnrollmentResponse {
   responses(
     (status = 200, description = "Enrolled in Totp 2FA", body = ConfirmTotpEnrollmentResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -360,6 +391,7 @@ impl std::fmt::Debug for ConfirmTotpEnrollmentResponse {
   responses(
     (status = 200, description = "Unenrolled in Totp 2FA", body = UnenrollTotpResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -391,6 +423,7 @@ pub type UnenrollTotpResponse = NoData;
   responses(
     (status = 200, description = "Login linking flow has been started", body = BeginExternalLoginLinkResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -398,12 +431,18 @@ fn begin_external_login_link() {}
 
 /// Begin linking flow for an external login. Response: [NoData].
 ///
-/// First call this method when authenticated, then redirect the
-/// user to `/external/{slug}/link` relative to the auth api path
-/// (eg. `/auth/external/{slug}/link`), using the provider `slug`
-/// from [GetLoginOptions][crate::api::login::GetLoginOptions]
-/// (see [LoginOptionsProvider][crate::api::login::LoginOptionsProvider]).
-/// The slug is not the provider id.
+/// First call this method when authenticated, with the `slug` of the
+/// provider to link, then redirect the user to `/external/{slug}/link`
+/// relative to the auth api path (eg. `/auth/external/{slug}/link`).
+/// The provider `slug` is the one from
+/// [GetLoginOptions][crate::api::login::GetLoginOptions]
+/// (see [LoginOptionsProvider][crate::api::login::LoginOptionsProvider]),
+/// not the provider id. `404` for a provider there is none of, `400`
+/// for a disabled one.
+///
+/// The link is begun for that provider only: `/link` of another
+/// provider refuses it (and uses it up), so no page the user visits in
+/// the meantime can start it at a provider of its choosing.
 ///
 /// The response sets a new session cookie (the session id changes),
 /// and the redirect to `/link` must carry it: only the session which
@@ -415,7 +454,11 @@ fn begin_external_login_link() {}
 #[empty_traits(MoghAuthManageRequest)]
 #[response(BeginExternalLoginLinkResponse)]
 #[error(mogh_error::Error)]
-pub struct BeginExternalLoginLink {}
+pub struct BeginExternalLoginLink {
+  /// The slug of the provider to link, as `/external/{slug}/link`
+  /// names it.
+  pub slug: String,
+}
 
 #[typeshare]
 pub type BeginExternalLoginLinkResponse = NoData;
@@ -432,6 +475,7 @@ pub type BeginExternalLoginLinkResponse = NoData;
   responses(
     (status = 200, description = "Local login unlinked", body = UnlinkLocalLoginResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -462,6 +506,7 @@ pub type UnlinkLocalLoginResponse = NoData;
   responses(
     (status = 200, description = "External login unlinked", body = UnlinkExternalLoginResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -510,7 +555,7 @@ pub struct ExternalLoginProviderListItem {
   responses(
     (status = 200, description = "The external login providers", body = [ExternalLoginProviderListItem]),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 403, description = "Forbidden", body = mogh_error::Serror),
+    (status = 403, description = ADMIN_LIST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -543,7 +588,7 @@ pub type ListExternalLoginProvidersResponse =
   responses(
     (status = 200, description = "The created provider", body = CreateExternalLoginProviderResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 403, description = "Forbidden", body = mogh_error::Serror),
+    (status = 403, description = RESOURCE_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -595,7 +640,7 @@ pub type CreateExternalLoginProviderResponse =
   responses(
     (status = 200, description = "The updated provider", body = UpdateExternalLoginProviderResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 403, description = "Forbidden", body = mogh_error::Serror),
+    (status = 403, description = RESOURCE_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -665,7 +710,7 @@ pub type UpdateExternalLoginProviderResponse =
   responses(
     (status = 200, description = "Provider deleted", body = DeleteExternalLoginProviderResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 403, description = "Forbidden", body = mogh_error::Serror),
+    (status = 403, description = RESOURCE_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -712,7 +757,7 @@ pub struct TrustedIssuerListItem {
   responses(
     (status = 200, description = "The trusted issuers", body = [TrustedIssuerListItem]),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 403, description = "Forbidden", body = mogh_error::Serror),
+    (status = 403, description = ADMIN_LIST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -744,7 +789,7 @@ pub type ListTrustedIssuersResponse = Vec<TrustedIssuerListItem>;
   responses(
     (status = 200, description = "The created issuer", body = CreateTrustedIssuerResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 403, description = "Forbidden", body = mogh_error::Serror),
+    (status = 403, description = RESOURCE_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -779,7 +824,7 @@ pub type CreateTrustedIssuerResponse = TrustedIssuerListItem;
   responses(
     (status = 200, description = "The updated issuer", body = UpdateTrustedIssuerResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 403, description = "Forbidden", body = mogh_error::Serror),
+    (status = 403, description = RESOURCE_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -816,7 +861,7 @@ pub type UpdateTrustedIssuerResponse = TrustedIssuerListItem;
   responses(
     (status = 200, description = "Issuer deleted", body = DeleteTrustedIssuerResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
-    (status = 403, description = "Forbidden", body = mogh_error::Serror),
+    (status = 403, description = RESOURCE_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -852,6 +897,7 @@ pub type DeleteTrustedIssuerResponse = NoData;
   responses(
     (status = 200, description = "External skip 2fa mode updated", body = UpdateExternalSkip2faResponse),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -885,6 +931,8 @@ pub type UpdateExternalSkip2faResponse = NoData;
   responses(
     (status = 200, description = "The api key and secret. The secret is not available again after this response is returned.", body = CreateApiKeyResponse),
     (status = 400, description = "Invalid api key name", body = mogh_error::Serror),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 500, description = "Failed", body = mogh_error::Serror),
   ),
 )]
@@ -950,6 +998,8 @@ impl std::fmt::Debug for CreateApiKeyResponse {
   request_body(content = DeleteApiKey),
   responses(
     (status = 200, description = "Api key deleted.", body = DeleteApiKeyResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = KEY_DELETION_FORBIDDEN, body = mogh_error::Serror),
     (status = 404, description = "Api key not found.", body = mogh_error::Serror),
     (status = 500, description = "Failed", body = mogh_error::Serror),
   ),
@@ -985,6 +1035,8 @@ pub type DeleteApiKeyResponse = NoData;
   responses(
     (status = 200, description = "The private key, if one was generated.", body = CreateSigningKeyResponse),
     (status = 400, description = "Invalid signing key name, cidr whitelist or public key", body = mogh_error::Serror),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
     (status = 409, description = "The public key is already in use.", body = mogh_error::Serror),
     (status = 500, description = "Failed", body = mogh_error::Serror),
   ),
@@ -1062,6 +1114,8 @@ impl std::fmt::Debug for CreateSigningKeyResponse {
   request_body(content = DeleteSigningKey),
   responses(
     (status = 200, description = "Signing key deleted.", body = DeleteSigningKeyResponse),
+    (status = 401, description = "Unauthorized", body = mogh_error::Serror),
+    (status = 403, description = KEY_DELETION_FORBIDDEN, body = mogh_error::Serror),
     (status = 404, description = "Signing key not found.", body = mogh_error::Serror),
     (status = 500, description = "Failed", body = mogh_error::Serror),
   ),
@@ -1166,13 +1220,12 @@ mod tests {
 
   #[test]
   fn test_update_password_response_type() {
-    // Regression: UpdatePassword was declared with
-    // `#[response(UpdateUsernameResponse)]`. Both aliases
-    // resolve to NoData, but the declared response should
-    // be UpdatePasswordResponse.
+    // UpdatePassword was once declared with
+    // `#[response(UpdateUsernameResponse)]`. Both aliases are
+    // NoData, so the name had no effect and only the type is
+    // checked (mogh_resolver 2.0 dropped the name, `res_type`).
     fn assert_response<T: HasResponse<Response = NoData>>() {}
     assert_response::<UpdatePassword>();
-    assert_eq!(UpdatePassword::res_type(), "UpdatePasswordResponse");
   }
 
   #[test]

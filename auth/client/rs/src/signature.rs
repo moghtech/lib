@@ -32,6 +32,10 @@
 //! So the headers are generated per request, right before it is sent,
 //! over its exact path, query and body: unlike a jwt or an api key,
 //! they can't be set once as default headers of a client.
+//! `request::signed_post` (and `request::signed_manage` for the auth
+//! management api) sends a JSON `POST` so, and sends it once more,
+//! signed anew, when the server refused its timestamp
+//! ([SIGNED_AT_ANOTHER_TIME]). By hand it goes like this:
 //!
 //! ```ignore
 //! let url = reqwest::Url::parse(&format!("{address}/read/GetVersion"))?;
@@ -51,6 +55,14 @@
 //! the url the request is sent to. Where a proxy in front of the
 //! server changes the path (it strips a prefix), sign the one the
 //! server receives with `signed_request_headers`.
+//!
+//! These take the private key as text, and parse it for every
+//! request. A client signing more than once parses it once with
+//! `signing_keys` and signs with the `_with_keys` functions
+//! (`signed_request_headers_with_keys`,
+//! `signed_request_headers_for_url_with_keys`), which the others
+//! call: the one implementation of the headers, for app clients to
+//! sign with rather than building the headers themselves.
 
 use anyhow::Context as _;
 use sha2::Digest as _;
@@ -219,7 +231,9 @@ pub fn url_host(url: &str) -> anyhow::Result<String> {
 }
 
 /// [url_host] of a parsed url.
-fn url_origin_host(url: &reqwest::Url) -> anyhow::Result<String> {
+pub(crate) fn url_origin_host(
+  url: &reqwest::Url,
+) -> anyhow::Result<String> {
   // Of any other scheme the host is not read as a host name (its
   // case, an ip address), and no port is the default.
   if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") {
@@ -321,9 +335,19 @@ pub fn sign_request(
   .context("Failed to sign the request")
 }
 
-/// The key pair of a private key to sign requests with.
+/// The key pair of the private key of a signing key (an Ed25519 key,
+/// pkcs8 base64 or pem), to sign requests with
+/// ([signed_request_headers_with_keys]). A client parses it once
+/// and keeps the pair, rather than giving the private key to
+/// [signed_request_headers] for every request, which parses it and
+/// derives the public key each time.
+///
+/// The path of a key file (or a `file:` spec) is refused: it is no
+/// key, and up to 32 bytes of it would be taken as the bytes of a raw
+/// key, one anybody can derive from the path. The error doesn't
+/// repeat the key.
 #[cfg(feature = "pki")]
-fn signing_keys(
+pub fn signing_keys(
   private_key: &str,
 ) -> anyhow::Result<mogh_pki::EncodedKeyPair> {
   // Short enough, a path would be taken for the bytes of a raw key
@@ -348,6 +372,9 @@ fn signing_keys(
 /// It is the path the server has to receive: where a proxy in front
 /// of it changes the path (it strips a prefix), sign the one the
 /// server receives with [signed_request_headers] instead.
+///
+/// [signed_request_headers_for_url_with_keys] takes the key pair
+/// parsed once ([signing_keys]).
 #[cfg(feature = "pki")]
 pub fn signed_request_headers_for_url(
   private_key: &str,
@@ -355,9 +382,26 @@ pub fn signed_request_headers_for_url(
   url: &reqwest::Url,
   body: &[u8],
 ) -> anyhow::Result<[(&'static str, String); 5]> {
+  signed_request_headers_for_url_with_keys(
+    &signing_keys(private_key)?,
+    method,
+    url,
+    body,
+  )
+}
+
+/// [signed_request_headers_for_url] with the key pair of the private
+/// key, parsed once ([signing_keys]).
+#[cfg(feature = "pki")]
+pub fn signed_request_headers_for_url_with_keys(
+  keys: &mogh_pki::EncodedKeyPair,
+  method: &str,
+  url: &reqwest::Url,
+  body: &[u8],
+) -> anyhow::Result<[(&'static str, String); 5]> {
   let host = url_origin_host(url)?;
-  signed_request_headers(
-    private_key,
+  signed_request_headers_with_keys(
+    keys,
     &host,
     method,
     &url_path_and_query(url),
@@ -383,6 +427,10 @@ pub fn url_path_and_query(url: &reqwest::Url) -> String {
 /// The server only accepts the signature for about a second by default
 /// (`AuthImpl::signing_key_timestamp_tolerance_ms`), so create them right
 /// before sending, and keep the clock of the client synchronized.
+///
+/// It parses the private key (and derives its public key) on every
+/// call: a client signing more than once parses it once with
+/// [signing_keys] and signs with [signed_request_headers_with_keys].
 #[cfg(feature = "pki")]
 pub fn signed_request_headers(
   private_key: &str,
@@ -391,7 +439,32 @@ pub fn signed_request_headers(
   path_and_query: &str,
   body: &[u8],
 ) -> anyhow::Result<[(&'static str, String); 5]> {
-  let keys = signing_keys(private_key)?;
+  signed_request_headers_with_keys(
+    &signing_keys(private_key)?,
+    host,
+    method,
+    path_and_query,
+    body,
+  )
+}
+
+/// [signed_request_headers] with the key pair of the private key,
+/// parsed once ([signing_keys]): the five headers of a request made
+/// now, a new timestamp and nonce every call. This is the one
+/// implementation of the signed request headers, which the other
+/// functions call: an app client signing its own requests calls it
+/// (or [signed_request_headers_for_url_with_keys]) rather than
+/// building the headers itself, so it signs as the server verifies.
+///
+/// A pair of another algorithm (an X25519 key) is an error.
+#[cfg(feature = "pki")]
+pub fn signed_request_headers_with_keys(
+  keys: &mogh_pki::EncodedKeyPair,
+  host: &str,
+  method: &str,
+  path_and_query: &str,
+  body: &[u8],
+) -> anyhow::Result<[(&'static str, String); 5]> {
   let timestamp = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .context("Failed to get system timestamp")?
@@ -412,7 +485,7 @@ pub fn signed_request_headers(
   )
   .context("Failed to sign the request")?;
   Ok([
-    (API_PUBLIC_KEY_HEADER, keys.public.into_inner()),
+    (API_PUBLIC_KEY_HEADER, keys.public.as_str().to_string()),
     (API_HOST_HEADER, host.to_string()),
     (API_TIMESTAMP_HEADER, timestamp.to_string()),
     (API_NONCE_HEADER, nonce),
@@ -859,6 +932,103 @@ mod tests {
     let [_, _, _, (_, other_nonce), (_, other_signature)] = headers();
     assert_ne!(other_nonce, nonce);
     assert_ne!(other_signature, signature);
+  }
+
+  /// The key pair parsed once signs as the private key does, and is
+  /// what every other signing function signs with.
+  #[cfg(feature = "pki")]
+  #[test]
+  fn test_signed_request_headers_with_keys() {
+    use mogh_pki::{EncodedKeyPair, PkiKind, SpkiPublicKey};
+
+    let client =
+      EncodedKeyPair::generate(PkiKind::Signature).unwrap();
+    let keys = signing_keys(client.private()).unwrap();
+    assert_eq!(keys.public.as_str(), client.public());
+
+    let verify = |headers: [(&'static str, String); 5],
+                  host: &str,
+                  path_and_query: &str| {
+      let [
+        (API_PUBLIC_KEY_HEADER, public_key),
+        (API_HOST_HEADER, signed_host),
+        (API_TIMESTAMP_HEADER, timestamp),
+        (API_NONCE_HEADER, nonce),
+        (API_SIGNATURE_HEADER, signature),
+      ] = headers
+      else {
+        panic!("The headers are not the five in their order");
+      };
+      assert_eq!(public_key, client.public());
+      assert_eq!(signed_host, host);
+      mogh_pki::signature::verify(
+        &SpkiPublicKey::from(public_key),
+        SignedRequest {
+          host,
+          method: "POST",
+          path_and_query,
+          timestamp: timestamp.parse().unwrap(),
+          nonce: &nonce,
+          body: b"{}",
+        }
+        .message()
+        .as_bytes(),
+        &signature,
+      )
+      .unwrap();
+    };
+    verify(
+      signed_request_headers_with_keys(
+        &keys,
+        "example.com",
+        "POST",
+        "/read",
+        b"{}",
+      )
+      .unwrap(),
+      "example.com",
+      "/read",
+    );
+    let url =
+      reqwest::Url::parse("https://Example.com/auth/manage?x=1")
+        .unwrap();
+    verify(
+      signed_request_headers_for_url_with_keys(
+        &keys, "POST", &url, b"{}",
+      )
+      .unwrap(),
+      "example.com",
+      "/auth/manage?x=1",
+    );
+
+    // A pair of another algorithm is an error, not a panic.
+    let x25519 = EncodedKeyPair::generate(PkiKind::Mutual).unwrap();
+    assert!(
+      signed_request_headers_with_keys(
+        &x25519,
+        "example.com",
+        "POST",
+        "/read",
+        b"",
+      )
+      .is_err()
+    );
+    // What no server could accept is not signed.
+    assert!(
+      signed_request_headers_with_keys(
+        &keys,
+        "https://example.com",
+        "POST",
+        "/read",
+        b"",
+      )
+      .is_err()
+    );
+    // No key file path is taken for a key.
+    let Err(err) = signing_keys("file:/keys/signing.key") else {
+      panic!("A key file path was taken for a key");
+    };
+    assert!(format!("{err:#}").contains("path of a key file"));
   }
 
   /// Signed for where the request goes: the host, path and query of
