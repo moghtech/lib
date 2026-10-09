@@ -3,7 +3,7 @@
 //!
 //! With an OTLP endpoint configured on both ends (see
 //! [LogConfig::otlp_endpoint](crate::LogConfig::otlp_endpoint)), a
-//! caller sends the [`traceparent`](TRACEPARENT_HEADER) of the span
+//! caller sends the [`traceparent`](crate::TRACEPARENT_HEADER) of the span
 //! it issues a request under (as the standard HTTP header, or as a
 //! field of whatever frame the transport uses) and the callee
 //! parents its own span under it with [set_remote_parent], so both
@@ -25,9 +25,6 @@ use opentelemetry::{
   },
 };
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
-
-/// The HTTP header a request carries its W3C trace context in.
-pub const TRACEPARENT_HEADER: &str = "traceparent";
 
 /// The `traceparent` of the current span: `Some` only when it has
 /// a valid OpenTelemetry context, ie. an exporting layer is

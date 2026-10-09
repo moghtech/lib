@@ -1,29 +1,55 @@
-use anyhow::Context;
-use tracing::level_filters::LevelFilter;
-use tracing_subscriber::{
-  Layer, filter::Targets, layer::SubscriberExt as _,
-  util::SubscriberInitExt,
+//! Configurable application level logger using tracing: stdio
+//! (standard / pretty / json) and an OTLP/HTTP trace export.
+//!
+//! The `init` feature (default) is the logger itself: `init`,
+//! `shutdown` and the trace context propagation. Without it
+//! (`default-features = false`) the crate is only the config types
+//! ([LoggingConfig], [LogLevel], [StdioLogMode], the [LogConfig]
+//! trait) and [redact_url_credentials], without the OpenTelemetry
+//! crates, for a crate which holds an application's config without
+//! installing its logger (eg. its API client).
+
+#[cfg(feature = "init")]
+use {
+  anyhow::Context,
+  tracing::level_filters::LevelFilter,
+  tracing_subscriber::{
+    Layer, filter::Targets, layer::SubscriberExt as _,
+    util::SubscriberInitExt,
+  },
 };
 
 mod config;
+mod endpoint;
+#[cfg(feature = "init")]
 mod otel;
+#[cfg(feature = "init")]
 mod trace_context;
 
 pub use config::*;
+pub use endpoint::redact_url_credentials;
+#[cfg(feature = "init")]
 pub use trace_context::*;
+
+/// The HTTP header a request carries its W3C trace context in, see
+/// `current_traceparent` / `set_remote_parent` (`init` feature).
+pub const TRACEPARENT_HEADER: &str = "traceparent";
 
 /// The OpenTelemetry crates the exporting layer is built on,
 /// re-exported so applications needing more than the helpers above
 /// (span attributes, status, links via
 /// `tracing_opentelemetry::OpenTelemetrySpanExt`) use the very
 /// version the layer does. A second version would not see it.
+#[cfg(feature = "init")]
 pub use opentelemetry;
+#[cfg(feature = "init")]
 pub use tracing_opentelemetry;
 
 /// Installs the global logger. Call once, on startup.
 ///
 /// With an [otlp_endpoint](LogConfig::otlp_endpoint), also call
 /// [shutdown] before the process exits.
+#[cfg(feature = "init")]
 pub fn init(config: impl config::LogConfig) -> anyhow::Result<()> {
   let use_otel = otel::enabled(config.otlp_endpoint());
 
@@ -125,6 +151,7 @@ pub fn init(config: impl config::LogConfig) -> anyhow::Result<()> {
 /// Blocks the calling thread until the export finishes (a few
 /// seconds at most). Spans after it are not exported. A no-op
 /// without an OTLP endpoint, or when already called.
+#[cfg(feature = "init")]
 pub fn shutdown() -> anyhow::Result<()> {
   otel::shutdown()
 }
@@ -133,6 +160,7 @@ pub fn shutdown() -> anyhow::Result<()> {
 /// level. While exporting, the OpenTelemetry crates' own warnings
 /// and errors (eg. a failed export) are let through too, unless the
 /// app configures those targets itself.
+#[cfg(feature = "init")]
 fn filter_targets(
   config: &impl config::LogConfig,
   use_otel: bool,
@@ -159,7 +187,7 @@ fn filter_targets(
   filter_targets
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "init"))]
 mod tests {
   use tracing::Level;
 
