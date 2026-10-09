@@ -105,13 +105,14 @@ pub enum StringValidatorMatches {
   /// - hyphens
   /// - dots
   /// - @
-  /// - No Object Ids (only checked with the `bson` feature)
+  /// - not 24 hex digits, the shape of a MongoDB ObjectId: an app
+  ///   looking a user up by "id or username" would take such a
+  ///   name for another user's id.
   Username,
   /// - alphanumeric characters
   /// - underscores
+  /// - not starting with a digit
   VariableName,
-  /// - http or https URL.
-  HttpUrl,
 }
 
 impl StringValidatorMatches {
@@ -130,12 +131,10 @@ impl StringValidatorMatches {
             "Only alphanumeric characters, underscores, hyphens, dots, and @ are allowed"
           ));
         }
-        #[cfg(feature = "bson")]
-        {
-          use std::str::FromStr as _;
-          if bson::oid::ObjectId::from_str(input).is_ok() {
-            return Err(anyhow!("Cannot be valid ObjectId"));
-          }
+        if is_object_id(input) {
+          return Err(anyhow!(
+            "Cannot be 24 hex digits, the shape of an ObjectId"
+          ));
         }
         Ok(())
       }
@@ -154,22 +153,16 @@ impl StringValidatorMatches {
           ))
         }
       }
-
-      StringValidatorMatches::HttpUrl => {
-        if !input.starts_with("http://")
-          && !input.starts_with("https://")
-        {
-          return Err(anyhow!(
-            "Input must start with http:// or https://"
-          ));
-        }
-        url::Url::parse(input)
-          .context("Failed to parse input as URL")
-          .map(|_| ())
-      }
     };
     validate().context("Invalid characters in input")
   }
+}
+
+/// Whether `input` parses as a MongoDB ObjectId: exactly the 24
+/// hex digits (either case) `bson::oid::ObjectId::from_str`
+/// accepts, without depending on bson.
+fn is_object_id(input: &str) -> bool {
+  input.len() == 24 && input.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn validate_no_control_chars(input: &str) -> anyhow::Result<()> {
@@ -270,14 +263,29 @@ mod tests {
     assert!(validator.validate("dollar$sign").is_err());
   }
 
-  #[cfg(feature = "bson")]
+  /// Apps looking a user up by "id or username" take a name of
+  /// this shape for another user's id, so it is refused, with or
+  /// without a bson dependency.
   #[test]
   fn username_matcher_rejects_object_ids() {
     let validator = StringValidator::default()
       .matches(StringValidatorMatches::Username);
-    assert!(validator.validate("507f1f77bcf86cd799439011").is_err());
-    // Same length but not valid hex is fine
+    for object_id in [
+      "507f1f77bcf86cd799439011",
+      "65f0c0ffee0123456789abcd",
+      // ObjectId::from_str takes either case.
+      "65F0C0FFEE0123456789ABCD",
+      "65f0C0ffEE0123456789aBcD",
+    ] {
+      let err = validator.validate(object_id).unwrap_err();
+      assert!(format!("{err:#}").contains("ObjectId"), "{err:#}");
+    }
+    // Same length but not all hex is fine
     validator.validate("z07f1f77bcf86cd799439011").unwrap();
+    // Hex of another length is fine
+    validator.validate("507f1f77bcf86cd79943901").unwrap();
+    validator.validate("507f1f77bcf86cd7994390111").unwrap();
+    validator.validate("deadbeef").unwrap();
   }
 
   #[test]
@@ -290,22 +298,6 @@ mod tests {
     assert!(validator.validate("2fast").is_err());
     assert!(validator.validate("has-hyphen").is_err());
     assert!(validator.validate("").is_err());
-  }
-
-  #[test]
-  fn http_url_matcher() {
-    let validator = StringValidator::default()
-      .matches(StringValidatorMatches::HttpUrl);
-    validator.validate("http://example.com").unwrap();
-    validator.validate("https://example.com/path?q=1").unwrap();
-    assert!(validator.validate("ftp://example.com").is_err());
-    assert!(validator.validate("example.com").is_err());
-    assert!(
-      validator.validate("javascript:alert(1)").is_err(),
-      "non http(s) scheme must be rejected"
-    );
-    // Starts with https:// but is not a parseable URL
-    assert!(validator.validate("https://").is_err());
   }
 
   #[test]
