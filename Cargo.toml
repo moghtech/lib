@@ -19,16 +19,16 @@ repository = "https://github.com/moghtech/lib"
 [workspace.dependencies]
 # MOGH API
 mogh_auth_client = "8.0.0"
-mogh_auth_server = "8.3.0"
+mogh_auth_server = "8.0.0"
 
 # MOGH
 mogh_cache = "2.0.0"
-mogh_config = "4.1.0"
+mogh_config = "4.0.0"
 mogh_encryption = "3.0.0"
-mogh_error = "2.1.0"
-mogh_logger = { version = "2.1.1", default-features = false }
+mogh_error = "2.0.0"
+mogh_logger = { version = "2.0.0", default-features = false }
 mogh_pki = "4.0.0"
-mogh_rate_limit = "3.1.0"
+mogh_rate_limit = "3.0.0"
 mogh_request_ip = "3.0.0"
 mogh_resolver = "2.0.0"
 mogh_resolver_derive = "2.0.0"

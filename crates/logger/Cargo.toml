@@ -1,18 +1,13 @@
 [package]
 name = "mogh_logger"
 description = "Configurable application level logger using tracing."
-version = "2.1.1"
+version = "2.0.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [features]
 default = ["init"]
-# The logger itself: `init` / `shutdown` (stdio, and the OTLP/HTTP
-# trace export) and the trace context propagation, which needs the
-# layer `init` installs. Without it (`default-features = false`) the
-# crate is only the config types, for a crate which holds an app's
-# config without installing its logger (eg. its API client).
 init = [
   "dep:opentelemetry-semantic-conventions",
   "dep:tracing-opentelemetry",
@@ -27,16 +22,13 @@ init = [
 [dependencies]
 tracing.workspace = true
 serde.workspace = true
-# `redact_url_credentials` reads urls as http clients do.
 url.workspace = true
-# The `init` feature.
 opentelemetry-semantic-conventions = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry = { workspace = true, optional = true }
-# The basic auth header of credentials in the endpoint.
 data-encoding = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 

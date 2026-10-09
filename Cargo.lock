@@ -1318,7 +1318,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "mogh_auth_client 8.0.0",
- "mogh_error 2.1.0",
+ "mogh_error 2.0.0",
  "mogh_resolver 2.0.0",
  "mogh_supporter",
  "reqwest 0.13.5",
@@ -1358,7 +1358,7 @@ dependencies = [
  "mogh_cache",
  "mogh_config",
  "mogh_encryption",
- "mogh_error 2.1.0",
+ "mogh_error 2.0.0",
  "mogh_logger",
  "mogh_pki 4.0.0",
  "mogh_rate_limit",
@@ -2113,15 +2113,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
-dependencies = [
- "either",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2441,7 +2432,7 @@ name = "mogh_auth_client"
 version = "8.0.0"
 dependencies = [
  "anyhow",
- "mogh_error 2.1.0",
+ "mogh_error 2.0.0",
  "mogh_pki 4.0.0",
  "mogh_resolver 2.0.0",
  "rand 0.10.3",
@@ -2459,7 +2450,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_server"
-version = "8.3.0"
+version = "8.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2469,7 +2460,7 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken",
  "mogh_auth_client 8.0.0",
- "mogh_error 2.1.0",
+ "mogh_error 2.0.0",
  "mogh_logger",
  "mogh_pki 4.0.0",
  "mogh_rate_limit",
@@ -2505,7 +2496,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_config"
-version = "4.1.0"
+version = "4.0.0"
 dependencies = [
  "cicada_loader",
  "colored",
@@ -2549,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_error"
-version = "2.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2565,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_logger"
-version = "2.1.1"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -2632,11 +2623,11 @@ dependencies = [
 
 [[package]]
 name = "mogh_rate_limit"
-version = "3.1.0"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "axum",
- "mogh_error 2.1.0",
+ "mogh_error 2.0.0",
  "tokio",
 ]
 
@@ -2647,7 +2638,7 @@ dependencies = [
  "anyhow",
  "axum",
  "ipnet",
- "mogh_error 2.1.0",
+ "mogh_error 2.0.0",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2747,7 +2738,7 @@ dependencies = [
  "data-encoding",
  "ed25519-dalek",
  "mogh_auth_server",
- "mogh_error 2.1.0",
+ "mogh_error 2.0.0",
  "mogh_request_ip",
  "mogh_resolver 2.0.0",
  "serde",
@@ -2918,7 +2909,7 @@ dependencies = [
  "ed25519-dalek",
  "hmac 0.12.1",
  "http",
- "itertools 0.10.5",
+ "itertools",
  "log",
  "oauth2",
  "p256",
@@ -3324,7 +3315,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
