@@ -199,9 +199,7 @@ async fn static_ui_serves_files_and_index_fallback() {
 
 /// The headers of the index as served for `uri`.
 async fn index_headers(
-  service: &tower_http::services::ServeDir<
-    tower_http::set_status::SetStatus<Router>,
-  >,
+  service: &Router,
   uri: &str,
 ) -> axum::http::HeaderMap {
   let response = service
@@ -335,6 +333,232 @@ async fn static_ui_index_ignores_conditional_and_range_requests() {
         );
       }
     }
+  }
+}
+
+/// A vite style content hashed asset, big enough to compress.
+const ASSET: &str = "assets/index-B3x9QzLm.js";
+
+fn asset_contents() -> String {
+  "export const answer = 42;\n".repeat(100)
+}
+
+fn get_request(
+  uri: &str,
+  accept_encoding: Option<&str>,
+) -> Request<Body> {
+  let mut request = Request::builder().uri(uri);
+  if let Some(accept_encoding) = accept_encoding {
+    request =
+      request.header(header::ACCEPT_ENCODING, accept_encoding);
+  }
+  request.body(Body::empty()).unwrap()
+}
+
+/// Vite's hashed output may be kept for good: a new build names new
+/// files. Nothing else may, least of all the index served for an
+/// asset path without a file.
+#[tokio::test]
+async fn static_ui_assets_are_cached_for_good() {
+  let dir = UiDir::new("static_ui_assets");
+  std::fs::create_dir_all(dir.0.join("assets")).unwrap();
+  std::fs::write(dir.0.join(ASSET), asset_contents()).unwrap();
+  let service = serve_static_ui(dir.0.to_str().unwrap(), false);
+
+  let response = service
+    .clone()
+    .oneshot(get_request(&format!("/{ASSET}"), None))
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(
+    response.headers()[header::CACHE_CONTROL],
+    "public, max-age=31536000, immutable"
+  );
+  assert_eq!(
+    body_string(response.into_body()).await,
+    asset_contents()
+  );
+
+  // A missing asset is a 404, never the index, and not cached.
+  let response = service
+    .clone()
+    .oneshot(get_request("/assets/index-Gone1234.js", None))
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+  assert!(!response.headers().contains_key(header::CACHE_CONTROL));
+  assert!(body_string(response.into_body()).await.is_empty());
+
+  // Other files are not hashed: no caching policy.
+  let response = service
+    .clone()
+    .oneshot(get_request("/asset.js", None))
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  assert!(!response.headers().contains_key(header::CACHE_CONTROL));
+  // The index keeps its own.
+  let response = service
+    .clone()
+    .oneshot(get_request("/", None))
+    .await
+    .unwrap();
+  assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+  // Directories under it are no files: 404, not an index or a
+  // redirect.
+  std::fs::create_dir_all(dir.0.join("assets/sub")).unwrap();
+  std::fs::write(dir.0.join("assets/sub/index.html"), "sub").unwrap();
+  for uri in ["/assets", "/assets/", "/assets/sub", "/assets/sub/"] {
+    let response = service
+      .clone()
+      .oneshot(get_request(uri, None))
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    assert!(
+      !response.headers().contains_key(header::CACHE_CONTROL),
+      "{uri}"
+    );
+  }
+}
+
+/// The UI's scripts are compressed as the browser accepts, the app's
+/// own routes around it are not.
+#[tokio::test]
+async fn static_ui_is_compressed() {
+  use std::io::Read as _;
+  let dir = UiDir::new("static_ui_compressed");
+  std::fs::create_dir_all(dir.0.join("assets")).unwrap();
+  std::fs::write(dir.0.join(ASSET), asset_contents()).unwrap();
+  let index = format!("<html>{}</html>", "<p>index</p>".repeat(50));
+  std::fs::write(dir.0.join("index.html"), &index).unwrap();
+  let app = Router::new()
+    .route("/api", get(async || "api ".repeat(100)))
+    .fallback_service(serve_static_ui(
+      dir.0.to_str().unwrap(),
+      false,
+    ));
+
+  for (uri, contents) in [
+    (format!("/{ASSET}"), asset_contents()),
+    ("/".to_string(), index),
+  ] {
+    let response = app
+      .clone()
+      .oneshot(get_request(&uri, Some("gzip")))
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
+    assert_eq!(response.headers()[header::VARY], "accept-encoding");
+    let gzip = axum::body::to_bytes(response.into_body(), usize::MAX)
+      .await
+      .unwrap();
+    assert!(gzip.len() < contents.len(), "{uri}");
+    let mut decoded = String::new();
+    flate2::read::GzDecoder::new(&gzip[..])
+      .read_to_string(&mut decoded)
+      .unwrap();
+    assert_eq!(decoded, contents, "{uri}");
+
+    // Brotli first, when the browser takes it.
+    let response = app
+      .clone()
+      .oneshot(get_request(&uri, Some("gzip, deflate, br, zstd")))
+      .await
+      .unwrap();
+    assert_eq!(response.headers()[header::CONTENT_ENCODING], "br");
+
+    // Plain for a client asking for nothing.
+    let response =
+      app.clone().oneshot(get_request(&uri, None)).await.unwrap();
+    assert!(
+      !response.headers().contains_key(header::CONTENT_ENCODING)
+    );
+    assert_eq!(body_string(response.into_body()).await, contents);
+  }
+
+  let response = app
+    .oneshot(get_request("/api", Some("gzip, br")))
+    .await
+    .unwrap();
+  assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
+  assert_eq!(
+    body_string(response.into_body()).await,
+    "api ".repeat(100)
+  );
+}
+
+/// Collects what a test logs.
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+  fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    self.0.lock().unwrap().extend_from_slice(buf);
+    Ok(buf.len())
+  }
+  fn flush(&mut self) -> std::io::Result<()> {
+    Ok(())
+  }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+  type Writer = Captured;
+  fn make_writer(&'a self) -> Captured {
+    self.clone()
+  }
+}
+
+/// Runs `f`, returning what it logged too.
+fn logs_of<T>(f: impl FnOnce() -> T) -> (T, String) {
+  let captured = Captured::default();
+  let subscriber = tracing_subscriber::fmt()
+    .with_writer(captured.clone())
+    .with_ansi(false)
+    .finish();
+  let out = tracing::subscriber::with_default(subscriber, f);
+  let logs = String::from_utf8(captured.0.lock().unwrap().clone());
+  (out, logs.unwrap())
+}
+
+/// A wrong `ui_path` (or an install without the UI) used to answer
+/// every page with an empty 200, and log nothing naming the cause.
+#[tokio::test]
+async fn static_ui_without_index_answers_404_and_logs_the_path() {
+  let dir = UiDir::new("static_ui_no_index");
+  let ui_path = dir.0.to_str().unwrap();
+  let (_, logs) = logs_of(|| serve_static_ui(ui_path, false));
+  assert!(!logs.contains("ERROR"), "{logs}");
+
+  std::fs::remove_file(dir.0.join("index.html")).unwrap();
+  for force_no_cache in [false, true] {
+    let (service, logs) =
+      logs_of(|| serve_static_ui(ui_path, force_no_cache));
+    assert!(logs.contains("ERROR"), "{logs}");
+    assert!(logs.contains(ui_path), "{logs}");
+    for uri in ["/", "/unknown/route"] {
+      let response = service
+        .clone()
+        .oneshot(
+          Request::builder().uri(uri).body(Body::empty()).unwrap(),
+        )
+        .await
+        .unwrap();
+      assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+    // The files which are there are still served.
+    let response = service
+      .oneshot(
+        Request::builder()
+          .uri("/asset.js")
+          .body(Body::empty())
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
   }
 }
 
@@ -586,9 +810,64 @@ impl ServerConfig for ProxyServer {
   fn port(&self) -> u16 {
     0
   }
-  fn trusted_proxies(&self) -> TrustedProxies {
-    self.0.clone()
+  fn trusted_proxies(&self) -> anyhow::Result<TrustedProxies> {
+    Ok(self.0.clone())
   }
+}
+
+/// Serves with the trusted proxies of a config list.
+struct ProxyListServer(&'static [&'static str]);
+
+impl ServerConfig for ProxyListServer {
+  fn bind_ip(&self) -> &str {
+    "127.0.0.1"
+  }
+  fn port(&self) -> u16 {
+    0
+  }
+  fn trusted_proxies(&self) -> anyhow::Result<TrustedProxies> {
+    TrustedProxies::from_config(self.0)
+  }
+}
+
+/// An invalid list is a startup error naming the setting and the
+/// entry, not a fallback (to `None`, a panic inside the server, or
+/// a second parse in each app).
+#[tokio::test]
+async fn invalid_trusted_proxies_fail_the_startup() {
+  let error = mogh_server::configure_app(
+    Router::new(),
+    &ProxyListServer(&["10.0.0.0/8", "not-a-range"]),
+  )
+  .unwrap_err();
+  let error = format!("{error:#}");
+  assert!(
+    error.starts_with("Invalid 'trusted_proxies' config"),
+    "{error}"
+  );
+  assert!(error.contains("not-a-range"), "{error}");
+
+  let error = mogh_server::serve_app(
+    Router::new(),
+    ProxyListServer(&["all", "10.0.0.1"]),
+    None,
+  )
+  .await
+  .unwrap_err();
+  assert!(
+    format!("{error:#}")
+      .starts_with("Invalid 'trusted_proxies' config"),
+    "{error:#}"
+  );
+
+  // A valid list serves.
+  assert!(
+    mogh_server::configure_app(
+      Router::new(),
+      &ProxyListServer(&["private", "203.0.113.10"]),
+    )
+    .is_ok()
+  );
 }
 
 /// Echoes the client ip resolved by the RequestIp extractor.
@@ -1063,4 +1342,253 @@ async fn serve_app_disconnects_tls_clients_not_sending_headers() {
     assert!(disconnected, "{shown:?}");
   }
   handle.shutdown();
+}
+
+/// Serves with a short request body timeout.
+struct BodyTimeoutServer;
+
+const REQUEST_BODY_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_millis(400);
+
+impl ServerConfig for BodyTimeoutServer {
+  fn bind_ip(&self) -> &str {
+    "127.0.0.1"
+  }
+  fn port(&self) -> u16 {
+    0
+  }
+  fn request_body_timeout(&self) -> Option<std::time::Duration> {
+    Some(REQUEST_BODY_TIMEOUT)
+  }
+}
+
+/// Serves an app answering with the length of the body it read.
+/// `/late` first works longer than the timeout, then reads it, and
+/// `GET /` reads none and takes longer than the timeout too.
+async fn serve_with_body_timeout() -> (
+  mogh_server::axum_server::Handle<std::net::SocketAddr>,
+  std::net::SocketAddr,
+) {
+  let handle = mogh_server::axum_server::Handle::new();
+  let mut server = tokio::spawn(mogh_server::serve_app(
+    Router::new()
+      .route(
+        "/",
+        get(async || {
+          tokio::time::sleep(REQUEST_BODY_TIMEOUT * 2).await;
+          "no body"
+        })
+        .post(async |body: String| body.len().to_string()),
+      )
+      .route(
+        "/late",
+        axum::routing::post(async |body: Body| {
+          tokio::time::sleep(REQUEST_BODY_TIMEOUT * 2).await;
+          axum::body::to_bytes(body, usize::MAX)
+            .await
+            .map(|body| body.len().to_string())
+            .map_err(|_| StatusCode::BAD_REQUEST)
+        }),
+      ),
+    BodyTimeoutServer,
+    handle.clone(),
+  ));
+  let addr = tokio::select! {
+    addr = handle.listening() => addr.expect("server failed to bind"),
+    res = &mut server => panic!("server stopped: {res:?}"),
+  };
+  (handle, addr)
+}
+
+/// A client which sends the headers of a request in time, then its
+/// body a byte now and then (slowloris one step later), used to hold
+/// the connection and the handler reading the body forever: each
+/// byte would reset an idle timeout.
+#[tokio::test]
+async fn serve_app_times_out_trickling_request_bodies() {
+  use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+  let (handle, addr) = serve_with_body_timeout().await;
+  let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+  let (mut read, mut write) = stream.into_split();
+  write
+    .write_all(
+      b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1000\r\n\r\n",
+    )
+    .await
+    .unwrap();
+  let start = std::time::Instant::now();
+  let trickling = tokio::spawn(async move {
+    loop {
+      tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+      if write.write_all(b"x").await.is_err() {
+        break;
+      }
+    }
+  });
+  let mut response = Vec::new();
+  let closed = tokio::time::timeout(
+    std::time::Duration::from_secs(5),
+    read.read_to_end(&mut response),
+  )
+  .await;
+  trickling.abort();
+  // Answered, and the connection closed, once the deadline passed:
+  // not before, and not reset by the bytes still coming.
+  assert!(closed.is_ok(), "still open");
+  let elapsed = start.elapsed();
+  assert!(elapsed >= REQUEST_BODY_TIMEOUT, "{elapsed:?}");
+  let response = String::from_utf8_lossy(&response).to_lowercase();
+  assert!(
+    response.starts_with("http/1.1 408 request timeout\r\n"),
+    "{response}"
+  );
+  assert!(response.contains("connection: close\r\n"), "{response}");
+  // The security headers are still applied.
+  assert!(
+    response.contains("x-frame-options: deny\r\n"),
+    "{response}"
+  );
+  handle.shutdown();
+}
+
+/// [serve_app_times_out_trickling_request_bodies], over http/2.
+#[tokio::test]
+async fn serve_app_times_out_trickling_http2_request_bodies() {
+  let (handle, addr) = serve_with_body_timeout().await;
+  let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+  let (client, connection) =
+    h2::client::handshake(stream).await.unwrap();
+  let connection = tokio::spawn(connection);
+  let mut client = client.ready().await.unwrap();
+  let request = Request::builder()
+    .method("POST")
+    .uri(format!("http://{addr}/"))
+    .body(())
+    .unwrap();
+  let (response, mut body) =
+    client.send_request(request, false).unwrap();
+  let start = std::time::Instant::now();
+  let trickling = tokio::spawn(async move {
+    loop {
+      tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+      if body
+        .send_data(axum::body::Bytes::from_static(b"x"), false)
+        .is_err()
+      {
+        break;
+      }
+    }
+  });
+  let response =
+    tokio::time::timeout(std::time::Duration::from_secs(5), response)
+      .await
+      .expect("no answer")
+      .unwrap();
+  trickling.abort();
+  assert!(start.elapsed() >= REQUEST_BODY_TIMEOUT);
+  assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+  connection.abort();
+  handle.shutdown();
+}
+
+/// Bodies which arrive in time are read, even by a handler which
+/// only gets to them after the timeout, and requests without a body
+/// take as long as their handler does.
+#[tokio::test]
+async fn serve_app_reads_bodies_which_arrived_in_time() {
+  let (handle, addr) = serve_with_body_timeout().await;
+  let client = reqwest::Client::new();
+  for path in ["/", "/late"] {
+    let response = client
+      .post(format!("http://{addr}{path}"))
+      .body("x".repeat(1000))
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+    assert_eq!(response.text().await.unwrap(), "1000", "{path}");
+  }
+  let response =
+    client.get(format!("http://{addr}/")).send().await.unwrap();
+  assert_eq!(response.status(), reqwest::StatusCode::OK);
+  assert_eq!(response.text().await.unwrap(), "no body");
+  handle.shutdown();
+}
+
+/// A request body which never sends anything.
+struct Silent;
+
+impl axum::body::HttpBody for Silent {
+  type Data = axum::body::Bytes;
+  type Error = axum::Error;
+
+  fn poll_frame(
+    self: std::pin::Pin<&mut Self>,
+    _: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<
+    Option<Result<http_body::Frame<axum::body::Bytes>, axum::Error>>,
+  > {
+    std::task::Poll::Pending
+  }
+}
+
+struct BodyTimeout(Option<std::time::Duration>);
+
+impl ServerConfig for BodyTimeout {
+  fn port(&self) -> u16 {
+    0
+  }
+  fn request_body_timeout(&self) -> Option<std::time::Duration> {
+    self.0
+  }
+}
+
+/// [configure_app] applies the deadline (so apps serving the router
+/// themselves get it too), and `None` waits without a limit.
+#[tokio::test]
+async fn configure_app_applies_the_request_body_timeout() {
+  let app = |timeout| {
+    mogh_server::configure_app(
+      Router::new().route(
+        "/",
+        axum::routing::post(async |body: String| {
+          body.len().to_string()
+        }),
+      ),
+      &BodyTimeout(timeout),
+    )
+    .unwrap()
+  };
+  let silent = |version| {
+    Request::builder()
+      .method("POST")
+      .uri("/")
+      .version(version)
+      .body(Body::new(Silent))
+      .unwrap()
+  };
+  let timeout = Some(std::time::Duration::from_millis(50));
+  for version in
+    [axum::http::Version::HTTP_11, axum::http::Version::HTTP_2]
+  {
+    let response = tokio::time::timeout(
+      std::time::Duration::from_secs(5),
+      app(timeout).oneshot(silent(version)),
+    )
+    .await
+    .expect("no answer")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    // http/2 has no connection header, its stream ends.
+    assert_eq!(
+      response.headers().get(header::CONNECTION).is_some(),
+      version == axum::http::Version::HTTP_11
+    );
+  }
+  let waiting = tokio::time::timeout(
+    std::time::Duration::from_millis(300),
+    app(None).oneshot(silent(axum::http::Version::HTTP_11)),
+  )
+  .await;
+  assert!(waiting.is_err(), "answered without waiting for the body");
 }

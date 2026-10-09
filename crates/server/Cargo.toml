@@ -1,7 +1,7 @@
 [package]
 name = "mogh_server"
 description = "Configurable axum server including TLS, Session, CORS, common security headers, and static file hosting."
-version = "2.2.0"
+version = "3.0.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -16,7 +16,8 @@ mogh_request_ip.workspace = true
 tower-sessions.workspace = true
 data-encoding.workspace = true
 axum-server.workspace = true
-tower-http.workspace = true
+# The static UI's compression (`ui::serve_static_ui`).
+tower-http = { workspace = true, features = ["compression-br", "compression-gzip"] }
 tracing.workspace = true
 anyhow.workspace = true
 axum.workspace = true
@@ -34,9 +35,15 @@ rustls.workspace = true
 # The timer hyper needs to apply the header read timeout (see
 # 'serve_app').
 hyper-util.workspace = true
+# The request body deadline (see 'configure_app').
+http-body.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
+# Reads back what serve_static_ui logs.
+tracing-subscriber.workspace = true
+# Decodes the static UI's gzip.
+flate2.workspace = true
 # An http/2 client for the header read timeout tests.
 h2.workspace = true
 reqwest.workspace = true

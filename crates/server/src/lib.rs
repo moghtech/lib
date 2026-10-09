@@ -6,6 +6,7 @@ use anyhow::Context as _;
 use axum::{
   Router,
   http::{HeaderValue, header},
+  middleware::from_fn,
 };
 use axum_server::{
   Handle,
@@ -24,13 +25,18 @@ pub use axum_server;
 pub use mogh_request_ip::TrustedProxies;
 
 // Dev dependencies used by the integration tests only.
+#[cfg(all(test, not(feature = "openapi")))]
+use flate2 as _;
 #[cfg(test)]
 use h2 as _;
 #[cfg(test)]
 use reqwest as _;
 #[cfg(test)]
 use tower as _;
+#[cfg(test)]
+use tracing_subscriber as _;
 
+mod body_timeout;
 pub mod cors;
 #[cfg(feature = "openapi")]
 pub mod openapi;
@@ -82,20 +88,42 @@ pub trait ServerConfig {
   /// If empty string, no header is applied.
   /// Default: None
   ///
-  /// Example:
-  /// `default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'`
+  /// Example, the policy a UI built with mogh_ui needs (see its README):
+  /// `default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'`
   fn content_security_policy(&self) -> &str {
     ""
   }
   /// Which socket peers are trusted to set the client ip through
   /// `X-Forwarded-For` / `X-Real-IP` headers, eg the app's internal
-  /// CIDR ranges. Attached to every request by [serve_app], where
-  /// the `mogh_request_ip::RequestIp` extractor (and the Mogh Auth
-  /// server) pick it up.
+  /// CIDR ranges. Attached to every request by [configure_app] (so
+  /// [serve_app]), where the `mogh_request_ip::RequestIp` extractor
+  /// (and the Mogh Auth server) pick it up.
   ///
   /// Pipe a config list through with [TrustedProxies::from_config]:
   /// empty means private ranges, `all` / `none` / `private`
-  /// keywords are supported, else the CIDR ranges given.
+  /// keywords are supported, else the CIDR ranges given. An error
+  /// fails [configure_app] / [serve_app] (the startup) with the
+  /// context "Invalid 'trusted_proxies' config", rather than a
+  /// fallback which would change whose ip the rate limits and cidr
+  /// whitelists see.
+  ///
+  /// ```
+  /// struct Config {
+  ///   trusted_proxies: Vec<String>,
+  /// }
+  ///
+  /// impl mogh_server::ServerConfig for Config {
+  ///   fn port(&self) -> u16 {
+  ///     9120
+  ///   }
+  ///   fn trusted_proxies(
+  ///     &self,
+  ///   ) -> anyhow::Result<mogh_server::TrustedProxies> {
+  ///     mogh_server::TrustedProxies::from_config(&self.trusted_proxies)
+  ///   }
+  /// }
+  /// ```
+  ///
   /// Default: [TrustedProxies::private].
   ///
   /// ⚠️ The default believes **any** private peer, not only the
@@ -105,8 +133,8 @@ pub trait ServerConfig {
   /// network / VPN), they choose their own ip. Narrow it to the
   /// proxy address, or [TrustedProxies::None] when nothing is in
   /// front of the app, see [TrustedProxies::default].
-  fn trusted_proxies(&self) -> TrustedProxies {
-    TrustedProxies::default()
+  fn trusted_proxies(&self) -> anyhow::Result<TrustedProxies> {
+    Ok(TrustedProxies::default())
   }
   /// How long [serve_app] waits for a client to send the headers of
   /// a request. Clients which don't are disconnected, so they can't
@@ -131,6 +159,28 @@ pub trait ServerConfig {
   fn header_read_timeout(&self) -> Option<Duration> {
     Some(Duration::from_secs(30))
   }
+  /// How long [configure_app] (and so [serve_app]) waits for the body
+  /// of a request once its headers arrived: a deadline for the whole
+  /// body, not reset by each piece of it, so a client can't hold the
+  /// connection and the handler reading the body by sending it slowly
+  /// (a byte now and then, which an idle timeout never stops). When
+  /// it passes with the body still coming, reading it fails and the
+  /// request is answered `408 Request Timeout` (closing an http/1
+  /// connection), whatever the handler made of the failed read.
+  ///
+  /// What already arrived is still read after it, so a handler which
+  /// works a while before reading a body that came in time doesn't
+  /// fail. Requests without a body are not affected, nor are upgraded
+  /// connections (websockets, CONNECT tunnels), whose data is no
+  /// request body.
+  ///
+  /// Raise it (or `None`) when clients send large bodies over slow
+  /// links, eg. uploads.
+  ///
+  /// Default: 60 seconds. `None` waits without a limit.
+  fn request_body_timeout(&self) -> Option<Duration> {
+    Some(Duration::from_secs(60))
+  }
 }
 
 /// Applies a security header layer to the app,
@@ -148,13 +198,26 @@ fn apply_security_header(
   Ok(app.layer(SetResponseHeaderLayer::overriding(name, value)))
 }
 
-/// Applies the security headers and
+/// Applies the [request body deadline][ServerConfig::request_body_timeout],
+/// security headers and
 /// [trusted proxies][ServerConfig::trusted_proxies] layers
 /// to the app. Used by [serve_app].
+///
+/// Fails on an invalid header value or trusted proxy list.
 pub fn configure_app(
   mut app: Router,
   config: &impl ServerConfig,
 ) -> anyhow::Result<Router> {
+  let trusted_proxies = config
+    .trusted_proxies()
+    .context("Invalid 'trusted_proxies' config")?;
+  info!("Trusted Proxies: {trusted_proxies:?}");
+  // Inside the security headers, which its 408 gets too.
+  if let Some(timeout) = config.request_body_timeout() {
+    app = app.layer(from_fn(move |req, next| {
+      body_timeout::request_body_deadline(timeout, req, next)
+    }));
+  }
   app = apply_security_header(
     app,
     header::X_CONTENT_TYPE_OPTIONS,
@@ -185,14 +248,16 @@ pub fn configure_app(
     config.referrer_policy(),
     "Invalid referrer_policy value",
   )?;
-  Ok(app.layer(config.trusted_proxies().layer()))
+  Ok(app.layer(trusted_proxies.layer()))
 }
 
 /// Serves the app with socket connect info,
 /// security headers, and trusted proxies applied.
 ///
 /// Clients which don't send the headers of a request in time are
-/// disconnected, see [ServerConfig::header_read_timeout].
+/// disconnected, see [ServerConfig::header_read_timeout], and a body
+/// which doesn't arrive in time is answered 408, see
+/// [ServerConfig::request_body_timeout].
 pub async fn serve_app(
   app: Router,
   config: impl ServerConfig,

@@ -32,8 +32,11 @@ mogh_server::serve_app(app, Config, None).await?;
 `X-Frame-Options`, `X-XSS-Protection`, `Referrer-Policy`, optional
 `Content-Security-Policy`) and the `ServerConfig::trusted_proxies` layer, which
 decides which socket peers may set the client ip through `X-Forwarded-For` /
-`X-Real-IP`. Use `configure_app` to apply the same layers when serving the app
-yourself.
+`X-Real-IP`. `ServerConfig::trusted_proxies` returns a `Result`: pipe the
+config list through `TrustedProxies::from_config`, and an invalid entry fails
+the startup ("Invalid 'trusted_proxies' config") instead of falling back to
+another policy. Use `configure_app` to apply the same layers when serving the
+app yourself.
 
 `serve_app` disconnects clients which don't send the headers of a request within
 `ServerConfig::header_read_timeout` (default 30 seconds, `None` to wait without
@@ -49,7 +52,19 @@ alike. After that:
   open as long as the client answers the keep alive pings `serve_app` sends
   every 20 seconds: hyper's http/2 server has no idle timeout.
 
-This bounds how long each connection can wait for headers, not how many
+The body of a request then has `ServerConfig::request_body_timeout` (default 60
+seconds, `None` to wait without a limit) to arrive whole, counted from the end of
+its headers. It is a deadline for the whole body, not an idle timeout reset by
+each piece, so a client can't hold the connection and the handler reading the
+body by sending it a byte now and then. When it passes with the body still
+coming, reading the body fails and the request is answered `408 Request Timeout`
+(closing an http/1 connection). What already arrived is still read after it, so
+a handler which works a while before reading a body that came in time doesn't
+fail. Requests without a body and upgraded connections (websockets, CONNECT
+tunnels) are not affected. Raise it (or `None`) when clients send large bodies
+over slow links, eg. uploads. `configure_app` applies it too.
+
+These bound how long each connection can wait for a request, not how many
 connections there are: front the app with a proxy to limit those, and to close
 idle http/2 connections.
 
@@ -114,4 +129,15 @@ proxy. See `src/openapi/README.md` to bump the pinned Scalar version.
 `ui::serve_static_ui` serves a static UI directory, answering paths without a
 file (`/`, client side routes) with its `index.html`. The index is always served
 in full with `Cache-Control: no-cache` and the content hash as `ETag`, so
-browsers pick up a new UI right after an upgrade.
+browsers pick up a new UI right after an upgrade. Without an `index.html` (a
+wrong `ui_path`, an install without the UI) those paths answer 404, and an error
+naming `ui_path` is logged on startup.
+
+The files under `/assets` (vite's content hashed build output, its default
+`build.assetsDir`) are served with
+`Cache-Control: public, max-age=31536000, immutable`: a new build names new
+files, so browsers keep these without revalidating them. A path under `/assets`
+without a file is a 404 rather than the index. The static UI's responses are
+compressed (brotli or gzip, as the browser accepts), for the UI's multi-MB
+scripts. Only the UI service is: the app's api around it (eg. streamed
+responses) is left as it is.
