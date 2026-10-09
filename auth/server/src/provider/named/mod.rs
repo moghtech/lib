@@ -11,6 +11,35 @@ pub const STATE_LENGTH: usize = 32;
 /// How many characters of a provider's text go into an error.
 const MAX_ERROR_TEXT_LENGTH: usize = 512;
 
+/// Reads the body of a provider's response, at most
+/// [MAX_RESPONSE_LENGTH][crate::provider::oidc::MAX_RESPONSE_LENGTH]:
+/// a larger one is refused unread, also when it declares its length
+/// up front.
+async fn read_body(
+  mut res: reqwest::Response,
+) -> anyhow::Result<Vec<u8>> {
+  use crate::provider::oidc::MAX_RESPONSE_LENGTH;
+  let too_large = || {
+    anyhow!("The response is larger than {MAX_RESPONSE_LENGTH} bytes")
+  };
+  if res
+    .content_length()
+    .is_some_and(|length| length > MAX_RESPONSE_LENGTH as u64)
+  {
+    return Err(too_large());
+  }
+  let mut body = Vec::new();
+  while let Some(chunk) =
+    res.chunk().await.map_err(reqwest::Error::without_url)?
+  {
+    if body.len() + chunk.len() > MAX_RESPONSE_LENGTH {
+      return Err(too_large());
+    }
+    body.extend_from_slice(&chunk);
+  }
+  Ok(body)
+}
+
 /// Parses a `200 OK` response body, anything else is an
 /// error carrying (the start of) the response text.
 ///
@@ -22,11 +51,7 @@ async fn handle_response<T: DeserializeOwned>(
   res: reqwest::Response,
 ) -> anyhow::Result<T> {
   let status = res.status();
-  let body = res
-    .bytes()
-    .await
-    .map_err(reqwest::Error::without_url)
-    .with_context(|| {
+  let body = read_body(res).await.with_context(|| {
     format!("Status: {status} | Failed to get response body")
   })?;
   if status == StatusCode::OK {
@@ -49,9 +74,9 @@ async fn handle_response<T: DeserializeOwned>(
   }
 }
 
-/// A provider's text as it goes into an error:
+/// A provider's text as it goes into an error (or the log):
 /// without control characters, and bounded.
-fn sanitize_text(text: &str) -> String {
+pub(crate) fn sanitize_text(text: &str) -> String {
   let text = text.trim();
   let mut sanitized = text
     .chars()

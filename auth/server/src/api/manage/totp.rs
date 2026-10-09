@@ -8,17 +8,18 @@ use mogh_auth_client::api::manage::{
 };
 use mogh_error::AddStatusCode as _;
 use mogh_resolver::Resolve;
-use tracing::{info, instrument};
+use tracing::{error, info, instrument};
 use zeroize::Zeroizing;
 
 use crate::{
-  AuthImpl,
+  AuthImpl, CredentialChange,
   api::manage::ManageArgs,
   bcrypt_pool::spawn_bcrypt,
   rand::{random_bytes, random_string},
 };
 
-/// 160 bits
+/// In bytes: 320 bits (RFC 4226 asks for at least 128, and
+/// recommends 160).
 const TOTP_ENROLLMENT_SECRET_LENGTH: usize = 40;
 
 /// How many recovery codes an enrollment gives.
@@ -73,6 +74,7 @@ impl Resolve<ManageArgs> for BeginTotpEnrollment {
       auth,
       user,
       session,
+      ..
     }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
     auth.check_username_locked(user.username())?;
@@ -104,18 +106,20 @@ impl Resolve<ManageArgs> for ConfirmTotpEnrollment {
     "ConfirmTotpEnrollment",
     skip_all,
     fields(
-      user_id = user.id(),
-      username = user.username(),
+      user_id = args.user.id(),
+      username = args.user.username(),
     )
   )]
   async fn resolve(
     self,
-    ManageArgs {
+    args: &ManageArgs,
+  ) -> Result<Self::Response, Self::Error> {
+    let ManageArgs {
       auth,
       user,
       session,
-    }: &ManageArgs,
-  ) -> Result<Self::Response, Self::Error> {
+      ..
+    } = args;
     // Checked again, the lock may have been added since the
     // enrollment began.
     auth.check_username_locked(user.username())?;
@@ -155,6 +159,21 @@ impl Resolve<ManageArgs> for ConfirmTotpEnrollment {
 
     info!("TOTP 2FA enrollment complete");
 
+    // The recovery codes are shown once, in this response, and the
+    // enrollment is in effect already: an error of the app's hook
+    // must not keep them from the user, who could only enroll again
+    // to get new ones. It is logged instead.
+    if let Err(e) = args
+      .credentials_changed(CredentialChange::TotpEnrolled)
+      .await
+    {
+      error!(
+        "TOTP was enrolled, but the app failed to handle the credential change. \
+         The user's other sessions may not have ended | {:#}",
+        e.error
+      );
+    }
+
     Ok(ConfirmTotpEnrollmentResponse { recovery_codes })
   }
 }
@@ -176,14 +195,15 @@ impl Resolve<ManageArgs> for UnenrollTotp {
     "UnenrollTotp",
     skip_all,
     fields(
-      user_id = user.id(),
-      username = user.username(),
+      user_id = args.user.id(),
+      username = args.user.username(),
     )
   )]
   async fn resolve(
     self,
-    ManageArgs { auth, user, .. }: &ManageArgs,
+    args: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
+    let ManageArgs { auth, user, .. } = args;
     unenroll_totp(
       auth.as_ref(),
       user.username(),
@@ -192,6 +212,10 @@ impl Resolve<ManageArgs> for UnenrollTotp {
     .await?;
 
     info!("User unenrolled TOTP 2FA");
+
+    args
+      .credentials_changed(CredentialChange::TotpUnenrolled)
+      .await?;
 
     Ok(UnenrollTotpResponse {})
   }
@@ -293,6 +317,109 @@ mod tests {
       assert!(bcrypt::verify(code, hash).unwrap());
     }
     assert!(!bcrypt::verify(&codes[1], &hashed[0]).unwrap());
+  }
+
+  /// The TOTP secrets [FailingHookAuth] stored, by user.
+  static STORED: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+  /// Stores TOTP enrollments, and fails to handle every credential
+  /// change.
+  struct FailingHookAuth;
+
+  impl AuthImpl for FailingHookAuth {
+    fn new() -> Self {
+      FailingHookAuth
+    }
+    fn app_name(&self) -> &'static str {
+      "TestApp"
+    }
+    crate::test_support::stub_auth_impl!(
+      get_user,
+      handle_request_authentication,
+      jwt_provider
+    );
+    fn update_user_stored_totp(
+      &self,
+      user_id: String,
+      encoded_secret: String,
+      _hashed_recovery_codes: Vec<String>,
+    ) -> DynFuture<mogh_error::Result<()>> {
+      STORED.lock().unwrap().push((user_id, encoded_secret));
+      Box::pin(async { Ok(()) })
+    }
+    fn remove_user_stored_totp(
+      &self,
+      user_id: String,
+    ) -> DynFuture<mogh_error::Result<()>> {
+      STORED.lock().unwrap().retain(|(id, _)| *id != user_id);
+      Box::pin(async { Ok(()) })
+    }
+    fn credentials_changed(
+      &self,
+      _user_id: String,
+      _change: CredentialChange,
+      _kept_jwt: Option<String>,
+    ) -> DynFuture<mogh_error::Result<()>> {
+      Box::pin(async {
+        Err(anyhow::anyhow!("the session store is down").into())
+      })
+    }
+  }
+
+  /// A user of its own: the default
+  /// [AuthImpl::consume_totp_step] keeps the steps of every user in
+  /// the process, which the tests share.
+  struct TestUser;
+
+  impl crate::user::AuthUserImpl for TestUser {
+    fn id(&self) -> &str {
+      "enrollment-hook-user"
+    }
+    fn username(&self) -> &str {
+      "user"
+    }
+  }
+
+  /// The recovery codes are shown once, in the response of the
+  /// enrollment, which is stored by then: an app failing to handle
+  /// the change doesn't keep them from the user. Other changes fail
+  /// the request, see [AuthImpl::credentials_changed].
+  #[tokio::test]
+  async fn test_a_failed_change_hook_still_returns_the_recovery_codes()
+   {
+    let args = ManageArgs {
+      auth: std::sync::Arc::new(FailingHookAuth),
+      user: std::sync::Arc::new(Box::new(TestUser)),
+      session: crate::test_support::session(),
+      jwt: Some(String::from("the-session")),
+    };
+    let totp = FailingHookAuth
+      .make_totp(random_bytes(TOTP_ENROLLMENT_SECRET_LENGTH), None)
+      .unwrap();
+    args
+      .session
+      .insert_totp_enrollment("enrollment-hook-user", &totp)
+      .await
+      .unwrap();
+    let response = ConfirmTotpEnrollment {
+      code: totp.generate_current().to_string(),
+    }
+    .resolve(&args)
+    .await
+    .unwrap();
+    assert_eq!(response.recovery_codes.len(), RECOVERY_CODE_COUNT);
+    assert_eq!(
+      *STORED.lock().unwrap(),
+      [(
+        String::from("enrollment-hook-user"),
+        BASE32_NOPAD.encode(totp.secret())
+      )]
+    );
+
+    let err = UnenrollTotp {}.resolve(&args).await.unwrap_err();
+    assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(STORED.lock().unwrap().is_empty());
   }
 
   #[test]

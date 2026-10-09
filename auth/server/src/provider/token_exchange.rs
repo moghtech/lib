@@ -317,9 +317,10 @@ pub(crate) mod test_tokens {
   pub const ISSUER: &str = "https://idp.example.com";
   pub const CLIENT_ID: &str = "app-client-id";
 
-  /// Test only keys, generated for this repository.
-  const KEY_A: &str = include_str!("test_keys/rsa_a.pem");
-  const KEY_B: &str = include_str!("test_keys/rsa_b.pem");
+  /// Test only keys, generated for this repository. Kept outside the
+  /// published crate, see `auth/test_keys/README.md`.
+  const KEY_A: &str = include_str!("../../../test_keys/rsa_a.pem");
+  const KEY_B: &str = include_str!("../../../test_keys/rsa_b.pem");
 
   pub enum Signer {
     /// The key the provider publishes
@@ -387,6 +388,11 @@ pub(crate) mod test_tokens {
     /// How long ago the provider authenticated the user
     /// (`auth_time`), not set by default.
     pub auth_time_ago: Option<Duration>,
+    /// The `nonce` of a login's ID token, not set by default.
+    pub nonce: Option<String>,
+    /// The access token issued with a login's ID token, which then
+    /// carries its hash (`at_hash`). Not set by default.
+    pub access_token: Option<String>,
     pub signer: Signer,
     pub additional_claims: AC,
   }
@@ -400,6 +406,8 @@ pub(crate) mod test_tokens {
         expires_in: Duration::minutes(5),
         issued_ago: Duration::minutes(1),
         auth_time_ago: None,
+        nonce: None,
+        access_token: None,
         signer: Signer::Provider,
         additional_claims,
       }
@@ -417,33 +425,37 @@ pub(crate) mod test_tokens {
           ))),
         self.additional_claims,
       )
-      .set_auth_time(self.auth_time_ago.map(|ago| Utc::now() - ago));
+      .set_auth_time(self.auth_time_ago.map(|ago| Utc::now() - ago))
+      .set_nonce(self.nonce.map(openidconnect::Nonce::new));
       type Token<AC> = IdToken<
         AC,
         CoreGenderClaim,
         CoreJweContentEncryptionAlgorithm,
         CoreJwsSigningAlgorithm,
       >;
+      let access_token =
+        self.access_token.map(openidconnect::AccessToken::new);
+      let access_token = access_token.as_ref();
       let token = match self.signer {
         Signer::Provider => Token::new(
           claims,
           &rsa_key(KEY_A),
           CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
-          None,
+          access_token,
           None,
         ),
         Signer::Other => Token::new(
           claims,
           &rsa_key(KEY_B),
           CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
-          None,
+          access_token,
           None,
         ),
         Signer::Hmac(secret) => Token::new(
           claims,
           &CoreHmacKey::new(secret.as_bytes()),
           CoreJwsSigningAlgorithm::HmacSha256,
-          None,
+          access_token,
           None,
         ),
       }

@@ -1,20 +1,27 @@
 use std::net::IpAddr;
 
-use anyhow::{Context as _, anyhow};
-use axum::{Router, response::Redirect, routing::get};
+use anyhow::Context as _;
+use axum::{
+  Router,
+  extract::Request,
+  middleware::Next,
+  response::{Redirect, Response},
+  routing::get,
+};
 use data_encoding::BASE64URL;
 use mogh_auth_client::{
   api::login::UserIdOrTwoFactor, config::ExternalLoginProvider,
-  passkey::RequestChallengeResponse,
 };
-use mogh_error::{AddStatusCode as _, AddStatusCodeError as _};
-use reqwest::StatusCode;
+use mogh_error::Variant;
 use serde::Deserialize;
 use tracing::info;
 use utoipa::ToSchema;
 
+use mogh_request_ip::RequestIp;
+
 use crate::{
-  AuthImpl, Login, LoginKind, middleware::check_user_cidr_whitelist,
+  AuthImpl, Login, LoginKind, RequestContext, context,
+  middleware::check_user_cidr_whitelist, scope_request_context,
   session::Session, user::BoxAuthUser,
 };
 
@@ -23,74 +30,107 @@ pub mod login;
 pub mod manage;
 pub mod token;
 
-/// This router should be nested without any additional middleware
+/// The auth api, for the app to nest at [AuthImpl::path] (`/auth` by
+/// default) under a session layer (tower-sessions, eg.
+/// `mogh_server::session::memory_session_layer`): the login flows keep
+/// their steps in flight on the session.
+///
+/// Layers of the app's own around it are fine (eg. hiding the details
+/// of server errors, a body limit, an audit layer): the router relies
+/// on none being absent, and scopes the
+/// [request_context][crate::request_context] of its requests itself.
+/// A layer which reads request bodies runs before the timestamp of a
+/// signed request is checked though, which counts the upload against
+/// [AuthImpl::signing_key_timestamp_tolerance_ms].
 pub fn router<I: AuthImpl>() -> Router {
   Router::new()
     .route("/version", get(|| async { env!("CARGO_PKG_VERSION") }))
-    .nest("/login", login::router::<I>())
-    .nest("/manage", manage::router::<I>())
-    .merge(external::router::<I>())
-    .merge(token::router::<I>())
+    .nest(
+      "/login",
+      login::router::<I>().layer(axum::middleware::from_fn(
+        |ip, req, next| scope_context(context::LOGIN, ip, req, next),
+      )),
+    )
+    .nest(
+      "/manage",
+      manage::router::<I>().layer(axum::middleware::from_fn(
+        |ip, req, next| scope_context(context::MANAGE, ip, req, next),
+      )),
+    )
+    .merge(external::router::<I>().layer(axum::middleware::from_fn(
+      |ip, req: Request, next| {
+        let method = external_method(req.uri().path());
+        scope_context(method, ip, req, next)
+      },
+    )))
+    .merge(token::router::<I>().layer(axum::middleware::from_fn(
+      |ip, req, next| {
+        scope_context(context::TOKEN_EXCHANGE, ip, req, next)
+      },
+    )))
 }
 
-#[derive(serde::Deserialize)]
-struct Variant {
-  variant: String,
+/// Runs the request in its [RequestContext] ([request_context]), for
+/// the app's hooks to read. A request whose client ip can't be told
+/// runs without: the handlers refuse it.
+async fn scope_context(
+  method: &'static str,
+  ip: Result<RequestIp, mogh_error::Error>,
+  req: Request,
+  next: Next,
+) -> Response {
+  match ip {
+    Ok(RequestIp(ip)) => {
+      scope_request_context(
+        RequestContext::new(ip, method, None),
+        next.run(req),
+      )
+      .await
+    }
+    Err(_) => next.run(req).await,
+  }
+}
+
+/// The [RequestContext::method] of a route of the external login
+/// router: `/external/{slug}/{login,link,callback}`, or the same
+/// under a provider's reserved id (`/oidc/callback`).
+fn external_method(path: &str) -> &'static str {
+  match path.rsplit('/').next() {
+    Some("login") => context::EXTERNAL_LOGIN,
+    Some("link") => context::EXTERNAL_LINK,
+    _ => context::EXTERNAL_CALLBACK,
+  }
 }
 
 /// Builds the tagged request (`{ type, params }`) of the
-/// `/{variant}` routes. An unknown variant or invalid params
-/// is the clients fault (BAD_REQUEST), not a server error.
+/// `/{variant}` routes with [mogh_error::variant_request], as the
+/// apps' own `/{variant}` routes do: an unknown variant or invalid
+/// params is the client's fault, `422 Unprocessable Entity` like the
+/// tagged route answers, and the error never repeats a param's value
+/// (a password, on the login api).
 fn parse_variant_request<R: serde::de::DeserializeOwned>(
   variant: String,
   params: serde_json::Value,
 ) -> mogh_error::Result<R> {
-  serde_json::from_value(serde_json::json!({
-    "type": variant,
-    "params": params,
-  }))
-  .context("Invalid request")
-  .status_code(StatusCode::BAD_REQUEST)
+  mogh_error::variant_request(&variant, params)
 }
 
 #[derive(serde::Deserialize)]
-pub struct RedirectQuery {
+pub(crate) struct RedirectQuery {
   redirect: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-pub struct StandardCallbackQuery {
+pub(crate) struct StandardCallbackQuery {
   pub state: Option<String>,
   pub code: Option<String>,
   pub error: Option<String>,
 }
 
-impl StandardCallbackQuery {
-  /// Returns (state, code)
-  pub fn open(self) -> mogh_error::Result<(String, String)> {
-    if let Some(e) = self.error {
-      return Err(
-        anyhow!("Provider returned error: {e}")
-          .status_code(StatusCode::UNAUTHORIZED),
-      );
-    }
-    let state = self
-      .state
-      .context("Callback query does not contain state")
-      .status_code(StatusCode::UNAUTHORIZED)?;
-    let code = self
-      .code
-      .context("Callback query does not contain code")
-      .status_code(StatusCode::UNAUTHORIZED)?;
-
-    Ok((state, code))
-  }
-}
-
 /// The longest post-login `redirect` which is kept. The login
 /// is started by unauthenticated requests, which store it on the
 /// session until the callback.
-pub const MAX_REDIRECT_LENGTH: usize = 2048;
+pub(crate) const MAX_REDIRECT_LENGTH: usize = 2048;
 
 /// Only allow post-login redirects back to the app itself,
 /// preventing open redirects through the `redirect` query param.
@@ -163,6 +203,17 @@ fn format_redirect(
   Redirect::to(&redirect_url)
 }
 
+/// The app's rules for a name a user takes (a sign up's, a rename's):
+/// [AuthImpl::validate_username], then
+/// [AuthImpl::validate_new_username]. Logins check only the first.
+pub(crate) fn check_new_username<I: AuthImpl + ?Sized>(
+  auth: &I,
+  username: &str,
+) -> mogh_error::Result<()> {
+  auth.validate_username(username)?;
+  auth.validate_new_username(username)
+}
+
 /// The length of the suffix [unique_username] appends.
 const UNIQUE_USERNAME_SUFFIX_LENGTH: usize = 6;
 
@@ -217,16 +268,11 @@ pub(crate) fn provider_login(
   }
 }
 
-/// The second factor an external login has to be completed with.
-pub(crate) enum ExternalTwoFactor {
-  Passkey(RequestChallengeResponse),
-  Totp,
-}
-
 /// Begins the second factor of an external login on the session if the
-/// user requires one ([external_login_requires_two_factor]). It is
-/// completed with `CompletePasskeyLogin` / `CompleteTotpLogin`, which
-/// record the login as one through `provider`.
+/// user requires one ([external_login_requires_two_factor]), see
+/// [begin_second_factor][login::begin_second_factor]. It is completed
+/// with `CompletePasskeyLogin` / `CompleteTotpLogin`, which record the
+/// login as one through `provider`.
 pub(crate) async fn begin_external_two_factor<
   I: AuthImpl + ?Sized,
 >(
@@ -234,49 +280,26 @@ pub(crate) async fn begin_external_two_factor<
   session: &Session,
   user: &dyn crate::user::AuthUserImpl,
   provider: &ExternalLoginProvider,
-) -> mogh_error::Result<Option<ExternalTwoFactor>> {
+) -> mogh_error::Result<Option<login::SecondFactorChallenge>> {
   if !external_login_requires_two_factor(user) {
     return Ok(None);
   }
-  match (user.passkey(), user.totp_secret()) {
-    // WebAuthn Passkey 2FA
-    (Some(passkey), _) => {
-      let passkeys = auth.passkey_provider().context(
-        "No passkey provider available, possibly invalid 'host' config.",
-      )?;
-      let (response, state) = passkeys
-        .start_passkey_authentication(passkey)
-        .context("Failed to start passkey authentication flow")?;
-      session.insert_passkey_login(user.id(), &state).await?;
-      session.insert_login_kind(&provider_login(provider)).await?;
-
-      info!(
-        user_id = user.id(),
-        username = user.username(),
-        "Passkey 2FA flow initiated"
-      );
-
-      Ok(Some(ExternalTwoFactor::Passkey(response)))
-    }
-    // TOTP 2FA
-    (None, Some(_)) => {
-      session.insert_totp_login_user_id(user.id()).await?;
-      session.insert_login_kind(&provider_login(provider)).await?;
-
-      info!(
-        user_id = user.id(),
-        username = user.username(),
-        "TOTP 2FA flow initiated"
-      );
-
-      Ok(Some(ExternalTwoFactor::Totp))
-    }
-    (None, None) => Ok(None),
-  }
+  login::begin_second_factor(
+    auth,
+    session,
+    user,
+    &provider_login(provider),
+  )
+  .await
 }
 
 /// Logs in an existing user found by an external provider,
 /// initiating 2FA if required. Enforces the user cidr whitelist.
+///
+/// Without a second factor the login is completed here, at the
+/// callback, and counts as a fresh one for
+/// [AuthImpl::reauthentication_window_secs] even when the provider
+/// answered from its single sign-on session (see there).
 async fn get_user_id_or_two_factor<I: AuthImpl>(
   auth: &I,
   session: &Session,
@@ -315,10 +338,12 @@ async fn get_user_id_or_two_factor<I: AuthImpl>(
 
       UserIdOrTwoFactor::UserId(user.id().to_string())
     }
-    Some(ExternalTwoFactor::Passkey(response)) => {
+    Some(login::SecondFactorChallenge::Passkey(response)) => {
       UserIdOrTwoFactor::Passkey(response)
     }
-    Some(ExternalTwoFactor::Totp) => UserIdOrTwoFactor::Totp {},
+    Some(login::SecondFactorChallenge::Totp) => {
+      UserIdOrTwoFactor::Totp {}
+    }
   };
   Ok(res)
 }
@@ -350,9 +375,246 @@ fn user_id_or_two_factor_redirect<I: AuthImpl>(
 
 #[cfg(test)]
 mod tests {
+  use anyhow::anyhow;
+  use reqwest::StatusCode;
+  use std::sync::{LazyLock, Mutex};
+
   use axum::response::IntoResponse;
+  use mogh_rate_limit::RateLimiter;
 
   use super::*;
+  use crate::{
+    DynFuture, RequestAuthentication, provider::jwt::JwtProvider,
+    request_context,
+  };
+
+  /// The contexts [ContextAuth]'s hooks ran in, by hook.
+  static SEEN: Mutex<Vec<(&'static str, RequestContext)>> =
+    Mutex::new(Vec::new());
+
+  fn see(hook: &'static str) {
+    if let Some(context) = request_context() {
+      SEEN.lock().unwrap().push((hook, context));
+    }
+  }
+
+  /// Every user exists, the hooks remember the context they ran in.
+  struct ContextAuth;
+
+  struct ContextUser(String);
+
+  impl crate::user::AuthUserImpl for ContextUser {
+    fn id(&self) -> &str {
+      &self.0
+    }
+    fn username(&self) -> &str {
+      "user"
+    }
+  }
+
+  impl AuthImpl for ContextAuth {
+    fn new() -> Self {
+      ContextAuth
+    }
+    fn host(&self) -> &str {
+      "https://example.com"
+    }
+    fn get_user(
+      &self,
+      user_id: String,
+    ) -> DynFuture<mogh_error::Result<BoxAuthUser>> {
+      see("get_user");
+      Box::pin(async move {
+        Ok(Box::new(ContextUser(user_id)) as BoxAuthUser)
+      })
+    }
+    fn handle_request_authentication(
+      &self,
+      _auth: RequestAuthentication,
+      _ip: IpAddr,
+      _require_user_enabled: bool,
+      req: axum::extract::Request,
+    ) -> DynFuture<mogh_error::Result<axum::extract::Request>> {
+      Box::pin(async { Ok(req) })
+    }
+    fn jwt_provider(&self) -> &JwtProvider {
+      static PROVIDER: LazyLock<JwtProvider> =
+        LazyLock::new(|| JwtProvider::new(b"secret", 60_000));
+      &PROVIDER
+    }
+    fn general_rate_limiter(&self) -> &RateLimiter {
+      see("general_rate_limiter");
+      static LIMITER: LazyLock<std::sync::Arc<RateLimiter>> =
+        LazyLock::new(|| {
+          RateLimiter::new(true, 0, Default::default())
+        });
+      &LIMITER
+    }
+    fn external_login_error_redirect(&self) -> Option<&str> {
+      see("external_login_error_redirect");
+      None
+    }
+    fn list_external_providers(
+      &self,
+    ) -> DynFuture<mogh_error::Result<Vec<ExternalLoginProvider>>>
+    {
+      see("list_external_providers");
+      Box::pin(async { Ok(Vec::new()) })
+    }
+    fn find_user_with_username(
+      &self,
+      _username: String,
+    ) -> DynFuture<mogh_error::Result<Option<BoxAuthUser>>> {
+      see("find_user_with_username");
+      Box::pin(async { Ok(None) })
+    }
+    fn update_user_username(
+      &self,
+      _user_id: String,
+      _username: String,
+    ) -> DynFuture<mogh_error::Result<()>> {
+      see("update_user_username");
+      Box::pin(async { Ok(()) })
+    }
+  }
+
+  /// The hooks run in the [RequestContext] of their request: the
+  /// client ip, the request by its wire name once known, and the
+  /// user of an authenticated management request.
+  #[tokio::test]
+  async fn test_hooks_run_in_the_request_context() {
+    let app = router::<ContextAuth>().layer(
+      tower_sessions::SessionManagerLayer::new(
+        tower_sessions::MemoryStore::default(),
+      )
+      .with_secure(false),
+    );
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+      axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+      )
+      .await
+      .unwrap()
+    });
+    let client = reqwest::Client::builder()
+      .redirect(reqwest::redirect::Policy::none())
+      .build()
+      .unwrap();
+    // The loopback peer is a trusted proxy by default.
+    let ip: IpAddr = "203.0.113.9".parse().unwrap();
+    let url = |path: &str| format!("http://{address}{path}");
+    let jwt =
+      ContextAuth.jwt_provider().encode_sub("user-1").unwrap().jwt;
+    let seen = |hook: &str| {
+      SEEN
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(seen, _)| *seen == hook)
+        .map(|(_, context)| context.clone())
+        .collect::<Vec<_>>()
+    };
+
+    // A management request, by its variant route and the tagged one.
+    for (path, body) in [
+      ("/manage/UpdateUsername", r#"{"username":"new-name"}"#),
+      (
+        "/manage",
+        r#"{"type":"UpdateUsername","params":{"username":"new-name"}}"#,
+      ),
+    ] {
+      SEEN.lock().unwrap().clear();
+      let res = client
+        .post(url(path))
+        .header("x-forwarded-for", ip.to_string())
+        .header("authorization", format!("Bearer {jwt}"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+      assert!(res.status().is_success(), "{path}: {}", res.status());
+      // Authenticated first, before the body is read.
+      assert_eq!(
+        seen("get_user"),
+        [RequestContext::new(ip, context::MANAGE, None)],
+        "{path}"
+      );
+      let handled = RequestContext::new(
+        ip,
+        "UpdateUsername",
+        Some("user-1".into()),
+      );
+      assert_eq!(
+        seen("find_user_with_username"),
+        std::slice::from_ref(&handled)
+      );
+      assert_eq!(seen("update_user_username"), [handled]);
+    }
+
+    // A login request.
+    SEEN.lock().unwrap().clear();
+    let res = client
+      .post(url("/login/GetLoginOptions"))
+      .header("x-forwarded-for", ip.to_string())
+      .header("content-type", "application/json")
+      .body("{}")
+      .send()
+      .await
+      .unwrap();
+    assert!(res.status().is_success(), "{}", res.status());
+    assert_eq!(
+      seen("list_external_providers"),
+      [RequestContext::new(ip, "GetLoginOptions", None)]
+    );
+
+    // The browser routes of external logins, failing here (no such
+    // provider, nothing begun on the session).
+    for (path, method) in [
+      ("/external/nope/login", context::EXTERNAL_LOGIN),
+      ("/external/nope/link", context::EXTERNAL_LINK),
+      ("/external/nope/callback", context::EXTERNAL_CALLBACK),
+      ("/oidc/callback", context::EXTERNAL_CALLBACK),
+    ] {
+      SEEN.lock().unwrap().clear();
+      client
+        .get(url(path))
+        .header("x-forwarded-for", ip.to_string())
+        .send()
+        .await
+        .unwrap();
+      assert_eq!(
+        seen("external_login_error_redirect"),
+        [RequestContext::new(ip, method, None)],
+        "{path}"
+      );
+    }
+
+    // Token exchange.
+    SEEN.lock().unwrap().clear();
+    client
+      .post(url("/token"))
+      .header("x-forwarded-for", ip.to_string())
+      .form(
+        &mogh_auth_client::api::token::TokenExchangeRequest::id_token(
+          "not-a-token",
+        ),
+      )
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(
+      seen("general_rate_limiter"),
+      [RequestContext::new(ip, context::TOKEN_EXCHANGE, None)]
+    );
+
+    // Outside of a request, there is none.
+    assert_eq!(request_context(), None);
+  }
 
   struct TwoFactorUser {
     external_skip_2fa: bool,
@@ -488,12 +750,17 @@ mod tests {
         if username == "user"
     ));
 
-    // The client sent these, so they aren't server errors.
+    // The client sent these, so they aren't server errors, and the
+    // errors don't repeat the values sent (passwords).
     for (variant, params) in [
       ("Unknown", serde_json::json!({})),
       ("LoginLocalUser", serde_json::json!({})),
       ("LoginLocalUser", serde_json::json!({ "username": 1 })),
       ("LoginLocalUser", serde_json::json!(null)),
+      (
+        "LoginLocalUser",
+        serde_json::json!({ "username": "user", "password": 1234567 }),
+      ),
     ] {
       let err = parse_variant_request::<TestRequest>(
         variant.into(),
@@ -503,8 +770,13 @@ mod tests {
       .unwrap();
       assert_eq!(
         err.status,
-        StatusCode::BAD_REQUEST,
+        StatusCode::UNPROCESSABLE_ENTITY,
         "{variant} {params}"
+      );
+      assert!(
+        !format!("{:#}", err.error).contains("1234567"),
+        "{:#}",
+        err.error
       );
     }
   }
@@ -704,52 +976,5 @@ mod tests {
     assert_eq!(location(redirect), "https://example.com/dest");
     let redirect = format_redirect("https://example.com", None, "");
     assert_eq!(location(redirect), "https://example.com");
-  }
-
-  #[test]
-  fn test_standard_callback_query_open() {
-    let (state, code) = StandardCallbackQuery {
-      state: Some("state".into()),
-      code: Some("code".into()),
-      error: None,
-    }
-    .open()
-    .unwrap();
-    assert_eq!(state, "state");
-    assert_eq!(code, "code");
-  }
-
-  #[test]
-  fn test_standard_callback_query_open_error_cases() {
-    // Provider error is surfaced
-    assert!(
-      StandardCallbackQuery {
-        state: Some("state".into()),
-        code: Some("code".into()),
-        error: Some("access_denied".into()),
-      }
-      .open()
-      .is_err()
-    );
-    // Missing state
-    assert!(
-      StandardCallbackQuery {
-        state: None,
-        code: Some("code".into()),
-        error: None,
-      }
-      .open()
-      .is_err()
-    );
-    // Missing code
-    assert!(
-      StandardCallbackQuery {
-        state: Some("state".into()),
-        code: None,
-        error: None,
-      }
-      .open()
-      .is_err()
-    );
   }
 }

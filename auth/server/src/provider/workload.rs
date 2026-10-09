@@ -13,9 +13,10 @@ use anyhow::{Context as _, anyhow};
 use mogh_auth_client::config::{
   TrustedIssuer, TrustedIssuerKeys, WorkloadClaim, WorkloadRule,
 };
+use mogh_logger::redact_url_credentials;
 use openidconnect::{IssuerUrl, core::CoreJsonWebKeySet};
 use serde_json::{Map, Value};
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::{
   AuthImpl,
@@ -24,7 +25,7 @@ use crate::{
     load_cache::LoadCache,
     token_exchange::{TokenVerificationKeys, issuers_match},
   },
-  validations::redact_url_credentials,
+  validations::validate_public_http_url,
 };
 
 /// Fetched keys are reused for 5min, so a rotation at the issuer is picked up.
@@ -197,15 +198,19 @@ fn http_client() -> &'static reqwest::Client {
 ///
 /// The management api refuses urls with credentials, but issuers
 /// configured elsewhere (static ones, rows stored before) may still
-/// carry them: errors name the url without them.
+/// carry them, in the userinfo or the query: errors name the url
+/// redacted ([redact_url_credentials]), and the http client's own
+/// errors, which would repeat it with its query, without it.
 async fn fetch_text(url: &str) -> anyhow::Result<String> {
   let shown = redact_url_credentials(url);
   let mut response = http_client()
     .get(url)
     .send()
     .await
+    .map_err(reqwest::Error::without_url)
     .with_context(|| format!("Failed to reach {shown}"))?
     .error_for_status()
+    .map_err(reqwest::Error::without_url)
     .with_context(|| format!("Request to {shown} failed"))?;
   let too_large = || anyhow!("Response of {shown} is too large");
   if response
@@ -218,6 +223,7 @@ async fn fetch_text(url: &str) -> anyhow::Result<String> {
   while let Some(chunk) = response
     .chunk()
     .await
+    .map_err(reqwest::Error::without_url)
     .with_context(|| format!("Failed to read response of {shown}"))?
   {
     if body.len() + chunk.len() > MAX_JWKS_LENGTH {
@@ -312,6 +318,35 @@ pub fn evict_verification_keys(issuer_id: &str) {
 type Locks<K, L> = Mutex<HashMap<K, Arc<L>>>;
 type RuleLock = tokio::sync::Mutex<()>;
 type IssuerLock = tokio::sync::RwLock<()>;
+type RemovalLock = tokio::sync::RwLock<()>;
+
+/// Written while [sync_all_workload_users] lists the issuers which
+/// are live and the app removes the users of the others
+/// ([AuthImpl::remove_workload_users_except]), read by the exchanges
+/// while they get or create a user ([hold_off_removal]). One for all
+/// issuers: the user created meanwhile may be one of an issuer
+/// created after the listing, which no lock of its own could have
+/// held off.
+fn removal_lock() -> &'static RemovalLock {
+  static LOCK: OnceLock<RemovalLock> = OnceLock::new();
+  LOCK.get_or_init(Default::default)
+}
+
+/// Held by an exchange around [lock_workload_user] and
+/// [AuthImpl::get_or_create_workload_user]: waits for the removal of
+/// the users of the issuers and rules which are gone at the end of
+/// [sync_all_workload_users], and holds it off. A user created after
+/// it listed the live issuers (the first exchange of an issuer or rule
+/// created meanwhile) would be taken for one of an issuer which is
+/// gone.
+///
+/// Take it first, holding nothing else while it waits, and never
+/// wait for another exchange while holding it: the lock is fair, a
+/// removal waiting for it holds off the exchanges which come after.
+pub(crate) async fn hold_off_removal()
+-> tokio::sync::RwLockReadGuard<'static, ()> {
+  removal_lock().read().await
+}
 
 /// One lock per (issuer id, rule id) with a caller.
 fn rule_locks() -> &'static Locks<(String, String), RuleLock> {
@@ -397,6 +432,10 @@ pub struct WorkloadUserLock {
 /// ([lock_trusted_issuer]): an exchange which reads the rule again
 /// once it holds this never gives the user the access the rule had
 /// before an update the app finished storing and syncing.
+///
+/// The exchange takes it once it waited for the removal of the users
+/// of issuers and rules which are gone, at the end of
+/// [sync_all_workload_users].
 ///
 /// This only covers one instance of the app: apps running several
 /// still need a get or create which is safe under concurrency.
@@ -509,21 +548,56 @@ impl WorkloadAccess {
   }
 }
 
+/// A trusted issuer as it is, and the ids of the rules whose users
+/// it keeps, see [AuthImpl::remove_workload_users_except].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LiveIssuer {
+  /// The id of the issuer.
+  pub issuer_id: String,
+  /// The ids of its rules which can have a user
+  /// ([WorkloadAccess::of_issuer]).
+  pub rule_ids: Vec<String>,
+}
+
+impl LiveIssuer {
+  fn of(issuer: &TrustedIssuer) -> LiveIssuer {
+    LiveIssuer {
+      issuer_id: issuer.id.clone(),
+      rule_ids: WorkloadAccess::of_issuer(issuer)
+        .into_iter()
+        .map(|access| access.rule_id)
+        .collect(),
+    }
+  }
+}
+
 /// Applies the rules of every trusted issuer, static and stored, to
-/// their users with [AuthImpl::sync_workload_users].
+/// their users with [AuthImpl::sync_workload_users], then removes the
+/// users of issuers and rules which are gone with
+/// [AuthImpl::remove_workload_users_except].
 ///
 /// Call it when the app starts. Static issuers
 /// ([AuthImpl::static_trusted_issuers]) are never updated over the
 /// API, so this is how a change to their configuration reaches the
 /// users of their rules: a rule disabled or removed there, or given
 /// other groups or admin status (which the rule's next exchange
-/// would apply as well). Stored issuers are synced on every update
-/// already: including them brings users in line which were stored
-/// before, eg. by an earlier version.
+/// would apply as well), and an issuer removed from it (or skipped
+/// for its configuration, see [list_trusted_issuers]). Stored issuers
+/// are synced on every update already: including them brings users in
+/// line which were stored before, eg. by an earlier version.
 ///
-/// The users of an issuer removed from the configuration aren't
-/// seen here: the app has to remove them (users of issuer ids it
-/// doesn't know anymore).
+/// It can run while the app serves: each issuer is read again once
+/// its lock is held ([lock_trusted_issuer]), so an update of it made
+/// meanwhile is not undone with what it was before, and one deleted
+/// meanwhile is skipped. An issuer which fails to sync doesn't stop
+/// the others: the failures are logged and returned together, after
+/// the users of the issuers which are gone have been removed. While
+/// the app removes them, exchanges wait before they get or create a
+/// user, and the live issuers are listed once they do: the user of
+/// an issuer or rule created meanwhile is created after the removal,
+/// never taken for one which is gone (within one instance of the
+/// app, see [AuthImpl::remove_workload_users_except]).
 ///
 /// ⚠️ It enables the users of every enabled rule of an enabled
 /// issuer, also those an admin disabled directly: when upgrading an
@@ -532,18 +606,267 @@ impl WorkloadAccess {
 pub async fn sync_all_workload_users<I: AuthImpl + ?Sized>(
   auth: &I,
 ) -> mogh_error::Result<()> {
+  let mut failed = Vec::<String>::new();
   for ResolvedIssuer { issuer, .. } in
     list_trusted_issuers(auth).await?
   {
     let _lock = lock_trusted_issuer(&issuer.id).await;
-    auth
+    // As it is now: what was listed may have been updated (and
+    // synced) or deleted since.
+    let current = match list_trusted_issuers(auth).await {
+      Ok(issuers) => issuers
+        .into_iter()
+        .map(|resolved| resolved.issuer)
+        .find(|current| current.id == issuer.id),
+      Err(e) => {
+        error!(
+          issuer_id = issuer.id,
+          issuer = issuer.name,
+          "Failed to read the trusted issuer to sync its users | {:#}",
+          e.error
+        );
+        failed.push(issuer.name);
+        continue;
+      }
+    };
+    let Some(current) = current else {
+      continue;
+    };
+    if let Err(e) = auth
       .sync_workload_users(
-        issuer.id.clone(),
-        WorkloadAccess::of_issuer(&issuer),
+        current.id.clone(),
+        WorkloadAccess::of_issuer(&current),
       )
-      .await?;
+      .await
+    {
+      error!(
+        issuer_id = current.id,
+        issuer = current.name,
+        "Failed to sync the users of the trusted issuer's rules | {:#}",
+        e.error
+      );
+      failed.push(current.name);
+    }
   }
-  Ok(())
+
+  {
+    // No exchange gets or creates a user until the app is done
+    // removing: one created after the listing (the first exchange
+    // of an issuer or rule created meanwhile) would be found by the
+    // app, and taken for a user of an issuer which is gone.
+    let _removal = removal_lock().write().await;
+    // Listed again, so an issuer created meanwhile (whose first
+    // exchanges may have created users) isn't taken for one gone.
+    let live = list_trusted_issuers(auth)
+      .await?
+      .iter()
+      .map(|resolved| LiveIssuer::of(&resolved.issuer))
+      .collect();
+    auth.remove_workload_users_except(live).await?;
+  }
+
+  if failed.is_empty() {
+    Ok(())
+  } else {
+    Err(
+      anyhow!(
+        "Failed to sync the users of the trusted issuers {}, see the log",
+        failed
+          .iter()
+          .map(|name| format!("'{name}'"))
+          .collect::<Vec<_>>()
+          .join(", ")
+      )
+      .into(),
+    )
+  }
+}
+
+// ==============
+// = VALIDATION =
+// ==============
+
+const MAX_NAME_LENGTH: usize = 100;
+const MAX_AUDIENCES: usize = 16;
+/// The most rules an issuer can have.
+pub(crate) const MAX_RULES: usize = 64;
+const MAX_CLAIMS_PER_RULE: usize = 16;
+const MAX_GROUPS_PER_RULE: usize = 64;
+const MAX_VALUE_LENGTH: usize = 512;
+
+/// Claims which verification fixes for every token it accepts: the
+/// issuer, one of the accepted audiences, and times. A rule matching
+/// only these identifies no workload, it accepts every token of the
+/// issuer. For a public platform (Github Actions, Gitlab.com) that is
+/// anybody's, the audience included: anyone can request a token for
+/// any audience there.
+const VERIFIED_CLAIMS: [&str; 6] =
+  ["iss", "aud", "exp", "iat", "nbf", "jti"];
+
+/// The name of an issuer or rule (`kind`), trimmed: listed, logged,
+/// and repeated in the errors about the rule, so a control character
+/// (Unicode Cc) inside it is refused (the error doesn't repeat the
+/// name).
+fn validate_name(kind: &str, name: &str) -> anyhow::Result<String> {
+  let name = name.trim();
+  if name.is_empty() {
+    return Err(anyhow!("{kind} name cannot be empty"));
+  }
+  if name.chars().count() > MAX_NAME_LENGTH {
+    return Err(anyhow!(
+      "{kind} name cannot be longer than {MAX_NAME_LENGTH} characters"
+    ));
+  }
+  if name.chars().any(char::is_control) {
+    return Err(anyhow!(
+      "{kind} name cannot contain control characters"
+    ));
+  }
+  Ok(name.to_string())
+}
+
+/// Trimmed, without empty entries or duplicates.
+fn clean_list(
+  field: &str,
+  values: Vec<String>,
+  max: usize,
+) -> anyhow::Result<Vec<String>> {
+  let mut cleaned = Vec::<String>::new();
+  for value in values {
+    let value = value.trim();
+    if value.is_empty() || cleaned.iter().any(|v| v == value) {
+      continue;
+    }
+    if value.len() > MAX_VALUE_LENGTH {
+      return Err(anyhow!(
+        "'{field}' values cannot be longer than {MAX_VALUE_LENGTH} characters"
+      ));
+    }
+    cleaned.push(value.to_string());
+  }
+  if cleaned.len() > max {
+    return Err(anyhow!("'{field}' accepts at most {max} values"));
+  }
+  Ok(cleaned)
+}
+
+fn validate_rule(
+  mut rule: WorkloadRule,
+) -> anyhow::Result<WorkloadRule> {
+  rule.name = validate_name("Rule", &rule.name)?;
+  // Without conditions a rule would accept every token of the issuer.
+  if rule.claims.is_empty() {
+    return Err(anyhow!(
+      "Rule '{}' needs at least one claim to match",
+      rule.name
+    ));
+  }
+  if rule.claims.len() > MAX_CLAIMS_PER_RULE {
+    return Err(anyhow!(
+      "Rule '{}' can match at most {MAX_CLAIMS_PER_RULE} claims",
+      rule.name
+    ));
+  }
+  for condition in &mut rule.claims {
+    condition.claim = condition.claim.trim().to_string();
+    if condition.claim.is_empty() || condition.pattern.is_empty() {
+      return Err(anyhow!(
+        "Rule '{}' has a claim without a name or a value",
+        rule.name
+      ));
+    }
+    if condition.claim.len() > MAX_VALUE_LENGTH
+      || condition.pattern.len() > MAX_VALUE_LENGTH
+    {
+      return Err(anyhow!(
+        "Claims of rule '{}' cannot be longer than {MAX_VALUE_LENGTH} characters",
+        rule.name
+      ));
+    }
+    // Matches anything, so it restricts nothing.
+    if condition.pattern.chars().all(|c| c == '*') {
+      return Err(anyhow!(
+        "Claim '{}' of rule '{}' matches any value, which doesn't restrict anything",
+        condition.claim,
+        rule.name
+      ));
+    }
+  }
+  // Conditions on these may narrow a rule down further (eg. one of
+  // several audiences), but can't be all it takes.
+  if rule.claims.iter().all(|condition| {
+    VERIFIED_CLAIMS.contains(&condition.claim.as_str())
+  }) {
+    return Err(anyhow!(
+      "Rule '{}' only matches claims every accepted token has (issuer, audience, times), which doesn't restrict anything. Add a claim identifying the workload, eg. 'sub' or 'repository_id'.",
+      rule.name
+    ));
+  }
+  rule.groups =
+    clean_list("groups", rule.groups, MAX_GROUPS_PER_RULE)?;
+  Ok(rule)
+}
+
+/// [validate_trusted_issuer], returning the issuer as the management
+/// api stores it: names trimmed, lists cleaned.
+pub(crate) fn normalize_trusted_issuer(
+  mut issuer: TrustedIssuer,
+) -> anyhow::Result<TrustedIssuer> {
+  issuer.name = validate_name("Issuer", &issuer.name)?;
+
+  issuer.issuer = issuer.issuer.trim().to_string();
+  validate_public_http_url("issuer", &issuer.issuer)?;
+
+  issuer.audiences =
+    clean_list("audiences", issuer.audiences, MAX_AUDIENCES)?;
+  if issuer.audiences.is_empty() {
+    return Err(anyhow!(
+      "At least one audience is required. Use one specific to this app, eg. its url."
+    ));
+  }
+
+  if let TrustedIssuerKeys::JwksUri(url) = &issuer.keys {
+    validate_public_http_url("keys url", url)?;
+  }
+
+  if issuer.rules.len() > MAX_RULES {
+    return Err(anyhow!(
+      "An issuer can have at most {MAX_RULES} rules"
+    ));
+  }
+  issuer.rules = issuer
+    .rules
+    .into_iter()
+    .map(validate_rule)
+    .collect::<anyhow::Result<_>>()?;
+
+  Ok(issuer)
+}
+
+/// Checks a trusted issuer the way the management api checks the
+/// ones it stores (`CreateTrustedIssuer`, `UpdateTrustedIssuer`): a
+/// name, an http(s) issuer url and keys url without credentials, at
+/// least one audience, and rules which identify a workload: each
+/// matches at least one claim besides those every accepted token has
+/// (`iss`, `aud`, `exp`, `iat`, `nbf`, `jti`), and no claim with a
+/// pattern of only `*`. On a public platform anyone can get a token
+/// for any audience, so a rule matching the audience alone accepts
+/// everybody's.
+///
+/// Rule ids are not checked (the api assigns them, and the exchange
+/// refuses a rule without a unique valid one), nor whether a static
+/// key set parses (the issuer is unavailable until it does).
+///
+/// The static issuers of the app ([AuthImpl::static_trusted_issuers])
+/// failing it are skipped by [list_trusted_issuers], with an error in
+/// the log: they accept no token, and
+/// [sync_all_workload_users] removes the users of their rules. Apps
+/// can call it when they load their configuration, to refuse such an
+/// issuer up front.
+pub fn validate_trusted_issuer(
+  issuer: &TrustedIssuer,
+) -> anyhow::Result<()> {
+  normalize_trusted_issuer(issuer.clone()).map(|_| ())
 }
 
 // ==============
@@ -559,7 +882,9 @@ pub struct ResolvedIssuer {
 }
 
 /// Lists all the trusted issuers, static ones first.
-/// Issuers with invalid or duplicate ids are skipped.
+/// Issuers with invalid or duplicate ids are skipped, and static
+/// issuers which fail [validate_trusted_issuer] (with an error in the
+/// log): the management api refuses to store those.
 pub async fn list_trusted_issuers<I: AuthImpl + ?Sized>(
   auth: &I,
 ) -> mogh_error::Result<Vec<ResolvedIssuer>> {
@@ -585,6 +910,15 @@ pub async fn list_trusted_issuers<I: AuthImpl + ?Sized>(
       warn!(
         "Skipping trusted issuer '{}' with duplicate id '{}'",
         issuer.name, issuer.id
+      );
+      continue;
+    }
+    // Stored ones passed it when they were stored.
+    if is_static && let Err(e) = validate_trusted_issuer(&issuer) {
+      error!(
+        issuer_id = issuer.id,
+        issuer = issuer.name,
+        "Skipping trusted issuer of the app configuration, which the management api would refuse | {e:#}"
       );
       continue;
     }
@@ -1013,12 +1347,29 @@ mod tests {
         assert!(!shown.contains("hunter2"), "{id}: {shown}");
       }
     }
+    // The apps' marker in place of the userinfo.
     let err =
       fetch_text(&format!("{closed}/keys")).await.unwrap_err();
     assert!(
-      format!("{err:#}").contains("Failed to reach http://***@"),
+      format!("{err:#}").contains(&format!(
+        "Failed to reach http://{}@",
+        mogh_auth_client::config::REDACTED
+      )),
       "{err:#}"
     );
+    // Nor a key in the query, by the context or by the http
+    // client's error under it.
+    let unreachable = closed.replace("user:hunter2@", "");
+    for url in [
+      format!("{unreachable}/keys?token=hunter2"),
+      format!("{address}/missing?token=hunter2"),
+    ] {
+      let err = fetch_text(&url).await.unwrap_err();
+      for shown in [format!("{err:#}"), format!("{err:?}")] {
+        assert!(!shown.contains("hunter2"), "{url}: {shown}");
+        assert!(shown.contains("?##############"), "{url}: {shown}");
+      }
+    }
   }
 
   /// Exchanges of one rule get the user one after another, those of
@@ -1224,27 +1575,11 @@ mod tests {
         self.synced.lock().unwrap().push((issuer_id, rules));
         Box::pin(async { Ok(()) })
       }
-      fn get_user(
-        &self,
-        _user_id: String,
-      ) -> crate::DynFuture<
-        mogh_error::Result<crate::user::BoxAuthUser>,
-      > {
-        unreachable!()
-      }
-      fn handle_request_authentication(
-        &self,
-        _auth: crate::RequestAuthentication,
-        _ip: std::net::IpAddr,
-        _require_user_enabled: bool,
-        _req: axum::extract::Request,
-      ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-      {
-        unreachable!()
-      }
-      fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
-        unreachable!()
-      }
+      crate::test_support::stub_auth_impl!(
+        get_user,
+        handle_request_authentication,
+        jwt_provider
+      );
     }
 
     let auth = TestAuth::default();
@@ -1267,6 +1602,211 @@ mod tests {
         ("stored", vec![("deploy", true)]),
       ]
     );
+  }
+
+  /// While it runs, the app serves: an update of another issuer
+  /// (here made by the sync of the first) is synced as it is now,
+  /// not as it was listed, and an issuer deleted meanwhile is
+  /// skipped. One failing doesn't stop the others. At the end the
+  /// app is told which issuers and rules are live, to remove the
+  /// users of those which are gone.
+  #[tokio::test]
+  async fn test_sync_all_reads_each_issuer_under_its_lock() {
+    #[derive(Default)]
+    struct TestAuth {
+      stored: Mutex<Vec<TrustedIssuer>>,
+      synced: Mutex<Vec<(String, Vec<WorkloadAccess>)>>,
+      live: Mutex<Option<Vec<LiveIssuer>>>,
+    }
+    impl AuthImpl for TestAuth {
+      fn new() -> Self {
+        Self::default()
+      }
+      fn list_trusted_issuers(
+        &self,
+      ) -> crate::DynFuture<mogh_error::Result<Vec<TrustedIssuer>>>
+      {
+        let stored = self.stored.lock().unwrap().clone();
+        Box::pin(async move { Ok(stored) })
+      }
+      fn sync_workload_users(
+        &self,
+        issuer_id: String,
+        rules: Vec<WorkloadAccess>,
+      ) -> crate::DynFuture<mogh_error::Result<()>> {
+        if issuer_id == "sync-all-a" {
+          // An admin disables B's rule and deletes C meanwhile.
+          let mut stored = self.stored.lock().unwrap();
+          stored.retain(|issuer| issuer.id != "sync-all-c");
+          for issuer in stored.iter_mut() {
+            if issuer.id == "sync-all-b" {
+              issuer.rules[0].enabled = false;
+            }
+          }
+        }
+        let fails = issuer_id == "sync-all-fails";
+        self.synced.lock().unwrap().push((issuer_id, rules));
+        Box::pin(async move {
+          if fails {
+            Err(anyhow!("database unavailable").into())
+          } else {
+            Ok(())
+          }
+        })
+      }
+      fn remove_workload_users_except(
+        &self,
+        live: Vec<LiveIssuer>,
+      ) -> crate::DynFuture<mogh_error::Result<()>> {
+        *self.live.lock().unwrap() = Some(live);
+        Box::pin(async { Ok(()) })
+      }
+      crate::test_support::stub_auth_impl!(
+        get_user,
+        handle_request_authentication,
+        jwt_provider
+      );
+    }
+
+    let auth = TestAuth::default();
+    *auth.stored.lock().unwrap() = ["a", "fails", "b", "c"]
+      .into_iter()
+      .map(|id| {
+        issuer_with(
+          &format!("sync-all-{id}"),
+          true,
+          vec![rule(id, &[("sub", id)])],
+        )
+      })
+      .collect();
+
+    let err = sync_all_workload_users(&auth).await.unwrap_err();
+    // The one which failed, after all were tried.
+    assert!(format!("{:#}", err.error).contains("'sync-all-fails'"));
+    let synced = auth.synced.into_inner().unwrap();
+    let synced = synced
+      .iter()
+      .map(|(issuer, rules)| {
+        (issuer.as_str(), rules[0].rule_id.as_str(), rules[0].enabled)
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(
+      synced,
+      [
+        ("sync-all-a", "a", true),
+        ("sync-all-fails", "fails", true),
+        // As updated meanwhile, not as listed.
+        ("sync-all-b", "b", false),
+        // C was deleted meanwhile, and skipped.
+      ]
+    );
+    // What is live now: C's users go.
+    let live = auth.live.into_inner().unwrap().unwrap();
+    assert_eq!(
+      live,
+      ["a", "fails", "b"]
+        .into_iter()
+        .map(|id| LiveIssuer {
+          issuer_id: format!("sync-all-{id}"),
+          rule_ids: vec![id.to_string()],
+        })
+        .collect::<Vec<_>>()
+    );
+  }
+
+  /// The static issuers of the app are held to what the management
+  /// api enforces: one whose rule accepts everybody's tokens (the
+  /// audience alone, any value) or which has no audience or a url with
+  /// credentials is skipped, with an error in the log. Rule ids and a
+  /// static key set are left to the exchange and the key load.
+  #[tokio::test]
+  async fn test_static_issuers_the_api_would_refuse_are_skipped() {
+    fn valid() -> TrustedIssuer {
+      issuer_with(
+        "valid",
+        true,
+        vec![rule("deploy", &[("repository_id", "12345")])],
+      )
+    }
+    fn refused() -> Vec<(&'static str, TrustedIssuer)> {
+      let with = |id: &str, change: fn(&mut TrustedIssuer)| {
+        let mut issuer = valid();
+        issuer.id = id.to_string();
+        change(&mut issuer);
+        issuer
+      };
+      vec![
+        (
+          "only matches claims every accepted token has",
+          with("audience-only", |issuer| {
+            issuer.rules = vec![rule(
+              "everybody",
+              &[("aud", "https://app.example.com")],
+            )]
+          }),
+        ),
+        (
+          "matches any value",
+          with("any-sub", |issuer| {
+            issuer.rules = vec![rule("anything", &[("sub", "*")])]
+          }),
+        ),
+        (
+          "at least one claim",
+          with("no-claims", |issuer| {
+            issuer.rules = vec![rule("none", &[])]
+          }),
+        ),
+        (
+          "audience is required",
+          with("no-audience", |issuer| issuer.audiences.clear()),
+        ),
+        (
+          "must not carry credentials",
+          with("credentials", |issuer| {
+            issuer.keys = TrustedIssuerKeys::JwksUri(
+              "https://user:hunter2@issuer.example.com/keys"
+                .to_string(),
+            )
+          }),
+        ),
+      ]
+    }
+    struct TestAuth;
+    impl AuthImpl for TestAuth {
+      fn new() -> Self {
+        TestAuth
+      }
+      fn static_trusted_issuers(&self) -> Vec<TrustedIssuer> {
+        std::iter::once(valid())
+          .chain(refused().into_iter().map(|(_, issuer)| issuer))
+          .collect()
+      }
+      crate::test_support::stub_auth_impl!(
+        get_user,
+        handle_request_authentication,
+        jwt_provider
+      );
+    }
+
+    let listed = list_trusted_issuers(&TestAuth)
+      .await
+      .unwrap()
+      .into_iter()
+      .map(|resolved| resolved.issuer.id)
+      .collect::<Vec<_>>();
+    assert_eq!(listed, ["valid"]);
+
+    for (reason, issuer) in refused() {
+      let err = validate_trusted_issuer(&issuer).unwrap_err();
+      assert!(format!("{err:#}").contains(reason), "{err:#}");
+      assert!(!format!("{err:#}").contains("hunter2"), "{err:#}");
+    }
+    validate_trusted_issuer(&valid()).unwrap();
+    let mut left_to_others = valid();
+    left_to_others.rules[0].id = String::new();
+    left_to_others.keys = TrustedIssuerKeys::Static("broken".into());
+    validate_trusted_issuer(&left_to_others).unwrap();
   }
 
   #[test]

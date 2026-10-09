@@ -1,15 +1,20 @@
-use std::{collections::HashMap, sync::OnceLock, time::Duration};
+use std::{
+  collections::HashMap, future::Future, pin::Pin, sync::OnceLock,
+  time::Duration,
+};
 
 use anyhow::{Context, anyhow};
 use axum::http::StatusCode;
 use mogh_auth_client::config::{OidcConfig, TokenExchangeConfig};
 use mogh_error::{AddStatusCode as _, AddStatusCodeError};
 use openidconnect::{
-  AccessTokenHash, AdditionalClaims, AuthorizationCode, Client,
-  ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
-  EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields,
-  IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
-  PkceCodeVerifier, RedirectUrl, Scope, StandardErrorResponse,
+  AccessTokenHash, AdditionalClaims, AsyncHttpClient,
+  AuthorizationCode, Client, ClientId, ClientSecret, CsrfToken,
+  EmptyExtraTokenFields, EndpointMaybeSet, EndpointNotSet,
+  EndpointSet, HttpClientError, HttpRequest, HttpResponse,
+  IdTokenFields, IssuerUrl, Nonce, OAuth2TokenResponse,
+  PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
+  RequestTokenError, Scope, StandardErrorResponse,
   StandardTokenResponse, TokenResponse as _,
   core::*,
   reqwest::{self, Url},
@@ -19,7 +24,7 @@ use tracing::{debug, warn};
 
 use crate::{
   provider::{
-    CONNECT_TIMEOUT, REQUEST_TIMEOUT,
+    CONNECT_TIMEOUT, REQUEST_TIMEOUT, named::sanitize_text,
     token_exchange::TokenVerificationKeys,
   },
   validations::url_has_credentials,
@@ -60,20 +65,138 @@ pub type TokenResponse = StandardTokenResponse<
 pub(crate) fn http_client(
   app_user_agent: &str,
   timeout: Duration,
-) -> reqwest::Result<reqwest::Client> {
+) -> reqwest::Result<ProviderHttpClient> {
   reqwest::Client::builder()
     .redirect(reqwest::redirect::Policy::none())
     .timeout(timeout)
     .connect_timeout(CONNECT_TIMEOUT.min(timeout))
     .user_agent(app_user_agent)
     .build()
+    .map(ProviderHttpClient)
+}
+
+/// The most of a login provider's response which is read: far more
+/// than any discovery document, key set, token or user info. Without
+/// it, only the request timeout bounded what a provider (or whatever
+/// its discovery points the token, user info or key set urls at)
+/// could make the server buffer, for every login callback.
+pub(crate) const MAX_RESPONSE_LENGTH: usize = 1024 * 1024;
+
+/// The http client of the requests made through openidconnect to OIDC
+/// providers and Google (discovery, the key set, the code exchange,
+/// user info): reads at most [MAX_RESPONSE_LENGTH] of a response, and
+/// refuses the rest unread, also a response declaring more up front.
+#[derive(Clone)]
+pub(crate) struct ProviderHttpClient(reqwest::Client);
+
+impl<'c> AsyncHttpClient<'c> for ProviderHttpClient {
+  type Error = HttpClientError<reqwest::Error>;
+  type Future = Pin<
+    Box<
+      dyn Future<Output = Result<HttpResponse, Self::Error>>
+        + Send
+        + Sync
+        + 'c,
+    >,
+  >;
+
+  fn call(&'c self, request: HttpRequest) -> Self::Future {
+    Box::pin(async move {
+      let mut response = self
+        .0
+        .execute(request.try_into().map_err(Box::new)?)
+        .await
+        .map_err(Box::new)?;
+      let mut builder = openidconnect::http::Response::builder()
+        .status(response.status())
+        .version(response.version());
+      for (name, value) in response.headers() {
+        builder = builder.header(name, value);
+      }
+      let too_large = || {
+        HttpClientError::Other(format!(
+          "The response is larger than {MAX_RESPONSE_LENGTH} bytes"
+        ))
+      };
+      if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_LENGTH as u64)
+      {
+        return Err(too_large());
+      }
+      let mut body = Vec::new();
+      while let Some(chunk) =
+        response.chunk().await.map_err(Box::new)?
+      {
+        if body.len() + chunk.len() > MAX_RESPONSE_LENGTH {
+          return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+      }
+      builder.body(body).map_err(HttpClientError::Http)
+    })
+  }
+}
+
+/// The error of the token request redeeming a login's code at an OIDC
+/// provider (or Google, `provider` names it).
+///
+/// The provider's refusal (an OAuth error response, RFC 6749 section
+/// 5.2) is the user's failed login (`401`), counted against the
+/// client ip like any other: the code expired, was used already (a
+/// reloaded callback), was made up, or its PKCE verifier doesn't
+/// match. Except the codes saying the app's configuration is wrong
+/// (its client credentials, grant type or scopes), which are server
+/// errors, as are a provider which can't be reached or answers
+/// something else. The error carries what the provider reported
+/// (sanitized), never the request.
+pub(crate) fn token_request_error<RE>(
+  provider: &str,
+  e: RequestTokenError<
+    RE,
+    StandardErrorResponse<CoreErrorResponseType>,
+  >,
+) -> mogh_error::Error
+where
+  RE: std::error::Error + Send + Sync + 'static,
+{
+  let response = match e {
+    RequestTokenError::ServerResponse(response) => response,
+    e => {
+      return anyhow::Error::new(e)
+        .context(format!(
+          "Failed to get the token of the login from {provider}"
+        ))
+        .into();
+    }
+  };
+  let status = match response.error() {
+    CoreErrorResponseType::InvalidClient
+    | CoreErrorResponseType::UnauthorizedClient
+    | CoreErrorResponseType::UnsupportedGrantType
+    | CoreErrorResponseType::InvalidScope => {
+      StatusCode::INTERNAL_SERVER_ERROR
+    }
+    // Eg. 'invalid_grant': expired, used or made up.
+    _ => StatusCode::UNAUTHORIZED,
+  };
+  let code = sanitize_text(response.error().as_ref());
+  let e = match response.error_description().map(|d| sanitize_text(d))
+  {
+    Some(description) if !description.is_empty() => {
+      anyhow!("{description}")
+        .context(format!("{provider} refused the login: {code}"))
+    }
+    _ => anyhow!("{provider} refused the login: {code}"),
+  };
+  e.status_code(status)
 }
 
 /// The client shared by every OIDC provider.
 fn shared_http_client(
   app_user_agent: &str,
-) -> &'static reqwest::Client {
-  static REQWEST: OnceLock<reqwest::Client> = OnceLock::new();
+) -> &'static ProviderHttpClient {
+  static REQWEST: OnceLock<ProviderHttpClient> = OnceLock::new();
   REQWEST.get_or_init(|| {
     http_client(app_user_agent, REQUEST_TIMEOUT)
       .expect("Invalid OIDC reqwest client")
@@ -101,7 +224,7 @@ pub type InnerOidcProvider = Client<
 >;
 
 pub struct OidcProvider {
-  http: reqwest::Client,
+  http: ProviderHttpClient,
   client: InnerOidcProvider,
   use_full_email: bool,
   additional_scopes: Vec<String>,
@@ -297,7 +420,10 @@ impl OidcProvider {
     // Validate CSRF tokens match
     if !crate::validations::constant_time_eq(client.secret(), &server)
     {
-      return Err(anyhow!("CSRF token invalid").into());
+      return Err(
+        anyhow!("CSRF token invalid")
+          .status_code(StatusCode::UNAUTHORIZED),
+      );
     }
 
     let token_response = self
@@ -307,7 +433,7 @@ impl OidcProvider {
       .set_pkce_verifier(pkce_verifier)
       .request_async(&self.http)
       .await
-      .context("Failed to get Oauth token")?;
+      .map_err(|e| token_request_error("The OIDC provider", e))?;
 
     // Extract the ID token claims after verifying its authenticity and nonce.
     let id_token = token_response
@@ -327,13 +453,15 @@ impl OidcProvider {
     if let Some(expected_access_token_hash) =
       claims.access_token_hash()
     {
-      let actual_access_token_hash = AccessTokenHash::from_token(
-        &token_response.access_token().clone(),
-        id_token.signing_alg()?,
-        id_token.signing_key(&verifier)?,
-      )?;
+      let actual_access_token_hash =
+        access_token_hash(id_token, &verifier, &token_response)
+          .context("Failed to hash the access token")
+          .status_code(StatusCode::UNAUTHORIZED)?;
       if actual_access_token_hash != *expected_access_token_hash {
-        return Err(anyhow!("Invalid access token").into());
+        return Err(
+          anyhow!("Invalid access token")
+            .status_code(StatusCode::UNAUTHORIZED),
+        );
       }
     }
 
@@ -371,17 +499,8 @@ impl OidcProvider {
     claim: &str,
   ) -> Option<Vec<String>> {
     let user_info = self
-      .client
-      .user_info(token.access_token().clone(), Some(subject.clone()))
-      .inspect_err(|e| {
-        warn!("OIDC groups claim '{claim}' not in id token and user info not available | {e:#}")
-      })
-      .ok()?
-      .request_async::<UsernameAdditionalClaims, _, CoreGenderClaim>(
-        &self.http,
-      )
+      .user_info(subject, token)
       .await
-      .inspect(|user_info| debug!("OIDC USER INFO: {user_info:?}"))
       .inspect_err(|e| {
         warn!("OIDC groups claim '{claim}' not in id token and failed to get user info | {e:#}")
       })
@@ -396,191 +515,202 @@ impl OidcProvider {
     groups
   }
 
+  /// The networked user info of the login's access token.
+  async fn user_info(
+    &self,
+    subject: &SubjectIdentifier,
+    token: &TokenResponse,
+  ) -> anyhow::Result<UserInfoClaims> {
+    let user_info = self
+      .client
+      .user_info(token.access_token().clone(), Some(subject.clone()))
+      .context("The provider has no user info endpoint")?
+      .request_async::<UsernameAdditionalClaims, _, CoreGenderClaim>(
+        &self.http,
+      )
+      .await
+      .context("Failed to get the user info")?;
+    debug!("OIDC USER INFO: {user_info:?}");
+    Ok(user_info)
+  }
+
+  /// The name a new user is signed up with: the first of these claims
+  /// the provider has for them, each taken from the login's ID token,
+  /// else its user info (only requested when the ID token doesn't
+  /// have the first): `preferred_username`, `username`, `name`, the
+  /// part of `email` before the `@`; with 'use_full_email' the whole
+  /// `email` first instead. Else the subject.
   pub async fn get_username(
     &self,
     subject: &SubjectIdentifier,
     token: &TokenResponse,
     nonce: &Nonce,
   ) -> String {
-    if self.use_full_email {
-      return self
-        .get_username_prioritize_email(subject, token, nonce)
-        .await;
-    }
-
     let id_claims = token.id_token().and_then(|token| {
       token
         .claims(&self.id_token_verifier(), nonce)
         .inspect(|claims| debug!("OIDC ID TOKEN CLAIMS: {claims:?}"))
         .ok()
+        .map(NameClaims::of_id_token)
     });
-
-    // Priority 1: preferred_username from id_token.
-    if let Some(username) = id_claims.as_ref().and_then(|claims| {
-      claims.preferred_username()?.to_string().into()
-    }) {
-      return username;
+    // Requested once, when the ID token can't answer.
+    let mut user_info = None::<Option<NameClaims>>;
+    for claim in NameClaim::order(self.use_full_email) {
+      if let Some(name) =
+        id_claims.as_ref().and_then(|claims| claims.get(*claim))
+      {
+        return name;
+      }
+      if user_info.is_none() {
+        user_info = Some(
+          self
+            .user_info(subject, token)
+            .await
+            .inspect_err(|e| debug!("No OIDC user info | {e:#}"))
+            .ok()
+            .map(|user_info| NameClaims::of_user_info(&user_info)),
+        );
+      }
+      if let Some(name) = user_info
+        .as_ref()
+        .and_then(Option::as_ref)
+        .and_then(|claims| claims.get(*claim))
+      {
+        return name;
+      }
     }
-
-    // Get networked user info
-    let user_info = async {
-      self
-        .client
-        .user_info(
-          token.access_token().clone(),
-          Some(subject.clone()),
-        )
-        .ok()?
-        .request_async::<UsernameAdditionalClaims, _, CoreGenderClaim>(
-          &self.http,
-        )
-        .await
-        .inspect(|user_info| debug!("OIDC USER INFO: {user_info:?}"))
-        .ok()
-    }
-    .await;
-
-    // Priority 2: preferred_username from user_info
-    if let Some(username) = user_info.as_ref().and_then(|user_info| {
-      user_info.preferred_username()?.to_string().into()
-    }) {
-      return username;
-    }
-
-    // Priority 3: username additional claim from id claims, then user info
-    if let Some(username) = id_claims
-      .as_ref()
-      .and_then(|id_claims| {
-        id_claims.additional_claims().username.clone()
-      })
-      .or_else(|| {
-        user_info.as_ref()?.additional_claims().username.clone()
-      })
-    {
-      return username;
-    }
-
-    // Priority 4: name from id claims, then user info
-    if let Some(username) = id_claims
-      .as_ref()
-      .and_then(|id_claims| {
-        id_claims.name()?.get(None)?.to_string().into()
-      })
-      .or_else(|| {
-        user_info.as_ref()?.name()?.get(None)?.to_string().into()
-      })
-    {
-      return username;
-    }
-
-    // Priority 5: username part of email from id claims, then user info
-    if let Some(email) = id_claims
-      .as_ref()
-      .and_then(|id_claims| id_claims.email()?.to_string().into())
-      .or_else(|| user_info.as_ref()?.email()?.to_string().into())
-    {
-      let username = email
-        .split_once('@')
-        .map(|(username, _)| username)
-        .unwrap_or(email.as_str())
-        .to_string();
-      return username;
-    }
-
-    // Priority 6 (fallback): use the subject if no others available
     subject.to_string()
   }
+}
 
-  /// Used with 'use_full_email' option
-  pub async fn get_username_prioritize_email(
-    &self,
-    subject: &SubjectIdentifier,
-    token: &TokenResponse,
-    nonce: &Nonce,
-  ) -> String {
-    let id_claims = token.id_token().and_then(|token| {
-      token
-        .claims(&self.id_token_verifier(), nonce)
-        .inspect(|claims| debug!("OIDC ID TOKEN CLAIMS: {claims:?}"))
-        .ok()
-    });
+type UserInfoClaims = openidconnect::UserInfoClaims<
+  UsernameAdditionalClaims,
+  CoreGenderClaim,
+>;
 
-    // Priority 1: email from id_token.
-    if let Some(email) = id_claims
-      .as_ref()
-      .and_then(|claims| claims.email()?.to_string().into())
-    {
-      return email;
+/// A claim a new user's name can be taken from, see
+/// [OidcProvider::get_username].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameClaim {
+  /// The whole email.
+  Email,
+  PreferredUsername,
+  /// The non standard `username` some providers use.
+  Username,
+  Name,
+  /// The part of the email before the `@`.
+  EmailLocalPart,
+}
+
+impl NameClaim {
+  /// The claims tried, in order: the email first with
+  /// 'use_full_email', else the usual names, and only then the start
+  /// of the email.
+  fn order(use_full_email: bool) -> &'static [NameClaim] {
+    use NameClaim::*;
+    if use_full_email {
+      &[Email, PreferredUsername, Username, Name]
+    } else {
+      &[PreferredUsername, Username, Name, EmailLocalPart]
     }
-
-    // Get networked user info
-    let user_info = async {
-      self
-        .client
-        .user_info(
-          token.access_token().clone(),
-          Some(subject.clone()),
-        )
-        .ok()?
-        .request_async::<UsernameAdditionalClaims, _, CoreGenderClaim>(
-          &self.http,
-        )
-        .await
-        .inspect(|user_info| debug!("OIDC USER INFO: {user_info:?}"))
-        .ok()
-    }
-    .await;
-
-    // Priority 2: email from user_info
-    if let Some(username) = user_info
-      .as_ref()
-      .and_then(|user_info| user_info.email()?.to_string().into())
-    {
-      return username;
-    }
-
-    // Priority 3: preferred_username from id claims, then user info
-    if let Some(username) = id_claims
-      .as_ref()
-      .and_then(|id_claims| {
-        id_claims.preferred_username()?.to_string().into()
-      })
-      .or_else(|| {
-        user_info.as_ref()?.preferred_username()?.to_string().into()
-      })
-    {
-      return username;
-    }
-
-    // Priority 4: username additional claim from id claims, then user info
-    if let Some(username) = id_claims
-      .as_ref()
-      .and_then(|id_claims| {
-        id_claims.additional_claims().username.clone()
-      })
-      .or_else(|| {
-        user_info.as_ref()?.additional_claims().username.clone()
-      })
-    {
-      return username;
-    }
-
-    // Priority 5: name from id claims, then user info
-    if let Some(username) = id_claims
-      .as_ref()
-      .and_then(|id_claims| {
-        id_claims.name()?.get(None)?.to_string().into()
-      })
-      .or_else(|| {
-        user_info.as_ref()?.name()?.get(None)?.to_string().into()
-      })
-    {
-      return username;
-    }
-
-    // Priority 6 (fallback): use the subject if no others available
-    subject.to_string()
   }
+}
+
+/// The claims of an ID token or user info a name is taken from.
+struct NameClaims {
+  email: Option<String>,
+  preferred_username: Option<String>,
+  username: Option<String>,
+  name: Option<String>,
+}
+
+impl NameClaims {
+  fn of_id_token(
+    claims: &openidconnect::IdTokenClaims<
+      UsernameAdditionalClaims,
+      CoreGenderClaim,
+    >,
+  ) -> NameClaims {
+    NameClaims {
+      email: claims.email().map(|email| email.to_string()),
+      preferred_username: claims
+        .preferred_username()
+        .map(|username| username.to_string()),
+      username: claims.additional_claims().username.clone(),
+      name: claims
+        .name()
+        .and_then(|name| name.get(None))
+        .map(|name| name.to_string()),
+    }
+  }
+
+  fn of_user_info(claims: &UserInfoClaims) -> NameClaims {
+    NameClaims {
+      email: claims.email().map(|email| email.to_string()),
+      preferred_username: claims
+        .preferred_username()
+        .map(|username| username.to_string()),
+      username: claims.additional_claims().username.clone(),
+      name: claims
+        .name()
+        .and_then(|name| name.get(None))
+        .map(|name| name.to_string()),
+    }
+  }
+
+  fn get(&self, claim: NameClaim) -> Option<String> {
+    match claim {
+      NameClaim::Email => self.email.clone(),
+      NameClaim::PreferredUsername => self.preferred_username.clone(),
+      NameClaim::Username => self.username.clone(),
+      NameClaim::Name => self.name.clone(),
+      NameClaim::EmailLocalPart => self.email.as_ref().map(|email| {
+        email
+          .split_once('@')
+          .map(|(local, _)| local)
+          .unwrap_or(email)
+          .to_string()
+      }),
+    }
+  }
+}
+
+/// The `at_hash` of the login's access token, as the ID token which
+/// came with it must carry it (OpenID Connect Core 3.1.3.6): the left
+/// half of the hash of the token, with the hash function of the ID
+/// token's signing algorithm.
+///
+/// A provider signing ID tokens with the client secret (HS256 / 384 /
+/// 512, which the verifier accepts for a confidential client) has no
+/// key in its key set. The hash of those depends on the algorithm
+/// alone, so a symmetric key stands in, without the secret: only its
+/// type is checked against the algorithm.
+fn access_token_hash(
+  id_token: &openidconnect::IdToken<
+    UsernameAdditionalClaims,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm,
+  >,
+  verifier: &CoreIdTokenVerifier<'_>,
+  token: &TokenResponse,
+) -> anyhow::Result<AccessTokenHash> {
+  use openidconnect::{JsonWebKey as _, JwsSigningAlgorithm as _};
+  let alg = id_token.signing_alg()?;
+  let hash = if alg.uses_shared_secret() {
+    AccessTokenHash::from_token(
+      token.access_token(),
+      alg,
+      &CoreJsonWebKey::new_symmetric(Vec::new()),
+    )
+  } else {
+    AccessTokenHash::from_token(
+      token.access_token(),
+      alg,
+      id_token.signing_key(verifier)?,
+    )
+  }?;
+  Ok(hash)
 }
 
 /// Information about the user authenticated with the OIDC provider,
@@ -956,7 +1086,7 @@ mod tests {
     .set_nonce(Some(nonce.clone()))
     .set_authorized_party(Some(ClientId::new(CLIENT_ID.to_string())));
     let key = CoreRsaPrivateSigningKey::from_pem(
-      include_str!("test_keys/rsa_a.pem"),
+      include_str!("../../../test_keys/rsa_a.pem"),
       Some(JsonWebKeyId::new("test-key".to_string())),
     )
     .unwrap();
@@ -1015,6 +1145,93 @@ mod tests {
     assert_eq!(
       provider.get_username(&subject, &token, &nonce).await,
       "subject-123"
+    );
+  }
+
+  /// The username for a login whose ID token has only an email
+  /// (`user@example.com`), and whose user info is `user_info`.
+  async fn username_with_user_info(
+    use_full_email: bool,
+    user_info: serde_json::Value,
+  ) -> String {
+    use crate::provider::token_exchange::test_tokens::TestToken;
+    use openidconnect::UserInfoUrl;
+    let id_token = TestToken {
+      nonce: Some("login-nonce".to_string()),
+      ..TestToken::new(UsernameAdditionalClaims {
+        username: None,
+        extra: HashMap::new(),
+      })
+    }
+    .mint();
+    let token: TokenResponse = serde_json::from_value(json!({
+      "access_token": "access-token",
+      "token_type": "bearer",
+      "id_token": id_token,
+    }))
+    .unwrap();
+    let url = crate::provider::answering_server(
+      StatusCode::OK,
+      user_info.to_string(),
+    )
+    .await;
+    let config = OidcConfig {
+      use_full_email,
+      ..exchange_config(&[], &[])
+    };
+    let provider = impatient_provider(&config, |metadata| {
+      metadata.set_userinfo_endpoint(Some(
+        UserInfoUrl::new(format!("{url}/userinfo")).unwrap(),
+      ))
+    });
+    provider
+      .get_username(
+        &SubjectIdentifier::new("subject-123".to_string()),
+        &token,
+        &Nonce::new("login-nonce".to_string()),
+      )
+      .await
+  }
+
+  /// The name claims are tried in order, each from the ID token and
+  /// then the user info: the usual names before the start of the
+  /// email, or with 'use_full_email' the email first.
+  #[tokio::test]
+  async fn test_username_claims_in_order() {
+    let user_info = |claims: serde_json::Value| {
+      let mut user_info = json!({ "sub": "subject-123" });
+      user_info
+        .as_object_mut()
+        .unwrap()
+        .extend(claims.as_object().unwrap().clone());
+      user_info
+    };
+    for (claims, expected) in [
+      (
+        json!({ "preferred_username": "alice", "name": "Alice Smith" }),
+        "alice",
+      ),
+      (
+        json!({ "username": "a.smith", "name": "Alice Smith" }),
+        "a.smith",
+      ),
+      (json!({ "name": "Alice Smith" }), "Alice Smith"),
+      (json!({}), "user"),
+    ] {
+      assert_eq!(
+        username_with_user_info(false, user_info(claims.clone()))
+          .await,
+        expected,
+        "{claims}"
+      );
+    }
+    assert_eq!(
+      username_with_user_info(
+        true,
+        user_info(json!({ "preferred_username": "alice" }))
+      )
+      .await,
+      "user@example.com"
     );
   }
 
@@ -1098,6 +1315,217 @@ mod tests {
     .await
     .expect("the user info request must be given up on");
     assert_eq!(groups, None);
+  }
+
+  /// Redeems a made up code at the test provider, whose token
+  /// endpoint answers `status` with `body`.
+  async fn redeem_at(
+    status: StatusCode,
+    body: serde_json::Value,
+  ) -> mogh_error::Error {
+    use openidconnect::TokenUrl;
+    let url =
+      crate::provider::answering_server(status, body.to_string())
+        .await;
+    let config = exchange_config(&[], &[]);
+    let provider = impatient_provider(&config, |metadata| {
+      metadata.set_token_endpoint(Some(
+        TokenUrl::new(format!("{url}/token")).unwrap(),
+      ))
+    });
+    provider
+      .validate_extract_login_info_and_token(
+        &config,
+        (CsrfToken::new("state".to_string()), "state".to_string()),
+        "made-up-code".to_string(),
+        PkceCodeVerifier::new("v".repeat(43)),
+        &Nonce::new("nonce".to_string()),
+      )
+      .await
+      .err()
+      .unwrap()
+  }
+
+  /// A code the provider refuses (expired, used, made up) is the
+  /// user's failed login, which counts against the ip like any other:
+  /// `401` with what the provider reported. The app's misconfiguration,
+  /// and a provider answering something else, are server errors.
+  #[tokio::test]
+  async fn test_refused_code_is_the_users_failed_login() {
+    let err = redeem_at(
+      StatusCode::BAD_REQUEST,
+      json!({
+        "error": "invalid_grant",
+        "error_description": "Code not valid",
+      }),
+    )
+    .await;
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    let message = format!("{:#}", err.error);
+    assert!(message.contains("invalid_grant"), "{message}");
+    assert!(message.contains("Code not valid"), "{message}");
+
+    for error in ["invalid_request", "custom_refusal"] {
+      let err =
+        redeem_at(StatusCode::BAD_REQUEST, json!({ "error": error }))
+          .await;
+      assert_eq!(err.status, StatusCode::UNAUTHORIZED, "{error}");
+    }
+    for error in [
+      "invalid_client",
+      "unauthorized_client",
+      "unsupported_grant_type",
+      "invalid_scope",
+    ] {
+      let err =
+        redeem_at(StatusCode::BAD_REQUEST, json!({ "error": error }))
+          .await;
+      assert!(err.status.is_server_error(), "{error}");
+      assert!(format!("{:#}", err.error).contains(error));
+    }
+    let err =
+      redeem_at(StatusCode::OK, json!({ "unexpected": true })).await;
+    assert!(err.status.is_server_error());
+  }
+
+  /// Logs in at the test provider advertising HS256 too, whose token
+  /// endpoint answers `response`.
+  async fn login_signed_with_the_secret(
+    config: &OidcConfig,
+    response: serde_json::Value,
+  ) -> mogh_error::Result<(OidcLoginInfo, TokenResponse)> {
+    use crate::provider::token_exchange::test_tokens::metadata_with_algs;
+    use openidconnect::TokenUrl;
+    let url = crate::provider::answering_server(
+      StatusCode::OK,
+      response.to_string(),
+    )
+    .await;
+    let metadata = metadata_with_algs(vec![
+      CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
+      CoreJwsSigningAlgorithm::HmacSha256,
+    ])
+    .set_token_endpoint(Some(
+      TokenUrl::new(format!("{url}/token")).unwrap(),
+    ));
+    let provider = OidcProvider::from_metadata(
+      "test",
+      "https://app.example.com/auth/oidc/callback".to_string(),
+      config,
+      metadata,
+    )
+    .unwrap();
+    provider
+      .validate_extract_login_info_and_token(
+        config,
+        (CsrfToken::new("state".to_string()), "state".to_string()),
+        "code".to_string(),
+        PkceCodeVerifier::new("v".repeat(43)),
+        &Nonce::new("nonce".to_string()),
+      )
+      .await
+  }
+
+  /// A provider signing ID tokens with the client secret (HS256),
+  /// which a confidential client accepts, and their `at_hash`: the
+  /// hash is the algorithm's, there is no key of it in the key set.
+  /// An access token substituted for another's is refused, `401`.
+  #[tokio::test]
+  async fn test_at_hash_of_an_id_token_signed_with_the_secret() {
+    use crate::provider::token_exchange::test_tokens::{
+      Signer, TestToken,
+    };
+    let config = exchange_config(&[], &[]);
+    let id_token = |access_token: &str| {
+      TestToken {
+        signer: Signer::Hmac("client-secret"),
+        nonce: Some("nonce".to_string()),
+        access_token: Some(access_token.to_string()),
+        ..TestToken::new(UsernameAdditionalClaims {
+          username: None,
+          extra: HashMap::new(),
+        })
+      }
+      .mint()
+    };
+    let response = |access_token: &str| {
+      json!({
+        "access_token": access_token,
+        "token_type": "bearer",
+        "id_token": id_token("the-access-token"),
+      })
+    };
+
+    let (info, _) = login_signed_with_the_secret(
+      &config,
+      response("the-access-token"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(info.subject.as_str(), "subject-123");
+
+    let err = login_signed_with_the_secret(
+      &config,
+      response("another-access-token"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    assert!(
+      format!("{:#}", err.error).contains("Invalid access token")
+    );
+  }
+
+  /// A provider's responses are read up to [MAX_RESPONSE_LENGTH],
+  /// whatever it (or whatever its discovery points at) sends: the
+  /// discovery, and the token of a login callback.
+  #[tokio::test]
+  async fn test_oversized_responses_are_not_read() {
+    use openidconnect::TokenUrl;
+    for url in crate::provider::oversized_servers().await {
+      let config = OidcConfig {
+        enabled: true,
+        provider: url.clone(),
+        client_id: "client-id".to_string(),
+        ..Default::default()
+      };
+      let err = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        OidcProvider::new(
+          "test",
+          "https://app.example.com/auth/oidc/callback".to_string(),
+          &config,
+        ),
+      )
+      .await
+      .expect("the read must stop at the limit")
+      .err()
+      .unwrap();
+      assert!(format!("{err:#}").contains("larger than"), "{err:#}");
+
+      let config = exchange_config(&[], &[]);
+      let provider = impatient_provider(&config, |metadata| {
+        metadata.set_token_endpoint(Some(
+          TokenUrl::new(format!("{url}/token")).unwrap(),
+        ))
+      });
+      let err = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        provider.validate_extract_login_info_and_token(
+          &config,
+          (CsrfToken::new("state".to_string()), "state".to_string()),
+          "code".to_string(),
+          PkceCodeVerifier::new("v".repeat(43)),
+          &Nonce::new("nonce".to_string()),
+        ),
+      )
+      .await
+      .expect("the read must stop at the limit")
+      .unwrap_err();
+      assert!(err.status.is_server_error());
+      let message = format!("{:#}", err.error);
+      assert!(message.contains("larger than"), "{message}");
+    }
   }
 
   #[tokio::test]

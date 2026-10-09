@@ -17,6 +17,8 @@ Implement the necessary traits and mount the router.
 ### Implement AuthUserImpl
 
 ```rust
+use mogh_auth_server::passkey::Passkey;
+
 pub struct AuthUser(UserRecord);
 
 impl mogh_auth_server::user::AuthUserImpl for AuthUser {
@@ -79,6 +81,14 @@ impl mogh_auth_server::user::AuthUserImpl for AuthUser {
 
   fn cidr_whitelist(&self) -> &[String] {
     &self.0.cidr_whitelist
+  }
+
+  /// The ids of the linked login providers. With them the server refuses to
+  /// remove the user's only way to log in (`UnlinkLocalLogin` without a
+  /// linked provider, `UnlinkExternalLogin` of the only one without a
+  /// password). The default `None` checks nothing.
+  fn external_login_provider_ids(&self) -> Option<&[String]> {
+    Some(&self.0.linked_provider_ids)
   }
 }
 ```
@@ -162,6 +172,16 @@ impl mogh_auth_server::AuthImpl for AppAuthImpl {
     &core_config().lock_login_credentials_for
   }
 
+  /// Names the app keeps for itself, refused to sign ups (local and
+  /// external) and renames after `validate_username`. Not at login: a
+  /// user who had one before keeps logging in with it.
+  fn validate_new_username(&self, username: &str) -> mogh_error::Result<()> {
+    if RESERVED_USERNAMES.contains(&username) {
+      return Err(anyhow!("Username is reserved").status_code(StatusCode::BAD_REQUEST));
+    }
+    Ok(())
+  }
+
   fn registration_disabled(&self) -> bool {
     core_config().disable_user_registration
   }
@@ -173,8 +193,10 @@ impl mogh_auth_server::AuthImpl for AppAuthImpl {
   fn jwt_provider(&self) -> &JwtProvider {
     static JWT_PROVIDER: LazyLock<JwtProvider> = LazyLock::new(|| {
       // At least 32 random bytes, shared by all instances of the app.
+      // Forced in `main` before serving, so a refused secret stops the
+      // app at startup rather than the first request needing it.
       JwtProvider::try_new(core_config().jwt_secret.as_bytes(), JWT_TTL_MS)
-        .expect("Invalid 'jwt_secret'")
+        .expect("[FATAL] Invalid 'jwt_secret'")
         .with_iss(core_config().host.clone())
         .with_aud("AppName")
     });
@@ -366,54 +388,62 @@ impl mogh_auth_server::AuthImpl for AppAuthImpl {
   // = API KEYS =
   // ============
 
-  // create_api_key, get_api_key_owner_id, delete_api_key
+  // create_api_key, delete_api_key
 
-  fn get_api_key(
+  /// The server verifies the secret against the hash (a key which doesn't
+  /// exist costing as much, so the timing doesn't tell), refuses expired keys
+  /// after it (`get_api_key`), and finds the owner of a key to delete it
+  /// (`get_api_key_owner_id`) with this. Find expired keys too.
+  fn find_api_key(
     &self,
     key: String,
-    secret: String,
-  ) -> mogh_auth_server::DynFuture<mogh_error::Result<BoxAuthApiKey>> {
+  ) -> mogh_auth_server::DynFuture<mogh_error::Result<Option<StoredApiKey>>> {
     Box::pin(async move {
-      let api_key = find_api_key(&key).await?;
-      // Also runs for unknown keys, so timing doesn't reveal them,
-      // off the async runtime and bounded to one per core (bcrypt
-      // takes a while, and anybody can send made up keys).
-      verify_api_key_secret_async(
-        &AppAuthImpl,
-        secret,
-        api_key.as_ref().map(|key| key.hashed_secret.clone()),
-      )
-      .await?;
-      // ⚠️ The server never checks `expires`, refuse expired keys here
-      // (after the secret check, so the timing is the same). Keep finding
-      // them in `get_api_key_owner_id`, so they can be deleted.
-      let api_key = api_key
-        .filter(|key| key.expires == 0 || key.expires > unix_timestamp_ms())
-        .context("Invalid client credentials")
-        .status_code(StatusCode::UNAUTHORIZED)?;
-      Ok(
-        AuthApiKey {
-          user_id: api_key.user_id,
-          cidr_whitelist: api_key.cidr_whitelist,
-        }
-        .into(),
-      )
+      let api_key = find_api_key(&key).await?.map(|key| StoredApiKey {
+        user_id: key.user_id,
+        hashed_secret: key.hashed_secret,
+        // unix milliseconds, 0 for never
+        expires: key.expires,
+        cidr_whitelist: key.cidr_whitelist,
+      });
+      Ok(api_key)
     })
   }
 
   // signing keys: signing_keys_enabled (and extra_hosts, for more hosts
   // than `host`), create_signing_key (public keys unique across all
-  // users), get_signing_key (refusing expired keys like get_api_key),
-  // get_signing_key_owner_id (finding them), delete_signing_key
+  // users), find_signing_key (expired keys too, as find_api_key),
+  // delete_signing_key
 }
 ```
 
 `CreateApiKey` / `CreateSigningKey` take an `expires` (unix milliseconds, `0`
-for never), which the server passes to `create_api_key` / `create_signing_key`
-and never checks itself: `get_api_key` and `get_signing_key` must refuse an
-expired key with `401 Invalid client credentials`, while `get_api_key_owner_id`
-and `get_signing_key_owner_id` still find it for `DeleteApiKey` /
-`DeleteSigningKey`.
+for never) and a `cidr_whitelist` (trimmed, empty and repeated entries dropped,
+at most `validations::MAX_CIDR_WHITELIST_ENTRIES` = 64, else `400`, then
+`AuthImpl::validate_cidr_whitelist`), which the server passes to
+`create_api_key` / `create_signing_key`. That is
+`validations::normalize_cidr_whitelist(&auth, whitelist)`: normalize the
+whitelists the app sets itself (a user's, a device's) with it too, so they
+follow the same rules.
+The defaults of `get_api_key` and `get_signing_key` refuse an expired key with
+`401 Invalid client credentials` (an api key after its secret verified, so the
+timing doesn't tell), and `get_api_key_owner_id` still finds it for
+`DeleteApiKey`. A key which doesn't exist gets the same `401` right away,
+without a bcrypt: key ids are random, listed by the UIs and logged at creation,
+so whether one exists is no secret, and only a request naming a real key costs
+the server a bcrypt (made up keys can't spend the budget of the real ones). An app with checks of its own (eg. keys which can be disabled)
+overrides `get_api_key` / `get_signing_key`: it finds the key, authenticates it
+with `middleware::verify_api_key` / `middleware::verify_signing_key` (which
+verify the secret and refuse expired keys), then refuses what it refuses with
+the same `401`. ⚠️ An override which doesn't use them checks the secret and the
+expiry itself, the server checks them nowhere else.
+
+An app which mints api keys outside the management api (eg. a CLI writing one
+to the app's database directly) makes them with
+`api_key::generate_api_key_parts(auth.api_key_secret_length(),
+auth.api_secret_bcrypt_cost())`: the key and the bcrypt hash of the secret to
+store as `create_api_key` stores them, and the secret to show once. It runs
+bcrypt on the calling thread.
 
 ### Nest the router
 
@@ -454,7 +484,8 @@ fn general_rate_limiter(&self) -> &RateLimiter {
 - It counts failed authentication by client ip (IPv6 clients per /64): invalid
   tokens, api keys and signatures presented to `authenticate_request` and the
   management api, second factors, external logins and token exchanges. Local
-  logins too, unless `local_login_rate_limiter` gives them their own.
+  logins too, unless `local_login_rate_limiter` gives them their own, and
+  `/token` exchanges unless `token_exchange_rate_limiter` does.
 - The login steps checking a secret which can be guessed (`LoginLocalUser`,
   `CompleteTotpLogin`, `CompleteTotpRecoveryLogin`, `CompletePasskeyLogin`)
   count strictly, so a burst of concurrent attempts can't go past the limit
@@ -471,16 +502,67 @@ fn general_rate_limiter(&self) -> &RateLimiter {
   once their failures leave the window (at most 25 minutes after the change).
   The count is kept in process memory, so each instance of a replicated app
   allows this many, and a restart starts over.
-- Requests without any credentials are never counted.
+- Requests without any credentials are never counted, nor are refusals which
+  are not guesses: an authentic token which only expired, an `Authorization`
+  header of another scheme than `Bearer` (eg. a proxy's basic auth, refused
+  `401 Unsupported authorization scheme`), and server errors. An app marks its
+  own such refusals in `handle_request_authentication` /
+  `get_user_id_from_request_authentication` with `mogh_error::Error::uncounted`
+  (a session it ended, a workload user out of sync with its rule): every tab or
+  device still sending such a token, often behind one ip, would otherwise lock
+  that ip out of logging in.
 - The client ip is taken from forwarding headers only when the request comes
   from a trusted proxy (`mogh_server`'s `trusted_proxies`, private ranges by
   default).
+
+### Login starts
+
+Starting an external login needs no credentials, and holds a login session
+until the provider's callback. A session store is bounded (`mogh_server`'s in
+memory store drops the sessions closest to expiry once it holds
+`max_sessions`), so a flood of login starts would push the logins of real users
+out of it: logins at the provider, second factors waiting to be typed in. So
+`AuthImpl::login_start_limiter` limits, on by default:
+
+- the external login and link starts (`/{slug}/login`, `/{slug}/link`) of each
+  client ip: 30 at once, then one more every 2 seconds (refilled evenly over a
+  minute). IPv6 clients count per `/64`, and the `/64`s of a `/48` share 16
+  times that on top. The link routes create no session, but continue the one
+  `BeginExternalLoginLink` created;
+- the management requests which begin a login session (`BeginExternalLoginLink`,
+  `BeginPasskeyEnrollment`, `BeginTotpEnrollment`) of each user: 10 at once,
+  refilled over the same minute.
+
+A refused start is `429 Too Many Requests` with `Retry-After`, which the login
+routes send to the login page like their other failures (see [Failed external
+logins](#failed-external-logins)). Keep the client limit well below what the
+session store holds. A browser request for a login route which isn't a
+navigation to it (`Sec-Fetch-Mode` / `Sec-Fetch-Dest`, eg. an image of another
+site) can't start a login anyways, and is refused with `403` before it counts,
+so other sites can't use up the allowance of their visitors' ip.
+
+```rust
+fn login_start_limiter(&self) -> &LoginStartLimiter {
+  static LIMITER: LazyLock<LoginStartLimiter> = LazyLock::new(|| {
+    // Per client, per user, refilled over the window.
+    // `LoginStartLimiter::disabled()` turns both off.
+    LoginStartLimiter::new(30, 10, Duration::from_secs(60))
+  });
+  &LIMITER
+}
+```
 
 ### Login sessions
 
 - Passwords are hashed with bcrypt, which only uses their first 72 bytes: sign
   up and `UpdatePassword` refuse longer ones (`validations::MAX_PASSWORD_BYTES`),
   rather than letting two passwords differing after 72 bytes both work.
+- bcrypt runs off the async runtime, at most one per available core at a time
+  for the logins, sign ups and password changes together (api key secrets have
+  a budget of their own). An app which sets passwords itself (an admin creating
+  a user with one) hashes them with
+  `mogh_auth_server::hash_password(password, auth.local_auth_bcrypt_cost())`,
+  which takes its turn on the same budget.
 - The session id is cycled when the first factor passes (the password, or an
   external login), and when a link of an external login is begun
   (`BeginExternalLoginLink`), so a session id planted in the browser beforehand
@@ -493,6 +575,14 @@ fn general_rate_limiter(&self) -> &RateLimiter {
   flight on the session (a callback or `/link` without a flow started,
   `ExchangeForJwt` without a login), leave the session unchanged, so they don't
   extend its expiry.
+- Each step stored on the session keeps it for the step's whole time, however
+  short the session layer's idle expiry (`SessionConfig::expiry_seconds`,
+  3 minutes by default): an external login in flight at the provider and a link
+  (10 minutes, `Session::MAX_EXTERNAL_LOGIN_AGE` / `MAX_EXTERNAL_LINK_AGE`), the
+  second factor (10 minutes), a TOTP or passkey enrollment (10 minutes). The
+  session then expires at that time (`Expiry::AtDateTime`) rather than when it
+  idled, unless it lives longer already. A login completed at the provider's
+  callback is redeemed (`ExchangeForJwt`) within 2 minutes, in that window.
 - A TOTP or passkey enrollment (`BeginTotpEnrollment` / `BeginPasskeyEnrollment`)
   can only be confirmed by the user who began it: the management api
   authenticates by the `Authorization` header, not the session cookie.
@@ -514,16 +604,20 @@ The user of a workload rule is disabled along with the rule or its issuer
 The tokens issued by `JwtProvider` are standard JWTs: `iat` / `exp` are unix
 timestamps in **seconds** (RFC 7519), validated with 10 seconds of clock skew
 tolerance. Tokens issued before 4.0 carried milliseconds and are rejected, so
-users have to log in once after upgrading.
+users have to log in once after upgrading. Since 8.0 each token also carries a
+random `jti`, so no two are the same (two logins of one user in one second
+were); it isn't checked, and tokens without one stay valid.
 
 ⚠️ They are signed with the secret the `JwtProvider` is built with: anyone who
 knows it, or guesses it offline from any token they got, can issue tokens for
 any user. Use a random secret of at least 32 bytes (`openssl rand -base64 48`),
 shared by all instances of the app, and build the provider with
 `JwtProvider::try_new`, which refuses shorter ones (`JwtProvider::new` logs a
-warning). With an empty secret no token is issued or accepted. Generating a
-random secret when none is configured also works, users are then logged out on
-restart.
+warning). Build it at startup and refuse to start on its error, which names the
+minimum and never the secret: a provider built lazily would only fail at the
+first request needing it. With an empty secret no token is issued or accepted.
+Generating a random secret when none is configured also works, users are then
+logged out on restart.
 
 ### Reauthentication
 
@@ -545,7 +639,8 @@ fn reauthentication_window_secs(&self) -> u64 {
 - Older tokens get `403 Forbidden` with a message starting with
   `mogh_auth_client::api::manage::REAUTHENTICATION_REQUIRED`
   (`isReauthenticationRequired(e)` in the typescript client). The user logs in
-  again, including their second factor, and retries. `mogh_ui` does this on
+  again, including their second factor (a provider login may ask for neither,
+  see below), and retries. `mogh_ui` does this on
   its own: it tells the user why and sends them to `/login?backto=<page>`
   (`setOnReauthenticationRequired` to change that).
 - Api keys and signing keys are not a login, and are always refused the
@@ -577,6 +672,62 @@ fn reauthentication_window_secs(&self) -> u64 {
   fresh login. To get a recent login through token exchange, the client must make
   the provider authenticate the user again, eg. with OIDC `prompt=login` or
   `max_age=0` on the authorization request.
+- ⚠️ A browser login through an external provider (OIDC, Google, GitHub:
+  `/external/{slug}/login`, also the one a provider user makes to log in
+  again) counts as a fresh login at its callback, also when the provider
+  answered from its single sign-on session without asking the user for
+  anything: the server sends no `prompt=login` / `max_age` and reads no
+  `auth_time` there. So for a provider user who logs in without a second
+  factor in the app (`external_skip_2fa`, on by default, or none enrolled) the
+  window is only as strong as the provider's session: whoever can make their
+  browser log in again (script on the app's origin, a browser left unlocked)
+  gets a recent login without their credentials. A second factor in the app
+  (`external_skip_2fa` off, with one enrolled) is asked at every such login
+  and closes it, and so does a provider configured to authenticate the user at
+  every login of the app (a short or no SSO session for its client). Local
+  logins need the password, token exchange counts from the provider token's
+  `auth_time` (above).
+
+#### Gating app writes
+
+The window protects the management API. Requests of the app's own api can mint
+or widen lasting access as well: creating a user with admin rights, an api key
+for another user, an onboarding key, widening a cidr whitelist, re-enabling a
+key. Hold those to the same window for sessions with
+`middleware::require_recent_login`, which answers the same `403` (so
+`isReauthenticationRequired(e)` recognizes it):
+
+```rust
+use mogh_auth_server::middleware::{AuthenticatedAt, require_recent_login};
+
+async fn write_handler(
+  Extension(user): Extension<User>,
+  AuthenticatedAt(authenticated_at): AuthenticatedAt,
+  Json(request): Json<WriteRequest>,
+) -> mogh_error::Result<Response> {
+  if mints_or_widens_access(&request) {
+    require_recent_login(&AppAuthImpl, authenticated_at)?;
+  }
+  // ...
+}
+```
+
+- `middleware::authenticate_request` attaches `AuthenticatedAt` to every
+  request it authenticates (after `handle_request_authentication`, which may
+  attach its own for a token of the app's whose login it knows):
+  `Some(login)` for a session token, the same time the management API checks,
+  `None` for api keys and signing keys. A middleware of the app's own built on
+  `authenticate_user` gets it from `Authenticated::finish`; any other has to
+  attach it, or the extractor refuses the request (`401`).
+- Api keys and signing keys pass: they are the automation credentials, and what
+  they may do in the app's api is the app's call (the management API refuses
+  them the account requests). Narrowing access (deleting a key, disabling a
+  user, removing whitelist entries) needs no recent login from anybody.
+- `0` (`reauthentication_window_secs`) turns the check off for the app's
+  requests too.
+- `mogh_ui` sends the user to log in again on this `403` for the management
+  requests it makes (`useManageAuth`). The app's own write hooks check
+  `isReauthenticationRequired(e)` the same way.
 
 ### Failed external logins
 
@@ -595,13 +746,25 @@ fn external_login_error_redirect(&self) -> Option<&str> {
 Failed logins then redirect to `{login page}?login_error=<reason>`, failed links
 to `{post_link_redirect}?link_error=<reason>`. A request to a `/link` route
 without a link begun on the session (`BeginExternalLoginLink`) is no link, and
-fails to the login page. The link begun on the session is used up by the first
-`/link` request, whatever its outcome, and refused once it is older than 10
+fails to the login page. A link is begun for one provider
+(`BeginExternalLoginLink { slug }`, the slug of `/external/{slug}/link`), and
+the `/link` of another provider refuses it: `/link` is a plain GET any page
+can make the browser send, and must not start the link at a provider of that
+page's choosing. The link begun on the session is used up by the first `/link`
+request, whatever its outcome, and refused once it is older than 10
 minutes. Server errors are logged, and the redirect reports them
 only as "Login failed, see the server logs for details". Without the redirect,
 the JSON error of a server error carries the full trace like every other
 `mogh_error` response, unless the app hides it with
 `mogh_error::set_server_error_detail`.
+
+An error the provider answers the login with (`?error=` on the callback, RFC
+6749 section 4.1.2.1) is only taken once the callback's `state` matched the
+login the session started: anybody can send a browser to the callback with an
+error of their choosing, which is a "State mismatch". It is reported as "Login
+was denied at the provider" (`access_denied`) or "Login was not completed at the
+provider", never with its text, and its code is logged (some are configuration
+errors, eg. `invalid_scope`).
 
 The `mogh_ui` `useAuthState` hook shows both as a notification. Anybody can
 send a user a link to the app with a made up reason, so the reason itself is
@@ -614,14 +777,23 @@ The requests of a callback to the provider (the code exchange, user info) are
 given 30 seconds each, 10 of them to connect, and redirects are not followed. A
 provider which accepts the connection but never answers fails the login after
 that, instead of leaving the callback hanging. Loading its discovery data is
-given 15 seconds (see [Workload identity](#workload-identity)).
+given 15 seconds (see [Workload identity](#workload-identity)). At most 1 MiB of
+any of its responses (discovery, keys, token, user info) is read: a larger one
+fails the request unread.
 
 The external login routes are plain `GET`s, which any web page a user visits
 can send from their browser. Only the failures of a callback which redeems a
 code (and the login rules after it) count against the client ip in
 `general_rate_limiter`. An unknown provider, or a login or link which was never
 started on the session, is refused without counting it, so it can't lock the
-ip out.
+ip out. Starting a login or link takes one of the client's [login
+starts](#login-starts). A code the provider refuses (expired, used already, made
+up: `invalid_grant`), or an ID token which fails verification, is a failure of
+the user (`401`, with what the provider reported), for every provider kind;
+the provider refusing the app's configuration (`invalid_client`,
+`unauthorized_client`, `unsupported_grant_type`, `invalid_scope`, Github's
+`incorrect_client_credentials` / `redirect_uri_mismatch`) or not answering is a
+server error, which is not counted.
 
 The `redirect` of `/{slug}/login?redirect=` (where the browser lands after the
 login) must be on the app's host and at most 2048 characters, otherwise the
@@ -629,9 +801,10 @@ login ends at `host`. The login's query (`redeem_ready=true`, `totp=true`,
 `passkey=...`) goes before its fragment.
 
 A new external user is signed up with the provider's name for them if it passes
-`validate_username`, else with that name reduced to `[a-zA-Z0-9._@-]` (`John
-Smith` becomes `John-Smith`), else with a name made from the provider's slug
-(`github-x8k2...`). A taken name gets a random suffix.
+`validate_username` and `validate_new_username`, else with that name reduced to
+`[a-zA-Z0-9._@-]` (`John Smith` becomes `John-Smith`), else with a name made
+from the provider's slug (`github-x8k2...`). A taken name gets a random suffix,
+and has to pass both with it.
 
 ### Login records
 
@@ -646,6 +819,12 @@ login needed (`sign_up_local_user` / `sign_up_external_user`,
 session or token is issued. An error fails the login; by then a one-time
 credential (a TOTP step, a recovery code) may be consumed, so an app whose
 recording can fail should log and continue instead.
+
+The exception to "immediately before": an external login completed at the
+provider's callback without a second factor is recorded at the callback, and
+its session jwt is only issued when the app redeems it (`ExchangeForJwt`), up
+to 2 minutes later, or never when it isn't redeemed. Its `token_expires` is
+the callback time plus the ttl, the jwt expires up to 2 minutes after it.
 
 ```rust
 fn record_login(&self, login: Login) -> DynFuture<mogh_error::Result<()>> {
@@ -664,6 +843,90 @@ fn record_login(&self, login: Login) -> DynFuture<mogh_error::Result<()>> {
 
 Refused logins (a wrong password, a token no provider accepts) are not
 reported: the server rate limits and logs them.
+
+### Credential changes
+
+A user who changes the password (or enrolls a second factor) because a token
+of theirs leaked expects that token to stop working. Once `UpdatePassword`,
+`ConfirmTotpEnrollment`, `UnenrollTotp`, `ConfirmPasskeyEnrollment`,
+`UnenrollPasskey`, `UnlinkLocalLogin` or `UnlinkExternalLogin` stored its
+change, the server calls `credentials_changed(user_id, change, kept_jwt)`:
+end the user's other sessions there, keeping `kept_jwt` (the session which
+made the change). Eg. store a cutoff with the user and refuse older tokens in
+`get_user_id_from_request_authentication`, uncounted:
+
+```rust
+fn credentials_changed(
+  &self,
+  user_id: String,
+  _change: CredentialChange,
+  kept_jwt: Option<String>,
+) -> DynFuture<mogh_error::Result<()>> {
+  Box::pin(async move {
+    // Tokens carry whole seconds: those of this second stay valid,
+    // so a login right after the change works.
+    let valid_after = unix_timestamp_secs();
+    end_sessions(&user_id, valid_after, kept_jwt.map(sha256_hex)).await
+  })
+}
+// In get_user_id_from_request_authentication, for a jwt:
+// claims.iat < user.sessions_valid_after && hash(jwt) != user.kept
+//   => Err(anyhow!("The session has ended").status_code(401).uncounted())
+// and the keys as the default does it:
+//   auth => middleware::get_key_user_id(self, auth, ip)
+```
+
+The default does nothing (sessions end when their tokens expire). An error of
+the hook fails the request after the change was stored, except for
+`ConfirmTotpEnrollment`, whose response carries the recovery codes (shown only
+once): its error is logged and the codes returned. A passkey login stores the
+passkey's new counter with `update_user_passkey_counter` (defaults to
+`update_user_stored_passkey`), which is no credential change.
+Each token carries a random `jti`, so two logins of one user in the same
+second are two tokens, and a kept token keeps no other. Tokens carry whole
+seconds: a cutoff at the change's second keeps the tokens issued in it (a
+login right after the change works), one at the next second ends them (and
+refuses a login right after the change until then).
+
+### Request context
+
+The hooks which write (`create_external_provider`, `update_trusted_issuer`,
+`create_api_key`, `update_user_password`, ...) take what they store, not who
+asked for it. For the app's audit rows, `mogh_auth_server::request_context()`
+returns the request the server is handling when the hook runs:
+
+```rust
+fn update_trusted_issuer(
+  &self,
+  issuer: TrustedIssuer,
+) -> DynFuture<mogh_error::Result<()>> {
+  // ip: the client ip; method: the request by its wire name
+  // ("UpdateTrustedIssuer", "LoginLocalUser", "ExternalCallback",
+  // "TokenExchange"); user_id: who it authenticated as (management
+  // requests).
+  let context = mogh_auth_server::request_context();
+  Box::pin(async move { store_and_audit(issuer, context).await })
+}
+```
+
+- The router scopes it (a tokio task-local) around every request of the auth
+  api, and the server carries it into the task it runs a trusted issuer update
+  in (the store and the sync, completed even when the request is dropped). A
+  task the app spawns doesn't inherit it: read it first. Outside of the
+  auth api (the app's own routes, a background
+  task, a helper of the server called directly) it is `None`;
+  `scope_request_context` gives such code one, eg. in tests.
+- `method` is a login or management request's type once its body is read.
+  Before (while a management request authenticates, in
+  `get_user_id_from_request_authentication`) it is `context::LOGIN` /
+  `context::MANAGE`. The external login routes are `ExternalLogin`,
+  `ExternalLink` and `ExternalCallback`, `POST /token` is `TokenExchange`.
+- `user_id` is set once a management request authenticated (and by
+  `middleware::authenticate_user` + `Authenticated::finish`, eg. the supporter
+  api). Logins leave it `None`: their hooks take the user as an argument, and
+  `record_login` gets the `Login`.
+- The server reads no request body for it: the signed request checks (body
+  read after the timestamp) stay as they are.
 
 ### Signing keys
 
@@ -803,7 +1066,9 @@ sign the path the server receives: `signed_request_headers` takes the host
   being accepted long after it was signed (its headers sent in time, its body
   held back). Raise it along with the limit for larger bodies.
 - Apps without `AuthImpl::signing_keys_enabled` (the default) answer signed
-  requests with `401 Signing keys are not enabled`.
+  requests with `401 Signing keys are not enabled`, and `CreateSigningKey` with
+  `400 Signing keys are not enabled` (the storage hooks need no override for
+  it). `DeleteSigningKey` still works, for keys stored while they were on.
 - The signature is accepted for one second around the server time by default,
   `AuthImpl::signing_key_timestamp_tolerance_ms` raises that for clients without
   synchronized clocks. It is measured when the headers arrive, the time the
@@ -830,9 +1095,12 @@ sign the path the server receives: `signed_request_headers` takes the host
   already). The margin covers the moment it takes to authenticate the signer,
   and how far the clocks of the app's instances and of the store differ.
   Check and remember in one step, in a store all instances of the app share.
-  A middleware of the app's own, built on
-  `extract_request_authentication_rate_limited`, calls
-  `middleware::accept_signed_request` itself.
+  A middleware of the app's own which needs the user (as the supporter api
+  does) uses the management api's sequence: `middleware::authenticate_user`
+  (the signed body, the credentials, the user and the cidr whitelists, in
+  that order), its own policy on the user, then `Authenticated::finish`, which
+  hands the signature to the hook and attaches `UserExtractor` /
+  `AuthenticatedAt` for the handlers.
 
   ```rust
   fn accept_signed_request(
@@ -870,9 +1138,12 @@ sign the path the server receives: `signed_request_headers` takes the host
   (`openssl genpkey -algorithm ed25519`). ⚠️ Public keys are not secret: store
   them unique across all users (eg. a unique index), which also covers two
   requests racing.
-- The server never checks a signing key's `expires`: refuse expired keys in
-  `get_signing_key` (`401 Invalid client credentials`), and implement
-  `get_signing_key_owner_id` so they stay deletable.
+- The default `get_signing_key` refuses an expired signing key
+  (`401 Invalid client credentials`), the one `find_signing_key` finds, and the
+  default `get_signing_key_owner_id` still finds it (`404` for none), so it can
+  be deleted. An override of the owner lookup must not go through
+  `get_signing_key` (expired keys could never be deleted), and only its `404`
+  counts as "not stored" for `CreateSigningKey`.
 - Invalid signatures count against the general rate limiter.
 
 Since 7.0 the signature is an Ed25519 signature: a hard switch. Before, it was
@@ -892,9 +1163,9 @@ that key could also make for any client.
   host (`url_host` of the server address) instead of the server public key and
   returns five headers (`signed_request_headers_for_url` takes the url of the
   request for both the host and the path), `sign_request` takes a
-  `SignedRequest`, whose `message` replaces `pki_auth_prologue`
-  (`middleware::signed_request_message` on the server). The method is signed
-  as it is sent (it was uppercased).
+  `SignedRequest`, whose `message` replaces `pki_auth_prologue` (the server
+  verifies the same message). The method is signed as it is sent (it was
+  uppercased).
 - A stale timestamp is answered with `SIGNED_AT_ANOTHER_TIME` (it was the same
   `Invalid client credentials` as an unknown key).
 - The body of a signed request has to arrive within
@@ -1009,12 +1280,29 @@ continue, and rejects users who need a second factor for external logins.
   would report both as `invalid_request`. Except when another login provider
   (or trusted issuer) of the same issuer couldn't be loaded: a token the others
   rejected (signature, audience, expiry, `allowed_groups`) is then `503`
-  `temporarily_unavailable`, since that one might have accepted it. A token one
-  of them verified whose user is unknown, or which matches no rule, stays
-  `invalid_grant`, as does a user one of them accepted who fails the login
-  rules.
+  `temporarily_unavailable`, since that one might have accepted it. It still
+  counts against the rate limit as a failed attempt (the caller picks the
+  issuer). A token one of them verified whose user is unknown, or which matches
+  no rule, stays `invalid_grant`, as does a user one of them accepted who fails
+  the login rules. Login providers and trusted issuers of one issuer are ranked
+  together: the furthest any of them got is reported.
 - Google ID tokens are only accepted with the `iss` `https://accounts.google.com`.
   The scheme-less variant `accounts.google.com` can't be verified.
+- The endpoint takes a form, which any web page can make its visitors' browsers
+  post (a CORS "simple" request). A request a browser sent from a page of
+  another site is refused with `invalid_request` before anything counts against
+  the visitor's ip: a `Sec-Fetch-Site` other than `same-origin` / `none`, or
+  without it an `Origin` which isn't `host` or one of `extra_hosts`. Otherwise
+  any site could fail exchanges on purpose and get everybody behind its
+  visitors' ip refused by the rate limiter. RFC 8693 clients send neither
+  header. Apps serving the exchange on another surface which takes such bodies
+  call `api::token::check_not_cross_site` first (see
+  [The exchange on another surface](#the-exchange-on-another-surface)). So
+  token exchange needs `AuthImpl::host` implemented (its default panics), as
+  external logins and signing keys do.
+- Failed exchanges count against `AuthImpl::token_exchange_rate_limiter`, which
+  is `general_rate_limiter` unless the app gives it a limiter of its own (see
+  the shared runners note of [Workload identity](#workload-identity)).
 
 ### Workload identity
 
@@ -1072,6 +1360,10 @@ are loaded the same way, as they are loaded on demand by unauthenticated request
 Issuers can also be stored by the app and managed by admins over the API
 (`ListTrustedIssuers`, `CreateTrustedIssuer`, ...), with the same storage
 methods as for login providers (`list_trusted_issuers`, `create_trusted_issuer`, ...).
+The names of login providers, issuers and rules are trimmed, at most 100
+characters, and refused (`400`) with a control character (Unicode Cc: a tab,
+a line break, an escape sequence) inside: they are listed, shown on the login
+page and logged. The error doesn't repeat the name.
 
 Each rule has its own user, which the app provides:
 
@@ -1134,12 +1426,19 @@ fn sync_workload_users(
 - Rules of static issuers need an `id` which is unique within the issuer,
   it identifies the user of the rule. Tokens matching a rule without one
   are refused. Ids of rules managed over the API are generated.
-- A rule managed over the API needs a condition on a claim which identifies
-  the workload (eg. `sub`, `repository_id`). Conditions on claims every
-  accepted token has (`iss`, `aud`, `exp`, `iat`, `nbf`, `jti`) can only narrow
-  it further: an audience is no restriction on a public platform, where anyone
-  can request a token for any audience. This is best effort, `repo:*` still
-  matches every repository there.
+- A rule needs a condition on a claim which identifies the workload (eg. `sub`,
+  `repository_id`). Conditions on claims every accepted token has (`iss`,
+  `aud`, `exp`, `iat`, `nbf`, `jti`) can only narrow it further: an audience is
+  no restriction on a public platform, where anyone can request a token for any
+  audience. A claim whose pattern is only `*` restricts nothing either. This is
+  best effort, `repo:*` still matches every repository there. The management
+  api refuses such rules (and issuers without an audience, or with credentials
+  in a url) with `400`; a static issuer of the app configuration which has one
+  is skipped, with an error in the log, so it accepts no token and
+  `sync_all_workload_users` removes the users of its rules. Apps can check their
+  configured issuers with
+  `mogh_auth_server::provider::workload::validate_trusted_issuer` when they load
+  it.
 - An admin user is only accepted if the rule has `admin` set, and a disabled
   user not at all.
 - The user cidr whitelist applies. Users requiring a second factor are refused.
@@ -1187,18 +1486,32 @@ another configuration) apply to new exchanges, and a rule's `groups` / `admin`
 reach its user at its next exchange. Call
 `mogh_auth_server::provider::workload::sync_all_workload_users` when the app
 starts to apply them to the users right away (disabling and removing the users
-of disabled and removed rules), and remove the users of issuers which aren't
-configured anymore. The example app does both (`example/server`).
+of disabled and removed rules). At its end it calls
+`AuthImpl::remove_workload_users_except` with every issuer as it is then (and
+the ids of its rules): remove the users of the issuers (and rules) which aren't
+among them, eg. of an issuer removed from the configuration. The default
+removes nothing. Token exchanges wait while it runs, and the issuers are listed
+for it once they do, so the user of an issuer (or rule) created meanwhile is
+created after it, never removed as one which is gone. That holds within one
+instance of the app: an app which creates workload users outside the exchange,
+or runs several instances, checks its stored issuers again in the statement
+which removes the users (eg. `NOT EXISTS` against them in the `DELETE`). It can
+run while the app serves: each issuer is read again under its lock, so an
+update made meanwhile isn't undone, and one issuer failing to sync doesn't stop
+the others. The example app does both (`example/server`).
 
 ⚠️ **Rate limiting and shared runners.** Failed exchanges count against
-`AuthImpl::general_rate_limiter` by client ip, like failed logins. Hosted CI
-runners (eg. Github's) share their ips between many customers and jobs, so with a
-strict limit one misconfigured job failing repeatedly, or anyone else running jobs
-on the same runners and sending tokens no rule accepts, can get the ip limited and
-make your other jobs fail with `429` / `temporarily_unavailable` for a while.
-If workloads come from shared ips, keep the failure limit generous, make jobs
-retry an exchange with a delay rather than in a tight loop, or use self hosted
-runners with their own ips. Successful exchanges are never rate limited.
+`AuthImpl::token_exchange_rate_limiter` by client ip, which is
+`general_rate_limiter` (the one of failed logins) unless the app gives it a
+limiter of its own. Hosted CI runners (eg. Github's) share their ips between many
+customers and jobs, so with a strict limit one misconfigured job failing
+repeatedly, or anyone else running jobs on the same runners and sending tokens no
+rule accepts, can get the ip limited and make your other jobs fail with `429` /
+`temporarily_unavailable` for a while (and, with the shared limiter, the logins
+from that ip). If workloads come from shared ips, keep the failure limit
+generous or separate, make jobs retry an exchange with a delay rather than in a
+tight loop, or use self hosted runners with their own ips. Successful exchanges
+are never rate limited.
 
 ### The exchange on another surface
 
@@ -1242,6 +1555,37 @@ match exchanged {
 
 It is exactly the endpoint's exchange: the failure rate limit by ip included,
 the app told about the login through the same hooks.
+
+What it does not do is the endpoint's first check: a request a web browser sent
+from a page of another site is refused before anything counts against the
+visitor's ip. A surface which reads a body of any content type (Vault clients
+send JSON without saying so) takes one any page can post from its visitors'
+browsers, so it checks first too, and so does any other unauthenticated
+endpoint of the app counting failures by ip (eg. a Vault AppRole login).
+`middleware::is_cross_site_browser_request` is the endpoint's check as a
+`bool`, to answer in the surface's own format (`api::token::check_not_cross_site`
+answers with the endpoint's `invalid_request`):
+
+```rust
+use mogh_auth_server::middleware::is_cross_site_browser_request;
+
+async fn vault_jwt_login(
+  RequestIp(ip): RequestIp,
+  headers: HeaderMap,
+  body: Bytes,
+) -> Result<Response, VaultError> {
+  let auth = AppAuthImpl::new();
+  // Before anything is counted: any site could otherwise fail logins on
+  // purpose from its visitors' browsers, and get their ip refused.
+  if is_cross_site_browser_request(&auth, &headers) {
+    return Err(VaultError::new(
+      StatusCode::FORBIDDEN,
+      "web pages of other sites can't log in",
+    ));
+  }
+  // ...exchange_token(&auth, ip, ..)
+}
+```
 
 Github Actions:
 

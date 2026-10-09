@@ -16,6 +16,7 @@ use mogh_auth_client::{
   },
 };
 use mogh_error::{AddStatusCode as _, AddStatusCodeError as _};
+use mogh_logger::redact_url_credentials;
 use mogh_resolver::Resolve;
 use tracing::{info, instrument, warn};
 use zeroize::Zeroize as _;
@@ -29,7 +30,7 @@ use crate::{
   },
   rand::random_string,
   user::AuthUserImpl,
-  validations::{redact_url_credentials, validate_public_http_url},
+  validations::validate_public_http_url,
 };
 
 const MAX_PROVIDER_NAME_LENGTH: usize = 100;
@@ -61,6 +62,9 @@ fn list_item<I: AuthImpl + ?Sized>(
   }
 }
 
+/// A provider's name, trimmed: shown on the login page, listed, and
+/// logged, so a control character (Unicode Cc) inside it is refused
+/// (the error doesn't repeat the name).
 fn validate_name(name: &str) -> mogh_error::Result<String> {
   let name = name.trim();
   if name.is_empty() {
@@ -75,6 +79,12 @@ fn validate_name(name: &str) -> mogh_error::Result<String> {
         "Provider name cannot be longer than {MAX_PROVIDER_NAME_LENGTH} characters"
       )
       .status_code(StatusCode::BAD_REQUEST),
+    );
+  }
+  if name.chars().any(char::is_control) {
+    return Err(
+      anyhow!("Provider name cannot contain control characters")
+        .status_code(StatusCode::BAD_REQUEST),
     );
   }
   Ok(name.to_string())
@@ -861,6 +871,60 @@ mod tests {
       );
     }
     assert_eq!(auth.stored.lock().unwrap().len(), 2);
+  }
+
+  /// Names are shown on the login page and in every list, and end
+  /// up in logs: a control character (Unicode Cc: tab, line breaks,
+  /// escape sequences, DEL, NEL) inside one is refused at create and
+  /// update, the error not repeating the name. Around it, whitespace
+  /// is trimmed as before.
+  #[tokio::test]
+  async fn test_names_refuse_control_characters() {
+    let auth = TestAuth::default();
+    let id = create_provider(&auth, &ADMIN, create_request("secret"))
+      .await
+      .unwrap()
+      .provider
+      .id;
+    for name in [
+      "Git\thub",
+      "Git\nhub",
+      "Git\rhub",
+      "Git\u{1b}[31mhub",
+      "Git\u{7f}hub",
+      "Git\u{85}hub",
+      "Git\0hub",
+    ] {
+      let mut create = create_request("secret");
+      create.name = name.into();
+      let mut update = update_request(&id, github_config("secret"));
+      update.name = name.into();
+      for err in [
+        create_provider(&auth, &ADMIN, create).await.unwrap_err(),
+        update_provider(&auth, &ADMIN, update).await.unwrap_err(),
+      ] {
+        assert_eq!(err.status, StatusCode::BAD_REQUEST, "{name:?}");
+        let message = format!("{:#}", err.error);
+        assert_eq!(
+          message,
+          "Provider name cannot contain control characters"
+        );
+      }
+    }
+    let stored = auth.stored.lock().unwrap().clone();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].name, "Github");
+    drop(stored);
+    // Spaces, punctuation and other scripts are names.
+    for name in
+      ["  My SSO (eu-west)\t", "Connexion d'entreprise", "認証"]
+    {
+      let mut update = update_request(&id, github_config("secret"));
+      update.name = name.into();
+      let item =
+        update_provider(&auth, &ADMIN, update).await.unwrap();
+      assert_eq!(item.provider.name, name.trim());
+    }
   }
 
   #[tokio::test]

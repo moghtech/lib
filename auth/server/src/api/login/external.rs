@@ -11,18 +11,21 @@ use mogh_auth_client::{
   config::ExternalLoginProvider,
 };
 use mogh_error::AddStatusCode as _;
-use mogh_rate_limit::WithFailureRateLimit;
 use mogh_resolver::Resolve;
 use tracing::{info, instrument};
 
 use crate::{
-  AuthImpl, Login,
+  AuthImpl,
   api::{
-    ExternalTwoFactor, begin_external_two_factor,
+    begin_external_two_factor,
     external::load_provider_client,
-    login::LoginArgs,
+    login::{
+      IssueToken, LoginArgs, SecondFactorChallenge, issue_login,
+    },
     provider_login,
-    token::{VerifiedExchange, verify_exchange},
+    token::{
+      VerifiedExchange, verify_exchange, with_exchange_rate_limit,
+    },
   },
   middleware::check_user_cidr_whitelist,
   provider::external::BuiltProvider,
@@ -70,15 +73,18 @@ where
   .await?
   {
     None => {
-      auth
-        .record_login(Login::of(
-          user.as_ref(),
-          ip,
-          provider_login(&provider),
-          None,
-          auth.jwt_provider().default_expires_at()?,
-        ))
-        .await?;
+      // A login when the provider authenticated the user, not now:
+      // the token may be replayed until it expires.
+      let token = issue_login(
+        auth,
+        user.id(),
+        user.username(),
+        ip,
+        provider_login(&provider),
+        None,
+        IssueToken::AuthTime(authenticated_at),
+      )
+      .await?;
 
       info!(
         user_id = user.id(),
@@ -88,20 +94,14 @@ where
         "User logged in (token exchange)"
       );
 
-      // A login when the provider authenticated the user, not now:
-      // the token may be replayed until it expires.
-      JwtOrTwoFactor::Jwt(
-        auth
-          .jwt_provider()
-          .encode_sub_with_auth_time(user.id(), authenticated_at)?,
-      )
+      JwtOrTwoFactor::Jwt(token.into())
     }
     // The JWT is only issued once the second factor is completed
     // on the same session, which makes it a login right then.
-    Some(ExternalTwoFactor::Passkey(response)) => {
+    Some(SecondFactorChallenge::Passkey(response)) => {
       JwtOrTwoFactor::Passkey(response)
     }
-    Some(ExternalTwoFactor::Totp) => JwtOrTwoFactor::Totp {},
+    Some(SecondFactorChallenge::Totp) => JwtOrTwoFactor::Totp {},
   };
 
   Ok(res)
@@ -118,16 +118,19 @@ impl Resolve<LoginArgs> for ExchangeExternalForJwt {
     LoginArgs { auth, session, ip }: &LoginArgs,
   ) -> Result<Self::Response, Self::Error> {
     let auth = auth.as_ref();
-    exchange_external_for_jwt(
-      auth,
-      session,
-      *ip,
-      &self.token,
-      |provider| async move {
-        load_provider_client(auth, &provider).await
-      },
+    with_exchange_rate_limit(
+      exchange_external_for_jwt(
+        auth,
+        session,
+        *ip,
+        &self.token,
+        |provider| async move {
+          load_provider_client(auth, &provider).await
+        },
+      ),
+      auth.general_rate_limiter(),
+      ip,
     )
-    .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), ip)
     .await
   }
 }
@@ -136,13 +139,13 @@ impl Resolve<LoginArgs> for ExchangeExternalForJwt {
 mod tests {
   use std::sync::Mutex;
 
-  use anyhow::anyhow;
   use mogh_auth_client::config::{
     ExternalLoginProviderConfig, OidcConfig, TokenExchangeConfig,
   };
 
   use super::*;
   use crate::{
+    Login,
     provider::{
       external::ExternalLoginInfo,
       jwt::JwtProvider,
@@ -151,6 +154,7 @@ mod tests {
         CLIENT_ID, ISSUER, TestToken, metadata,
       },
     },
+    test_support::{session, stub_auth_impl},
     user::{AuthUserImpl, BoxAuthUser},
   };
 
@@ -258,23 +262,7 @@ mod tests {
       Box::pin(async { Ok(()) })
     }
 
-    fn get_user(
-      &self,
-      _user_id: String,
-    ) -> crate::DynFuture<mogh_error::Result<BoxAuthUser>> {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
-    }
-
-    fn handle_request_authentication(
-      &self,
-      _auth: crate::RequestAuthentication,
-      _ip: IpAddr,
-      _require_user_enabled: bool,
-      _req: axum::extract::Request,
-    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-    {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
-    }
+    stub_auth_impl!(get_user, handle_request_authentication);
 
     fn jwt_provider(&self) -> &JwtProvider {
       &self.jwt
@@ -287,14 +275,6 @@ mod tests {
       extra: Default::default(),
     })
     .mint()
-  }
-
-  fn session() -> Session {
-    Session(tower_sessions::Session::new(
-      None,
-      Arc::new(tower_sessions::MemoryStore::default()),
-      None,
-    ))
   }
 
   /// Builds the client from fixed metadata, in place of network discovery.

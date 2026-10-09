@@ -2,7 +2,7 @@
 //!
 //! A bcrypt hash or verify takes tens to hundreds of milliseconds of
 //! CPU (by its cost). Run on an async worker, a handful at once
-//! (unauthenticated logins, requests with made up api keys) would
+//! (unauthenticated logins, guesses at an api key's secret) would
 //! stall every other request of the server, so it runs on tokio's
 //! blocking pool. That pool has hundreds of threads and an unbounded
 //! queue, which every other blocking task shares (file io, the DNS
@@ -14,11 +14,13 @@
 //!
 //! There are two budgets, so a flood of one kind waits behind itself:
 //! - logins ([spawn_bcrypt]): passwords and recovery codes, of logins,
-//!   sign ups, password changes and 2fa enrollment.
+//!   sign ups, password changes and 2fa enrollment, and the passwords
+//!   apps hash with [hash_password].
 //! - api keys ([spawn_api_key_bcrypt]): the secret of every request
-//!   carrying X-API-KEY (made up keys included, those run a dummy hash)
-//!   and the secrets of new api keys. Anybody can send made up keys,
-//!   they don't queue ahead of password logins.
+//!   naming an api key which exists (an unknown key is refused
+//!   without a bcrypt), and the secrets of new api keys. Anybody who
+//!   knows a key id can send guesses at its secret, they don't queue
+//!   ahead of password logins.
 
 use std::{
   num::NonZero,
@@ -98,6 +100,32 @@ pub(crate) async fn bcrypt_hash(
     .context("Failed to hash secret")
 }
 
+/// The bcrypt hash of a password, at `cost`, as the server hashes
+/// the password of a sign up or of `UpdatePassword`: off the async
+/// runtime, on the server's budget of login bcrypt work (at most one
+/// per available core at a time, shared with the logins, waiting its
+/// turn without holding a thread), its copy of the password wiped
+/// once hashed.
+///
+/// For an app which sets passwords itself (eg. an admin creating a
+/// user with one): hashed here, they take their turn with the
+/// server's logins rather than add bcrypt work of their own next to
+/// them. Pass the app's
+/// [AuthImpl::local_auth_bcrypt_cost][crate::AuthImpl::local_auth_bcrypt_cost],
+/// and validate the password first
+/// ([AuthImpl::validate_password][crate::AuthImpl::validate_password]):
+/// bcrypt only uses the first 72 bytes. Fails (`500`) for a cost
+/// outside bcrypt's 4 to 31.
+pub async fn hash_password(
+  password: &str,
+  cost: u32,
+) -> mogh_error::Result<String> {
+  bcrypt_hash(password.as_bytes(), cost)
+    .await
+    .context("Failed to hash the password")
+    .map_err(Into::into)
+}
+
 /// Whether `secret` matches the bcrypt `hash`, off the async
 /// runtime (see [spawn_bcrypt]). Errors if the hash is malformed.
 pub(crate) async fn bcrypt_verify(
@@ -117,6 +145,17 @@ pub(crate) async fn bcrypt_verify(
 pub(crate) async fn hold_api_key_permits()
 -> tokio::sync::OwnedSemaphorePermit {
   API_KEY_PERMITS
+    .clone()
+    .acquire_many_owned(available_cores() as u32)
+    .await
+    .unwrap()
+}
+
+/// Takes every permit of the login budget, so tests can check that
+/// login bcrypt work waits for them.
+#[cfg(test)]
+async fn hold_login_permits() -> tokio::sync::OwnedSemaphorePermit {
+  LOGIN_PERMITS
     .clone()
     .acquire_many_owned(available_cores() as u32)
     .await
@@ -241,6 +280,24 @@ mod tests {
     );
     drop(held);
     assert_eq!(job.await.unwrap().unwrap(), 1);
+  }
+
+  /// An app's password hash takes its turn on the login budget: with
+  /// every permit taken it waits, then hashes the password so a login
+  /// with it verifies.
+  #[tokio::test]
+  async fn test_hash_password_takes_the_login_budget() {
+    let held = hold_login_permits().await;
+    let hash = tokio::spawn(hash_password("a-password", 4));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!hash.is_finished(), "hashed without a permit");
+    drop(held);
+    let hash = hash.await.unwrap().unwrap();
+    assert!(bcrypt_verify(b"a-password", &hash).await.unwrap());
+    assert!(!bcrypt_verify(b"another", &hash).await.unwrap());
+    // A cost bcrypt refuses is a server error.
+    let err = hash_password("a-password", 3).await.unwrap_err();
+    assert!(err.status.is_server_error());
   }
 
   #[tokio::test]

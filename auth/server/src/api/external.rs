@@ -2,7 +2,7 @@ use anyhow::{Context as _, anyhow};
 use axum::{
   Router,
   extract::{Path, Query},
-  http::StatusCode,
+  http::{HeaderMap, StatusCode},
   response::Redirect,
   routing::get,
 };
@@ -13,19 +13,21 @@ use mogh_auth_client::{
     ExternalLoginProviderConfig,
   },
 };
-use mogh_error::AddStatusCodeError;
+use mogh_error::{AddStatusCode as _, AddStatusCodeError};
 use mogh_rate_limit::{FailedAttempt, WithFailureRateLimit};
 use mogh_request_ip::RequestIp;
 use serde::Deserialize;
 use std::{net::IpAddr, sync::Arc};
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 
 use crate::{
   AuthImpl,
   api::{
-    RedirectQuery, StandardCallbackQuery, get_user_id_or_two_factor,
-    login_redirect, unique_username, user_id_or_two_factor_redirect,
+    RedirectQuery, StandardCallbackQuery, check_new_username,
+    get_user_id_or_two_factor, login_redirect, unique_username,
+    user_id_or_two_factor_redirect,
   },
+  login_start::{embedded_refused, embedded_request},
   middleware::check_user_cidr_whitelist,
   provider::{
     external::{
@@ -33,6 +35,7 @@ use crate::{
       load_built_provider, resolve_external_provider_by_slug,
     },
     load_cache::LoadFailedRecently,
+    named::sanitize_text,
   },
   rand::random_string,
   session::{ExternalLink, Session},
@@ -52,14 +55,16 @@ pub fn router<I: AuthImpl>() -> Router {
   let mut router = Router::new()
     .route(
       "/external/{slug}/login",
-      get(|Path(ProviderPath { slug }), ip, session, query| {
-        external_login::<I>(slug, ip, session, query)
-      }),
+      get(
+        |Path(ProviderPath { slug }), ip, session, headers, query| {
+          external_login::<I>(slug, ip, session, headers, query)
+        },
+      ),
     )
     .route(
       "/external/{slug}/link",
-      get(|Path(ProviderPath { slug }), ip, session| {
-        external_link::<I>(slug, ip, session)
+      get(|Path(ProviderPath { slug }), ip, session, headers| {
+        external_link::<I>(slug, ip, session, headers)
       }),
     )
     .route(
@@ -80,14 +85,20 @@ pub fn router<I: AuthImpl>() -> Router {
     router = router
       .route(
         &format!("/{id}/login"),
-        get(move |ip, session, query| {
-          external_login::<I>(id.to_string(), ip, session, query)
+        get(move |ip, session, headers, query| {
+          external_login::<I>(
+            id.to_string(),
+            ip,
+            session,
+            headers,
+            query,
+          )
         }),
       )
       .route(
         &format!("/{id}/link"),
-        get(move |ip, session| {
-          external_link::<I>(id.to_string(), ip, session)
+        get(move |ip, session, headers| {
+          external_link::<I>(id.to_string(), ip, session, headers)
         }),
       )
       .route(
@@ -190,6 +201,28 @@ impl std::error::Error for ProviderUnavailable {}
 // count against the client ip. A request naming an unknown provider,
 // or a flow which was never started on the session, is refused
 // without counting it, so it can't lock the ip out of logging in.
+//
+// Starting a login or link takes one of the client's starts
+// ([take_login_start]), which bound the login sessions a client can
+// have created, so it can't push the logins of others out of the
+// session store. A browser request which another site embedded is
+// refused before it takes one.
+
+/// Refuses a request another site embedded ([embedded_request]) with
+/// `403`, before it counts or starts anything, then takes one of the
+/// client's login starts
+/// ([AuthImpl::login_start_limiter], `429` with `Retry-After` past
+/// it).
+fn take_login_start<I: AuthImpl>(
+  auth: &I,
+  headers: &HeaderMap,
+  ip: IpAddr,
+) -> mogh_error::Result<()> {
+  if embedded_request(headers) {
+    return Err(embedded_refused());
+  }
+  auth.login_start_limiter().take_client_start(ip)
+}
 
 /// Starts an external login: stores it on the session, and sends the
 /// browser to the provider. The `redirect` (where the login ends) must
@@ -197,17 +230,23 @@ impl std::error::Error for ProviderUnavailable {}
 /// [MAX_REDIRECT_LENGTH][crate::api::MAX_REDIRECT_LENGTH] characters,
 /// otherwise the login ends at the host.
 ///
-/// Starting a login handles no credential, so it is not rate
-/// limited, and the client ip is not used.
-pub async fn external_login<I: AuthImpl>(
+/// Starting a login handles no credential, so its failures are not
+/// counted against the client ip. Each one takes one of the client's
+/// login starts though ([AuthImpl::login_start_limiter]), and a
+/// browser request another site embedded is refused before it does.
+pub(crate) async fn external_login<I: AuthImpl>(
   slug: String,
-  RequestIp(_ip): RequestIp,
+  RequestIp(ip): RequestIp,
   session: Session,
+  headers: HeaderMap,
   Query(RedirectQuery { redirect }): Query<RedirectQuery>,
 ) -> mogh_error::Result<Redirect> {
   let auth = I::new();
-  let res =
-    begin_external_login(&auth, &slug, &session, redirect).await;
+  let res = async {
+    take_login_start(&auth, &headers, ip)?;
+    begin_external_login(&auth, &slug, &session, redirect).await
+  }
+  .await;
   error_redirect(&auth, ExternalFlow::Login, res)
 }
 
@@ -247,21 +286,31 @@ async fn begin_external_login<I: AuthImpl>(
 /// is not known to be a link, and a failure goes to the login page.
 /// A user who was disabled (or locked) since is refused, here and
 /// again when the provider's callback completes the link.
-pub async fn external_link<I: AuthImpl>(
+///
+/// Like a login, it takes one of the client's login starts
+/// ([AuthImpl::login_start_limiter]), before the link is taken.
+pub(crate) async fn external_link<I: AuthImpl>(
   slug: String,
   RequestIp(ip): RequestIp,
   session: Session,
+  headers: HeaderMap,
 ) -> mogh_error::Result<Redirect> {
   let auth = I::new();
   // Known once the link begun on the session is taken.
   let mut flow = ExternalFlow::Login;
   let res = async {
+    // Before the link is taken: another site embedding the route
+    // can't use it up, and a start refused here leaves it to a
+    // later try.
+    take_login_start(&auth, &headers, ip)?;
     // Taken before anything else can fail: a failed attempt can't
     // leave the link to be completed later (for any provider) by
     // whoever holds the session.
     let link = take_external_link(&session).await?;
     flow = ExternalFlow::Link;
     link.check_age()?;
+    // Only at the provider it was begun for.
+    link.check_slug(&slug)?;
     let user_id = link.user_id;
 
     let (provider, built) =
@@ -459,7 +508,7 @@ fn auth_redirect(
   skip_all,
   fields(ip = ip.to_string(), slug)
 )]
-pub async fn external_callback<I: AuthImpl>(
+pub(crate) async fn external_callback<I: AuthImpl>(
   slug: String,
   RequestIp(ip): RequestIp,
   session: Session,
@@ -477,7 +526,14 @@ pub async fn external_callback<I: AuthImpl>(
       flow = ExternalFlow::Link;
     }
 
-    let (client_state, code) = query.open()?;
+    let StandardCallbackQuery {
+      state: client_state,
+      code,
+      error,
+    } = query;
+    let client_state = client_state
+      .context("Callback query does not contain state")
+      .status_code(StatusCode::UNAUTHORIZED)?;
 
     // Checked before the provider's client is loaded (which may
     // mean discovery requests) and without counting a failure: none
@@ -485,8 +541,18 @@ pub async fn external_callback<I: AuthImpl>(
     let provider = resolve_enabled_provider(&auth, &slug).await?;
 
     // The provider the url named, by its id: the slug may have
-    // changed while the login was in flight.
+    // changed while the login was in flight. And the state, also
+    // before the provider's error is looked at: anybody can send
+    // the browser here with an error, only the provider's answer to
+    // this login carries the state (RFC 6749 section 4.1.2.1).
     validate_callback(&login, &provider.id, &client_state)?;
+
+    if let Some(error) = error {
+      return Err(provider_error(&provider, &error));
+    }
+    let code = code
+      .context("Callback query does not contain code")
+      .status_code(StatusCode::UNAUTHORIZED)?;
 
     let built = load_provider_client(&auth, &provider).await?;
 
@@ -521,6 +587,35 @@ pub async fn external_callback<I: AuthImpl>(
   }
   .await;
   error_redirect(&auth, flow, res)
+}
+
+/// The error the provider answered the login with (RFC 6749 section
+/// 4.1.2.1), as the user is told: a fixed message by its code, never
+/// the text of the url, which the login page shows as the server's
+/// reason. The code is logged for the operator, as some are
+/// configuration errors (`invalid_scope`, `unauthorized_client`).
+fn provider_error(
+  provider: &ExternalLoginProvider,
+  error: &str,
+) -> mogh_error::Error {
+  let error = sanitize_text(error);
+  let message = if error == "access_denied" {
+    info!(
+      provider_id = provider.id,
+      provider = provider.name,
+      "Login was denied at the provider"
+    );
+    "Login was denied at the provider"
+  } else {
+    warn!(
+      provider_id = provider.id,
+      provider = provider.name,
+      error,
+      "Login provider answered the login with an error"
+    );
+    "Login was not completed at the provider"
+  };
+  anyhow!(message).status_code(StatusCode::UNAUTHORIZED)
 }
 
 /// The callback must be for the provider the login was started
@@ -637,13 +732,15 @@ async fn login_callback<I: AuthImpl>(
 }
 
 /// The username a new external user is signed up with, which passes
-/// [AuthImpl::validate_username] (the rule local users are held to):
+/// [AuthImpl::validate_username] (the rule local users are held to)
+/// and [AuthImpl::validate_new_username]:
 /// - the provider's name for the user, if it passes,
 /// - else that name reduced to the characters of the default rule
 ///   ([normalize_username]), if it passes,
 /// - else a name made from the provider's slug and random characters.
 ///
-/// A taken name gets a random suffix ([unique_username]).
+/// A taken name gets a random suffix ([unique_username]), and has to
+/// pass with it.
 async fn signup_username<I: AuthImpl>(
   auth: &I,
   provider: &ExternalLoginProvider,
@@ -652,12 +749,12 @@ async fn signup_username<I: AuthImpl>(
   let normalized = normalize_username(&provider_username);
   for candidate in [provider_username, normalized] {
     if candidate.is_empty()
-      || auth.validate_username(&candidate).is_err()
+      || check_new_username(auth, &candidate).is_err()
     {
       continue;
     }
     let username = unique_username(auth, candidate).await?;
-    if auth.validate_username(&username).is_ok() {
+    if check_new_username(auth, &username).is_ok() {
       return Ok(username);
     }
   }
@@ -667,12 +764,12 @@ async fn signup_username<I: AuthImpl>(
     random_string(8)
   );
   let username = unique_username(auth, generated).await?;
-  // The app's rule refuses even the generated name.
-  if let Err(e) = auth.validate_username(&username) {
+  // The app's rules refuse even the generated name.
+  if let Err(e) = check_new_username(auth, &username) {
     return Err(
       e.error
         .context(
-          "No username for the new user passes 'validate_username'",
+          "No username for the new user passes 'validate_username' and 'validate_new_username'",
         )
         .status_code(StatusCode::INTERNAL_SERVER_ERROR),
     );
@@ -761,10 +858,13 @@ async fn link_callback<I: AuthImpl>(
 #[cfg(test)]
 mod tests {
   use axum::response::IntoResponse;
-  use mogh_error::AddStatusCode as _;
 
   use super::*;
-  use crate::{LoginKind, provider::external::ExternalLoginInfo};
+  use crate::{
+    LoginKind,
+    provider::external::ExternalLoginInfo,
+    test_support::{session, stub_auth_impl},
+  };
 
   fn location(redirect: Redirect) -> String {
     redirect
@@ -833,6 +933,10 @@ mod tests {
     error_redirect: Option<&'static str>,
     /// Refused by the app's 'validate_username', on top of the default rule.
     rejected_usernames: Vec<&'static str>,
+    /// Refused by the app's 'validate_new_username'.
+    refused_new_usernames: Option<fn(&str) -> bool>,
+    /// Usernames other users have.
+    taken_usernames: Vec<&'static str>,
     calls: Arc<std::sync::Mutex<Calls>>,
   }
 
@@ -885,6 +989,22 @@ mod tests {
         .status_code(StatusCode::BAD_REQUEST)
     }
 
+    fn validate_new_username(
+      &self,
+      username: &str,
+    ) -> mogh_error::Result<()> {
+      if self
+        .refused_new_usernames
+        .is_some_and(|refused| refused(username))
+      {
+        return Err(
+          anyhow!("Username is reserved")
+            .status_code(StatusCode::BAD_REQUEST),
+        );
+      }
+      Ok(())
+    }
+
     fn no_users_exist(
       &self,
     ) -> crate::DynFuture<mogh_error::Result<bool>> {
@@ -900,11 +1020,21 @@ mod tests {
 
     fn find_user_with_username(
       &self,
-      _username: String,
+      username: String,
     ) -> crate::DynFuture<
       mogh_error::Result<Option<crate::user::BoxAuthUser>>,
     > {
-      Box::pin(async { Ok(None) })
+      let user = self
+        .taken_usernames
+        .contains(&username.as_str())
+        .then(|| {
+          Box::new(TestUser {
+            id: format!("id-of-{username}"),
+            cidr_whitelist: Vec::new(),
+            enabled: true,
+          }) as crate::user::BoxAuthUser
+        });
+      Box::pin(async { Ok(user) })
     }
 
     fn record_login(
@@ -1003,27 +1133,9 @@ mod tests {
       if self.username_locked { &LOCKED } else { &[] }
     }
 
-    fn handle_request_authentication(
-      &self,
-      _auth: crate::RequestAuthentication,
-      _ip: IpAddr,
-      _require_user_enabled: bool,
-      _req: axum::extract::Request,
-    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-    {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
-    }
-
-    fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
-      // The sign-up / login paths stamp the session expiry on the
-      // login record through it.
-      static PROVIDER: std::sync::LazyLock<
-        crate::provider::jwt::JwtProvider,
-      > = std::sync::LazyLock::new(|| {
-        crate::provider::jwt::JwtProvider::new(b"secret", 60_000)
-      });
-      &PROVIDER
-    }
+    // The sign-up / login paths stamp the session expiry on the
+    // login record through jwt_provider.
+    stub_auth_impl!(handle_request_authentication, jwt_provider);
   }
 
   const IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
@@ -1078,14 +1190,6 @@ mod tests {
       },
       "octocat",
     )
-  }
-
-  fn session() -> Session {
-    Session(tower_sessions::Session::new(
-      None,
-      Arc::new(tower_sessions::MemoryStore::default()),
-      None,
-    ))
   }
 
   async fn run_login(
@@ -1526,7 +1630,7 @@ mod tests {
     let session = session_on(&store, None);
     // As BeginExternalLoginLink leaves it.
     session
-      .insert_external_link_user_id("user-1")
+      .insert_external_link_user_id("user-1", "unknown")
       .await
       .unwrap();
     session.0.save().await.unwrap();
@@ -1536,6 +1640,7 @@ mod tests {
       "unknown".to_string(),
       RequestIp(IP),
       session.clone(),
+      HeaderMap::new(),
     )
     .await
     .unwrap_err();
@@ -1560,7 +1665,7 @@ mod tests {
       .as_secs();
     let expired = now - Session::MAX_EXTERNAL_LINK_AGE.as_secs() - 60;
     session
-      .insert_external_link("user-1", expired)
+      .insert_external_link("user-1", "github", expired)
       .await
       .unwrap();
     session.0.save().await.unwrap();
@@ -1570,6 +1675,7 @@ mod tests {
       "github".to_string(),
       RequestIp(IP),
       session.clone(),
+      HeaderMap::new(),
     )
     .await
     .unwrap_err();
@@ -1584,13 +1690,14 @@ mod tests {
 
     // With the error redirect, to the page of the link.
     session
-      .insert_external_link("user-1", expired)
+      .insert_external_link("user-1", "github", expired)
       .await
       .unwrap();
     let redirect = external_link::<LinkErrorAuth>(
       "github".to_string(),
       RequestIp(IP),
       session.clone(),
+      HeaderMap::new(),
     )
     .await
     .unwrap();
@@ -1618,33 +1725,11 @@ mod tests {
     fn external_login_error_redirect(&self) -> Option<&str> {
       Some("https://example.com/login")
     }
-    fn get_user(
-      &self,
-      _user_id: String,
-    ) -> crate::DynFuture<mogh_error::Result<crate::user::BoxAuthUser>>
-    {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
-    }
-    fn handle_request_authentication(
-      &self,
-      _auth: crate::RequestAuthentication,
-      _ip: IpAddr,
-      _require_user_enabled: bool,
-      _req: axum::extract::Request,
-    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-    {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
-    }
-    fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
-      // The sign-up / login paths stamp the session expiry on the
-      // login record through it.
-      static PROVIDER: std::sync::LazyLock<
-        crate::provider::jwt::JwtProvider,
-      > = std::sync::LazyLock::new(|| {
-        crate::provider::jwt::JwtProvider::new(b"secret", 60_000)
-      });
-      &PROVIDER
-    }
+    stub_auth_impl!(
+      get_user,
+      handle_request_authentication,
+      jwt_provider
+    );
   }
 
   /// An app which shows failed logins on its login page, but has no
@@ -1662,33 +1747,11 @@ mod tests {
     fn external_login_error_redirect(&self) -> Option<&str> {
       Some("https://example.com/login")
     }
-    fn get_user(
-      &self,
-      _user_id: String,
-    ) -> crate::DynFuture<mogh_error::Result<crate::user::BoxAuthUser>>
-    {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
-    }
-    fn handle_request_authentication(
-      &self,
-      _auth: crate::RequestAuthentication,
-      _ip: IpAddr,
-      _require_user_enabled: bool,
-      _req: axum::extract::Request,
-    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-    {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
-    }
-    fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
-      // The sign-up / login paths stamp the session expiry on the
-      // login record through it.
-      static PROVIDER: std::sync::LazyLock<
-        crate::provider::jwt::JwtProvider,
-      > = std::sync::LazyLock::new(|| {
-        crate::provider::jwt::JwtProvider::new(b"secret", 60_000)
-      });
-      &PROVIDER
-    }
+    stub_auth_impl!(
+      get_user,
+      handle_request_authentication,
+      jwt_provider
+    );
   }
 
   /// Anyone can request the link routes. Without a link begun on the
@@ -1701,6 +1764,7 @@ mod tests {
         slug.to_string(),
         RequestIp(IP),
         session(),
+        HeaderMap::new(),
       )
       .await
       .unwrap();
@@ -1764,6 +1828,7 @@ mod tests {
       "oidc".to_string(),
       RequestIp(IP),
       session.clone(),
+      HeaderMap::new(),
     )
     .await
     .unwrap();
@@ -1854,26 +1919,7 @@ mod tests {
         }) as crate::user::BoxAuthUser)
       })
     }
-    fn handle_request_authentication(
-      &self,
-      _auth: crate::RequestAuthentication,
-      _ip: IpAddr,
-      _require_user_enabled: bool,
-      _req: axum::extract::Request,
-    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-    {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
-    }
-    fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
-      // The sign-up / login paths stamp the session expiry on the
-      // login record through it.
-      static PROVIDER: std::sync::LazyLock<
-        crate::provider::jwt::JwtProvider,
-      > = std::sync::LazyLock::new(|| {
-        crate::provider::jwt::JwtProvider::new(b"secret", 60_000)
-      });
-      &PROVIDER
-    }
+    stub_auth_impl!(handle_request_authentication, jwt_provider);
   }
 
   /// A user disabled after beginning a link can't start it: nothing
@@ -1882,13 +1928,14 @@ mod tests {
   async fn test_link_start_is_refused_for_a_disabled_user() {
     let session = session();
     session
-      .insert_external_link_user_id("user-1")
+      .insert_external_link_user_id("user-1", "flow-link")
       .await
       .unwrap();
     let redirect = external_link::<DisabledUserAuth>(
       "flow-link".to_string(),
       RequestIp(IP),
       session.clone(),
+      HeaderMap::new(),
     )
     .await
     .unwrap();
@@ -1999,6 +2046,49 @@ mod tests {
     }
   }
 
+  /// External sign ups are held to the app's rule for new usernames
+  /// too, the names with a random suffix included: a refused name
+  /// moves on to the next one, and to a generated name. A refused
+  /// generated name fails the sign up.
+  #[tokio::test]
+  async fn test_signup_username_passes_validate_new_username() {
+    let auth = TestAuth {
+      // Reserved, and the suffixed form of a taken name.
+      refused_new_usernames: Some(|name| {
+        name == "System" || name.starts_with("octocat-")
+      }),
+      taken_usernames: vec!["octocat"],
+      ..Default::default()
+    };
+    for provider_username in ["System", "octocat"] {
+      let username =
+        signup_username_of(&auth, provider_username).await;
+      assert!(
+        username.starts_with("flow-names-"),
+        "{provider_username}: {username}"
+      );
+    }
+    assert_eq!(signup_username_of(&auth, "Systems").await, "Systems");
+
+    let auth = TestAuth {
+      refused_new_usernames: Some(|_| true),
+      ..Default::default()
+    };
+    let err = signup_username(
+      &auth,
+      &github("flow-names", true, "secret"),
+      "anybody".to_string(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+      format!("{:#}", err.error).contains("validate_new_username"),
+      "{:#}",
+      err.error
+    );
+  }
+
   #[tokio::test]
   async fn test_signup_uses_the_valid_username() {
     let provider = github("flow-a", true, "secret");
@@ -2027,6 +2117,202 @@ mod tests {
   /// Axum panics on conflicting or malformed routes when the
   /// router is built, which covers the reserved id paths
   /// living next to `/external/{provider_id}`.
+  /// One provider, and 2 login starts per client, for the tests of
+  /// the start limit.
+  struct StartLimitAuth;
+
+  impl AuthImpl for StartLimitAuth {
+    fn new() -> Self {
+      StartLimitAuth
+    }
+    fn host(&self) -> &str {
+      "https://example.com"
+    }
+    fn static_external_providers(
+      &self,
+    ) -> Vec<ExternalLoginProvider> {
+      vec![github("start-limit", true, "secret")]
+    }
+    fn login_start_limiter(
+      &self,
+    ) -> &crate::login_start::LoginStartLimiter {
+      static LIMITER: std::sync::LazyLock<
+        crate::login_start::LoginStartLimiter,
+      > = std::sync::LazyLock::new(|| {
+        crate::login_start::LoginStartLimiter::new(
+          2,
+          1,
+          std::time::Duration::from_secs(60),
+        )
+      });
+      &LIMITER
+    }
+    fn get_user(
+      &self,
+      user_id: String,
+    ) -> crate::DynFuture<mogh_error::Result<crate::user::BoxAuthUser>>
+    {
+      let user = Box::new(TestUser {
+        id: user_id,
+        cidr_whitelist: Vec::new(),
+        enabled: true,
+      }) as crate::user::BoxAuthUser;
+      Box::pin(async { Ok(user) })
+    }
+    stub_auth_impl!(handle_request_authentication, jwt_provider);
+  }
+
+  async fn start_login(
+    ip: IpAddr,
+    session: Session,
+    headers: HeaderMap,
+  ) -> mogh_error::Result<Redirect> {
+    external_login::<StartLimitAuth>(
+      "start-limit".to_string(),
+      RequestIp(ip),
+      session,
+      headers,
+      Query(RedirectQuery { redirect: None }),
+    )
+    .await
+  }
+
+  /// Each start takes one of the client's: past them a start is
+  /// refused (`429`, `Retry-After`) and stores nothing on the
+  /// session. A request another site embedded (eg. as an image) is
+  /// refused before it takes one. Other clients have their own.
+  #[tokio::test]
+  async fn test_login_starts_are_limited_per_client() {
+    let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 7, 7, 1));
+    let mut embedded = HeaderMap::new();
+    for (name, value) in [
+      ("sec-fetch-site", "cross-site"),
+      ("sec-fetch-mode", "no-cors"),
+      ("sec-fetch-dest", "image"),
+    ] {
+      embedded.insert(name, value.parse().unwrap());
+    }
+    for _ in 0..5 {
+      let session = session();
+      let err = start_login(ip, session.clone(), embedded.clone())
+        .await
+        .unwrap_err();
+      assert_eq!(err.status, StatusCode::FORBIDDEN);
+      assert!(session.retrieve_external_login().await.is_err());
+    }
+    for _ in 0..2 {
+      let session = session();
+      let redirect =
+        start_login(ip, session.clone(), HeaderMap::new())
+          .await
+          .unwrap();
+      assert!(location(redirect).starts_with("https://github.com/"));
+      assert!(session.retrieve_external_login().await.is_ok());
+    }
+    let refused = session();
+    let err = start_login(ip, refused.clone(), HeaderMap::new())
+      .await
+      .unwrap_err();
+    assert_eq!(err.status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+      err
+        .headers
+        .as_ref()
+        .is_some_and(|headers| headers.contains_key("retry-after"))
+    );
+    assert!(
+      err.error.to_string().starts_with("Too many logins started")
+    );
+    assert!(refused.retrieve_external_login().await.is_err());
+    // Not a server error, so not logged by every refused request.
+    assert!(!is_logged_here(&err));
+
+    let other = IpAddr::V4(std::net::Ipv4Addr::new(10, 7, 7, 2));
+    let _started = start_login(other, session(), HeaderMap::new())
+      .await
+      .unwrap();
+  }
+
+  /// A link start takes one of the client's starts as well. Refused,
+  /// it leaves the link begun on the session for a later try.
+  #[tokio::test]
+  async fn test_a_refused_link_start_keeps_the_link() {
+    let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 7, 7, 3));
+    for _ in 0..2 {
+      let _started =
+        start_login(ip, session(), HeaderMap::new()).await.unwrap();
+    }
+    let session = session();
+    session
+      .insert_external_link_user_id("user-1", "start-limit")
+      .await
+      .unwrap();
+    let err = external_link::<StartLimitAuth>(
+      "start-limit".to_string(),
+      RequestIp(ip),
+      session.clone(),
+      HeaderMap::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(session.retrieve_external_link().await.is_ok());
+  }
+
+  /// Anybody can send a browser to the callback with an `error`:
+  /// only one carrying the state of the login the session started is
+  /// the provider's answer, others are a state mismatch. The answer is
+  /// reported with a fixed message by its code, never its text, which
+  /// the login page would show as the server's reason.
+  #[tokio::test]
+  async fn test_callback_error_is_checked_against_the_state() {
+    let callback = |state: Option<&str>, error: &str| {
+      let query = StandardCallbackQuery {
+        state: state.map(String::from),
+        code: None,
+        error: Some(error.to_string()),
+      };
+      async move {
+        let session = session();
+        session
+          .insert_external_login(&session_login("start-limit"))
+          .await
+          .unwrap();
+        external_callback::<StartLimitAuth>(
+          "start-limit".to_string(),
+          RequestIp(IP),
+          session,
+          Query(query),
+        )
+        .await
+        .unwrap_err()
+      }
+    };
+    let made_up = "Your account is locked, call +1-555-0100";
+    for state in [Some("forged"), Some("")] {
+      let err = callback(state, made_up).await;
+      assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+      assert_eq!(format!("{:#}", err.error), "State mismatch");
+    }
+    let err = callback(None, made_up).await;
+    assert!(format!("{:#}", err.error).contains("contain state"));
+
+    let err = callback(Some("expected-state"), "access_denied").await;
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+      format!("{:#}", err.error),
+      "Login was denied at the provider"
+    );
+    for error in [made_up, "invalid_scope"] {
+      let err = callback(Some("expected-state"), error).await;
+      assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+      assert_eq!(
+        format!("{:#}", err.error),
+        "Login was not completed at the provider"
+      );
+    }
+  }
+
   #[test]
   fn test_router_builds_without_route_conflicts() {
     let _ = router::<TestAuth>();

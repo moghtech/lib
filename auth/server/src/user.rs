@@ -1,4 +1,4 @@
-use mogh_auth_client::passkey::Passkey;
+use crate::passkey::Passkey;
 
 /// Implemented for app specific User struct.
 pub trait AuthUserImpl: Send + Sync + 'static {
@@ -47,6 +47,25 @@ pub trait AuthUserImpl: Send + Sync + 'static {
   /// so users can change it (`UpdateExternalSkip2fa`).
   fn external_skip_2fa(&self) -> bool {
     true
+  }
+
+  /// The ids of the login providers linked to the user
+  /// ([AuthImpl::link_external_login][crate::AuthImpl::link_external_login],
+  /// or at sign up), or `None` when the app doesn't tell (the
+  /// default).
+  ///
+  /// With them, the auth management api refuses to remove the user's
+  /// only way to log in, `400 Cannot remove the only way to log in`:
+  /// `UnlinkLocalLogin` without a linked provider, `UnlinkExternalLogin`
+  /// of the only one without a password ([Self::hashed_password]). A
+  /// user doing it from a stale tab, or a client sending it directly,
+  /// would lock themselves out until an admin steps in. With `None`
+  /// nothing is checked: the app refuses it in
+  /// [AuthImpl::unlink_local_login][crate::AuthImpl::unlink_local_login] /
+  /// [unlink_external_login][crate::AuthImpl::unlink_external_login],
+  /// or doesn't.
+  fn external_login_provider_ids(&self) -> Option<&[String]> {
+    None
   }
 
   /// Whether the user is enabled. Disabled users are refused the whole

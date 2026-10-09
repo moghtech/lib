@@ -1,18 +1,22 @@
 use std::sync::Arc;
 
-use axum::{Router, extract::Path, routing::post};
+use axum::{Router, extract::Path, http::HeaderMap, routing::post};
 use mogh_auth_client::api::{NoData, manage::*};
 use mogh_error::{AddStatusCodeError as _, Json};
 use mogh_resolver::Resolve;
 use serde::{Deserialize, Serialize};
-use strum::{Display, EnumDiscriminants};
+use strum::{Display, EnumDiscriminants, IntoStaticStr};
 use tracing::debug;
 use typeshare::typeshare;
 use uuid::Uuid;
 
 use crate::{
-  AuthImpl, BoxAuthImpl,
+  AuthImpl,
   api::{Variant, parse_variant_request},
+  middleware::{
+    AuthenticatedAt, UserExtractor, check_login_age,
+    extract_request_jwt,
+  },
   session::Session,
   user::BoxAuthUser,
 };
@@ -27,12 +31,36 @@ pub mod totp;
 
 pub(crate) mod middleware;
 
-use middleware::{AuthenticatedAt, UserExtractor, attach_user};
+use middleware::attach_user;
 
 pub struct ManageArgs {
-  auth: BoxAuthImpl,
+  /// Shared, so work which has to complete even when the request is
+  /// dropped can own it in a task (a trusted issuer update).
+  auth: Arc<dyn AuthImpl>,
   user: Arc<BoxAuthUser>,
   session: Session,
+  /// The session token the request authenticated with: kept valid
+  /// when the request changes how the user logs in
+  /// ([AuthImpl::credentials_changed]).
+  jwt: Option<String>,
+}
+
+impl ManageArgs {
+  /// [AuthImpl::credentials_changed] for the user of the request,
+  /// keeping its session.
+  async fn credentials_changed(
+    &self,
+    change: crate::CredentialChange,
+  ) -> mogh_error::Result<()> {
+    self
+      .auth
+      .credentials_changed(
+        self.user.id().to_string(),
+        change,
+        self.jwt.clone(),
+      )
+      .await
+  }
 }
 
 #[typeshare]
@@ -42,7 +70,10 @@ pub struct ManageArgs {
 #[args(ManageArgs)]
 #[response(mogh_error::Response)]
 #[error(mogh_error::Error)]
-#[strum_discriminants(name(ManageRequestMethod), derive(Display))]
+#[strum_discriminants(
+  name(ManageRequestMethod),
+  derive(Display, IntoStaticStr)
+)]
 #[serde(tag = "type", content = "params")]
 #[allow(clippy::enum_variant_names, clippy::large_enum_variant)]
 pub enum ManageRequest {
@@ -93,21 +124,25 @@ async fn variant_handler<I: AuthImpl>(
   session: Session,
   user: UserExtractor,
   authenticated_at: AuthenticatedAt,
+  headers: HeaderMap,
   Path(Variant { variant }): Path<Variant>,
   Json(params): Json<serde_json::Value>,
 ) -> mogh_error::Result<axum::response::Response> {
   let req: ManageRequest = parse_variant_request(variant, params)?;
-  handler::<I>(session, user, authenticated_at, Json(req)).await
+  handler::<I>(session, user, authenticated_at, headers, Json(req))
+    .await
 }
 
 async fn handler<I: AuthImpl>(
   session: Session,
   UserExtractor(user): UserExtractor,
   AuthenticatedAt(authenticated_at): AuthenticatedAt,
+  headers: HeaderMap,
   Json(request): Json<ManageRequest>,
 ) -> mogh_error::Result<axum::response::Response> {
   let req_id = Uuid::new_v4();
   let method: ManageRequestMethod = (&request).into();
+  crate::context::set_request_method(method.into());
   let username = user.username();
   let user_id = user.id();
 
@@ -133,10 +168,20 @@ async fn handler<I: AuthImpl>(
     &request,
   )?;
 
+  // Held until the flow completes or expires, like the session of
+  // a login start: limited per user (AuthImpl::login_start_limiter).
+  if begins_login_session(&request) {
+    auth.login_start_limiter().take_user_start(user_id)?;
+  }
+  // The request authenticated with it, a jwt takes precedence over
+  // other credentials.
+  let jwt = extract_request_jwt(&headers).ok().flatten();
+
   let args = ManageArgs {
-    auth: Box::new(auth),
+    auth: Arc::new(auth),
     user,
     session,
+    jwt,
   };
 
   let res = request.resolve(&args).await;
@@ -152,6 +197,17 @@ async fn handler<I: AuthImpl>(
   }
 
   res.map(|res| res.0)
+}
+
+/// The requests which store a flow on the session, held until it
+/// completes or expires.
+fn begins_login_session(request: &ManageRequest) -> bool {
+  matches!(
+    request,
+    ManageRequest::BeginExternalLoginLink(_)
+      | ManageRequest::BeginPasskeyEnrollment(_)
+      | ManageRequest::BeginTotpEnrollment(_)
+  )
 }
 
 /// Workloads only act through the short lived tokens they get by token
@@ -258,6 +314,10 @@ fn check_credential_kind(
 /// ([JwtProvider::validation][crate::provider::jwt::JwtProvider::validation]):
 /// a token another instance with a clock running ahead issued a
 /// moment ago is a recent login, not one from the future.
+///
+/// The check an app's own api makes with
+/// [require_recent_login][crate::middleware::require_recent_login],
+/// for the requests of this api which need it.
 fn check_recent_login(
   window_secs: u64,
   leeway_secs: u64,
@@ -265,35 +325,10 @@ fn check_recent_login(
   now: u64,
   request: &ManageRequest,
 ) -> mogh_error::Result<()> {
-  if window_secs == 0 || !requires_recent_login(request) {
+  if !requires_recent_login(request) {
     return Ok(());
   }
-  let Some(at) = authenticated_at else {
-    return Ok(());
-  };
-  // Token validation already refuses tokens issued further in the
-  // future than the leeway, a token from the future can't count as
-  // recent forever here (`saturating_sub` makes its age zero).
-  if at <= now.saturating_add(leeway_secs)
-    && now.saturating_sub(at) <= window_secs
-  {
-    return Ok(());
-  }
-  Err(
-    anyhow::anyhow!(
-      "{REAUTHENTICATION_REQUIRED}: log in again to continue, this needs a login within the last {}",
-      format_window(window_secs)
-    )
-    .status_code(axum::http::StatusCode::FORBIDDEN),
-  )
-}
-
-fn format_window(secs: u64) -> String {
-  if secs >= 120 && secs.is_multiple_of(60) {
-    format!("{} minutes", secs / 60)
-  } else {
-    format!("{secs} seconds")
-  }
+  check_login_age(window_secs, leeway_secs, authenticated_at, now)
 }
 
 impl Resolve<ManageArgs> for GetUserId {
@@ -359,9 +394,9 @@ mod tests {
       ManageRequest::UpdatePassword(UpdatePassword {
         password: "password".into(),
       }),
-      ManageRequest::BeginExternalLoginLink(
-        BeginExternalLoginLink {},
-      ),
+      ManageRequest::BeginExternalLoginLink(BeginExternalLoginLink {
+        slug: "github".into(),
+      }),
       ManageRequest::BeginPasskeyEnrollment(
         BeginPasskeyEnrollment {},
       ),
@@ -589,11 +624,185 @@ mod tests {
     }
   }
 
-  #[test]
-  fn test_format_window() {
-    assert_eq!(format_window(900), "15 minutes");
-    assert_eq!(format_window(90), "90 seconds");
-    assert_eq!(format_window(1), "1 seconds");
+  /// The changes [ChangesAuth] was told about.
+  static CHANGES: std::sync::Mutex<
+    Vec<(String, crate::CredentialChange, Option<String>)>,
+  > = std::sync::Mutex::new(Vec::new());
+
+  /// Stores every credential change, and remembers what it is told.
+  struct ChangesAuth;
+
+  impl AuthImpl for ChangesAuth {
+    fn new() -> Self {
+      ChangesAuth
+    }
+    fn app_name(&self) -> &'static str {
+      "Test"
+    }
+    fn local_auth_bcrypt_cost(&self) -> u32 {
+      4
+    }
+    fn get_user(
+      &self,
+      _: String,
+    ) -> crate::DynFuture<mogh_error::Result<BoxAuthUser>> {
+      unimplemented!()
+    }
+    fn handle_request_authentication(
+      &self,
+      _: crate::RequestAuthentication,
+      _: std::net::IpAddr,
+      _: bool,
+      _: axum::extract::Request,
+    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
+    {
+      unimplemented!()
+    }
+    fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
+      unimplemented!()
+    }
+    fn update_user_password(
+      &self,
+      _: String,
+      _: String,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      Box::pin(async { Ok(()) })
+    }
+    fn update_user_stored_totp(
+      &self,
+      _: String,
+      _: String,
+      _: Vec<String>,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      Box::pin(async { Ok(()) })
+    }
+    fn remove_user_stored_totp(
+      &self,
+      _: String,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      Box::pin(async { Ok(()) })
+    }
+    fn update_user_stored_passkey(
+      &self,
+      _: String,
+      _: Option<crate::Passkey>,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      Box::pin(async { Ok(()) })
+    }
+    fn unlink_local_login(
+      &self,
+      _: String,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      Box::pin(async { Ok(()) })
+    }
+    fn unlink_external_login(
+      &self,
+      _: String,
+      _: String,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      Box::pin(async { Ok(()) })
+    }
+    fn credentials_changed(
+      &self,
+      user_id: String,
+      change: crate::CredentialChange,
+      kept_jwt: Option<String>,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      CHANGES.lock().unwrap().push((user_id, change, kept_jwt));
+      Box::pin(async { Ok(()) })
+    }
+  }
+
+  /// Once a change of how the user logs in is stored, the app is told,
+  /// with the session to keep. A refused change tells nothing.
+  #[tokio::test]
+  async fn test_credential_changes_are_reported() {
+    use crate::CredentialChange;
+    let args = ManageArgs {
+      auth: Arc::new(ChangesAuth),
+      user: Arc::new(Box::new(TestUser { workload: false })),
+      session: Session(tower_sessions::Session::new(
+        None,
+        Arc::new(tower_sessions::MemoryStore::default()),
+        None,
+      )),
+      jwt: Some(String::from("the-session")),
+    };
+    let reported = || {
+      std::mem::take(&mut *CHANGES.lock().unwrap())
+        .into_iter()
+        .map(|(user_id, change, kept)| {
+          assert_eq!(user_id, "id");
+          assert_eq!(kept.as_deref(), Some("the-session"));
+          change
+        })
+        .collect::<Vec<_>>()
+    };
+
+    // Refused: nothing changed.
+    assert!(
+      UpdatePassword {
+        password: "short".into()
+      }
+      .resolve(&args)
+      .await
+      .is_err()
+    );
+    let totp = ChangesAuth.make_totp(vec![7; 20], None).unwrap();
+    args
+      .session
+      .insert_totp_enrollment("id", &totp)
+      .await
+      .unwrap();
+    assert!(
+      ConfirmTotpEnrollment {
+        code: "000000".into()
+      }
+      .resolve(&args)
+      .await
+      .is_err()
+    );
+    assert_eq!(reported(), []);
+
+    UpdatePassword {
+      password: "a-new-password".into(),
+    }
+    .resolve(&args)
+    .await
+    .unwrap();
+    args
+      .session
+      .insert_totp_enrollment("id", &totp)
+      .await
+      .unwrap();
+    ConfirmTotpEnrollment {
+      code: totp.generate_current().to_string(),
+    }
+    .resolve(&args)
+    .await
+    .unwrap();
+    UnenrollTotp {}.resolve(&args).await.unwrap();
+    UnenrollPasskey {}.resolve(&args).await.unwrap();
+    UnlinkLocalLogin {}.resolve(&args).await.unwrap();
+    UnlinkExternalLogin {
+      provider_id: "github".into(),
+    }
+    .resolve(&args)
+    .await
+    .unwrap();
+    assert_eq!(
+      reported(),
+      [
+        CredentialChange::Password,
+        CredentialChange::TotpEnrolled,
+        CredentialChange::TotpUnenrolled,
+        CredentialChange::PasskeyUnenrolled,
+        CredentialChange::LocalLoginUnlinked,
+        CredentialChange::ExternalLoginUnlinked {
+          provider_id: "github".into()
+        },
+      ]
+    );
   }
 
   #[test]

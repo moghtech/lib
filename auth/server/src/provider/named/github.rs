@@ -591,6 +591,28 @@ mod tests {
     );
   }
 
+  /// Github's responses are read up to a limit as well.
+  #[tokio::test]
+  async fn test_oversized_responses_are_not_read() {
+    for url in crate::provider::oversized_servers().await {
+      let provider = test_provider().with_base_urls(&url, &url);
+      let (_, verifier) = challenge();
+      let err = match tokio::time::timeout(
+        Duration::from_secs(10),
+        provider.get_access_token("code", &verifier),
+      )
+      .await
+      .expect("the read must stop at the limit")
+      {
+        Ok(_) => panic!("an oversized answer must fail"),
+        Err(e) => e,
+      };
+      let message = format!("{:#}", err.error);
+      assert!(message.contains("larger than"), "{message}");
+      assert_no_secret(&err, &url);
+    }
+  }
+
   #[tokio::test]
   async fn test_token_and_user() {
     let github = mock::spawn(

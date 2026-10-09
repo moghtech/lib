@@ -6,11 +6,13 @@ use std::{
 use anyhow::{Context as _, anyhow};
 use jsonwebtoken::{
   Algorithm, DecodingKey, EncodingKey, Header, Validation, decode,
-  encode,
+  encode, errors::ErrorKind,
 };
 use mogh_auth_client::api::login::JwtResponse;
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
+
+use crate::rand::random_string;
 
 static DEFAULT_HEADER: LazyLock<Header> =
   LazyLock::new(Default::default);
@@ -26,12 +28,20 @@ pub const MIN_SECRET_BYTES: usize = 32;
 /// JWT clock skew tolerance, in seconds.
 const JWT_CLOCK_SKEW_TOLERANCE_SECS: u64 = 10;
 
+/// The length of the random `jti` of a token
+/// ([BorrowedJwtClaims::jti]): alphanumeric, about 131 bits.
+const JTI_LENGTH: usize = 22;
+
 /// The claims of an app token.
 ///
 /// `iat` / `exp` / `auth_time` are unix timestamps in **seconds**, as
 /// RFC 7519 defines them. Tokens issued before 4.0 carried
 /// milliseconds, and are rejected (they would read as issued in the
 /// far future).
+///
+/// Tokens also carry a random `jti` ([BorrowedJwtClaims::jti]),
+/// which is not read here: nothing checks it, and tokens issued
+/// before 8.0 have none.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct JwtClaims {
   /// Client identifier, eg user id
@@ -84,6 +94,42 @@ pub struct BorrowedJwtClaims<'a> {
   /// When the user authenticated, see [JwtClaims::auth_time].
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub auth_time: Option<u64>,
+  /// A random id, new for every token [JwtProvider] encodes (RFC
+  /// 7519 section 4.1.7): the claims are otherwise the same for two
+  /// logins of one user in the same second (whole second `iat`), so
+  /// they would be one token, and an app keeping one session (by
+  /// its hash, see
+  /// [AuthImpl::credentials_changed][crate::AuthImpl::credentials_changed])
+  /// would keep both. Not checked when a token is decoded.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub jti: Option<&'a str>,
+}
+
+/// A token [JwtProvider] encoded, and the expiry it carries.
+#[derive(Clone)]
+pub struct EncodedJwt {
+  /// The token.
+  pub jwt: String,
+  /// Its `exp`: when it expires, unix seconds. What the record of
+  /// the login which issued it says
+  /// ([Login::token_expires][crate::Login::token_expires]).
+  pub exp: u64,
+}
+
+/// The jwt is redacted.
+impl std::fmt::Debug for EncodedJwt {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("EncodedJwt")
+      .field("jwt", &"##############")
+      .field("exp", &self.exp)
+      .finish()
+  }
+}
+
+impl From<EncodedJwt> for JwtResponse {
+  fn from(EncodedJwt { jwt, .. }: EncodedJwt) -> JwtResponse {
+    JwtResponse { jwt }
+  }
 }
 
 pub struct JwtProvider {
@@ -167,7 +213,10 @@ impl JwtProvider {
 
   /// [Self::new], refusing a `secret` shorter than
   /// [MIN_SECRET_BYTES]. Apps should use this for the secret they are
-  /// configured with (or generate a random one when there is none).
+  /// configured with (or generate a random one when there is none),
+  /// at startup, and refuse to start on its error: it names the
+  /// minimum and the length of the secret, never the secret, so it
+  /// can be logged as it is (eg. `[FATAL] Invalid 'jwt_secret' | ...`).
   pub fn try_new(
     secret: &[u8],
     ttl_ms: u128,
@@ -230,8 +279,11 @@ impl JwtProvider {
   /// seconds: the `exp` an [encode_sub](Self::encode_sub) (or
   /// [encode_sub_with_auth_time](Self::encode_sub_with_auth_time),
   /// whose expiry also counts from the issue time) token carries.
-  /// For [Login::of](crate::Login::of), which runs just before the
-  /// token is encoded.
+  /// For [Login::of](crate::Login::of), which mostly runs just before
+  /// the token is encoded. Not for an external login completed at the
+  /// provider's callback: it is recorded there, and its token encoded
+  /// when it is redeemed, up to 2 minutes later or never (see
+  /// [Login::token_expires](crate::Login::token_expires)).
   pub fn default_expires_at(&self) -> anyhow::Result<u64> {
     self.expires_at(self.ttl_ms)
   }
@@ -257,7 +309,7 @@ impl JwtProvider {
   }
 
   /// Encodes a token for a user who just logged in.
-  pub fn encode_sub(&self, sub: &str) -> anyhow::Result<JwtResponse> {
+  pub fn encode_sub(&self, sub: &str) -> anyhow::Result<EncodedJwt> {
     self.encode(sub, self.ttl_ms, None)
   }
 
@@ -267,7 +319,7 @@ impl JwtProvider {
     &self,
     sub: &str,
     ttl_ms: u128,
-  ) -> anyhow::Result<JwtResponse> {
+  ) -> anyhow::Result<EncodedJwt> {
     self.encode(sub, ttl_ms, None)
   }
 
@@ -284,7 +336,7 @@ impl JwtProvider {
     &self,
     sub: &str,
     auth_time: u64,
-  ) -> anyhow::Result<JwtResponse> {
+  ) -> anyhow::Result<EncodedJwt> {
     self.encode(sub, self.ttl_ms, Some(auth_time))
   }
 
@@ -293,12 +345,13 @@ impl JwtProvider {
     sub: &str,
     ttl_ms: u128,
     auth_time: Option<u64>,
-  ) -> anyhow::Result<JwtResponse> {
+  ) -> anyhow::Result<EncodedJwt> {
     if self.secret_missing {
       return Err(anyhow!("No jwt secret is configured"));
     }
     let iat = unix_timestamp_secs()?;
     let exp = iat.saturating_add(ttl_secs(ttl_ms.min(self.ttl_ms)));
+    let jti = random_string(JTI_LENGTH);
     let claims = BorrowedJwtClaims {
       sub,
       iss: &self.iss,
@@ -306,10 +359,11 @@ impl JwtProvider {
       iat,
       exp,
       auth_time: auth_time.map(|auth_time| auth_time.min(iat)),
+      jti: Some(&jti),
     };
     let jwt = encode(self.header(), &claims, &self.encoding_key)
       .context("Failed at signing claim")?;
-    Ok(JwtResponse { jwt })
+    Ok(EncodedJwt { jwt, exp })
   }
 
   /// Decodes JWT, checks not expired, returns the claims 'sub', ie the User ID
@@ -321,6 +375,12 @@ impl JwtProvider {
   /// that it is not expired (with the leeway of [Self::validation],
   /// 10 seconds by default).
   /// The error never says which of these failed.
+  ///
+  /// A token which is authentic and only expired is refused with
+  /// the [NotAnAttempt][mogh_error::NotAnAttempt] marker (in the
+  /// error's chain): it is no guess, so the failure rate limiter
+  /// doesn't count it. Every tab or device still holding a token
+  /// past its expiry would otherwise lock out the ip they share.
   pub fn decode_claims(
     &self,
     jwt: &str,
@@ -332,7 +392,17 @@ impl JwtProvider {
     let claims =
       decode::<JwtClaims>(jwt, &self.decoding_key, self.validation())
         .map(|res| res.claims)
-        .map_err(|_| anyhow!("Invalid user credentials"))?;
+        .map_err(|e| {
+          let refused = anyhow!("Invalid user credentials");
+          // jsonwebtoken checks the expiry only once the signature
+          // verified (and the claims parsed): this app issued the
+          // token, it is just too old.
+          if matches!(e.kind(), ErrorKind::ExpiredSignature) {
+            anyhow::Error::new(mogh_error::NotAnAttempt(refused))
+          } else {
+            refused
+          }
+        })?;
 
     // Nothing legitimate is issued in the future. Most of all this
     // refuses tokens from before 4.0: their millisecond timestamps
@@ -392,6 +462,7 @@ mod tests {
         iat,
         exp,
         auth_time: None,
+        jti: None,
       },
       &EncodingKey::from_secret(secret),
     )
@@ -429,15 +500,28 @@ mod tests {
   #[test]
   fn test_encode_sub_sets_exp_from_ttl() {
     let provider = JwtProvider::new(SECRET, 60_000);
-    let jwt = provider.encode_sub("user-123").unwrap().jwt;
+    let encoded = provider.encode_sub("user-123").unwrap();
     let claims = decode::<JwtClaims>(
-      &jwt,
+      &encoded.jwt,
       &DecodingKey::from_secret(SECRET),
       provider.validation(),
     )
     .unwrap()
     .claims;
     assert_eq!(claims.exp, claims.iat + 60);
+    // The expiry the token carries, for the record of its login.
+    assert_eq!(encoded.exp, claims.exp);
+    for encoded in [
+      provider.encode_sub_with_ttl("user-123", 1_000).unwrap(),
+      provider
+        .encode_sub_with_auth_time("user-123", claims.iat - 600)
+        .unwrap(),
+    ] {
+      let exp = provider.decode_claims(&encoded.jwt).unwrap().exp;
+      assert_eq!(encoded.exp, exp);
+    }
+    // Never in a debug print.
+    assert!(!format!("{encoded:?}").contains(&encoded.jwt));
     assert_eq!(claims.iss, DEFAULT_ISS_AUD);
     assert_eq!(claims.aud, DEFAULT_ISS_AUD);
     // Seconds, as RFC 7519 defines the claims.
@@ -464,6 +548,47 @@ mod tests {
     let expired =
       encode_claims(SECRET, "user-123", now - 120, now - 20);
     assert!(provider.decode_sub(&expired).is_err());
+  }
+
+  fn is_uncounted(err: anyhow::Error) -> bool {
+    mogh_error::Error::from(err).is_uncounted()
+  }
+
+  /// An authentic token which only expired is no guess: refused
+  /// with the same message, uncounted by the failure rate limiter.
+  /// Every other refusal counts, expired or not.
+  #[test]
+  fn test_expired_authentic_tokens_are_not_counted() {
+    let provider = JwtProvider::new(SECRET, 60_000);
+    let now = now();
+    let expired =
+      encode_claims(SECRET, "user-123", now - 120, now - 20);
+    let err = provider.decode_claims(&expired).err().unwrap();
+    assert_eq!(format!("{err:#}"), "Invalid user credentials");
+    assert!(is_uncounted(err));
+    assert!(is_uncounted(provider.decode_sub(&expired).unwrap_err()));
+
+    for refused in [
+      // Forged, expired or not.
+      encode_claims(b"other-secret", "user-123", now - 120, now - 20),
+      encode_claims(b"other-secret", "user-123", now, now + 60),
+      // Authentic, but for another app.
+      encode_claims_iss_aud(
+        SECRET,
+        "user-123",
+        "other",
+        "other",
+        now,
+        now + 60,
+      ),
+      // Issued in the future.
+      encode_claims(SECRET, "user-123", now + 3_600, now + 7_200),
+      String::from("not-a-jwt"),
+    ] {
+      let err = provider.decode_claims(&refused).err().unwrap();
+      assert_eq!(err.to_string(), "Invalid user credentials");
+      assert!(!is_uncounted(err), "{refused}");
+    }
   }
 
   #[test]
@@ -502,6 +627,7 @@ mod tests {
         iat: now,
         exp: now + 60,
         auth_time: None,
+        jti: None,
       },
       &EncodingKey::from_secret(SECRET),
     )
@@ -673,6 +799,52 @@ mod tests {
     assert_eq!(claims.authenticated_at(), claims.iat);
   }
 
+  /// The `jti` of a token, from its payload.
+  fn jti(jwt: &str) -> Option<String> {
+    let payload = jwt.split('.').nth(1).unwrap();
+    let payload = data_encoding::BASE64URL_NOPAD
+      .decode(payload.as_bytes())
+      .unwrap();
+    let payload =
+      serde_json::from_slice::<serde_json::Value>(&payload).unwrap();
+    payload["jti"].as_str().map(String::from)
+  }
+
+  /// Two logins of one user in the same second are two tokens: a
+  /// session kept by its hash keeps only itself. The random `jti`
+  /// which makes them so is not read.
+  #[test]
+  fn test_tokens_of_one_second_are_distinct() {
+    let provider = JwtProvider::new(SECRET, 60_000);
+    let first = provider.encode_sub("user-123").unwrap().jwt;
+    let second = provider.encode_sub("user-123").unwrap().jwt;
+    assert_ne!(first, second);
+    let (first_claims, second_claims) = (
+      provider.decode_claims(&first).unwrap(),
+      provider.decode_claims(&second).unwrap(),
+    );
+    assert_eq!(first_claims.sub, second_claims.sub);
+    let first_jti = jti(&first).unwrap();
+    assert_eq!(first_jti.len(), JTI_LENGTH);
+    assert!(first_jti.chars().all(|c| c.is_ascii_alphanumeric()));
+    assert_ne!(Some(first_jti), jti(&second));
+    // Every encode sets one.
+    for jwt in [
+      provider.encode_sub_with_ttl("user-123", 1_000).unwrap().jwt,
+      provider
+        .encode_sub_with_auth_time("user-123", now() - 60)
+        .unwrap()
+        .jwt,
+    ] {
+      assert!(jti(&jwt).is_some());
+    }
+    // A token without one, as issued before, is accepted.
+    let now = now();
+    let without = encode_claims(SECRET, "user-123", now, now + 60);
+    assert_eq!(jti(&without), None);
+    assert_eq!(provider.decode_sub(&without).unwrap(), "user-123");
+  }
+
   #[test]
   fn test_authenticated_at_is_capped_at_issue_time() {
     let claims = |auth_time| JwtClaims {
@@ -704,6 +876,19 @@ mod tests {
   fn test_try_new_requires_a_long_secret() {
     for secret in [&b""[..], b"secret", &[7; MIN_SECRET_BYTES - 1]] {
       assert!(JwtProvider::try_new(secret, 60_000).is_err());
+    }
+    // Apps log the error when they refuse to start: it names the
+    // minimum, and never the secret.
+    for secret in ["hunter2", "hunter2-is-31-bytes-jwt-secret!"] {
+      assert!(secret.len() < MIN_SECRET_BYTES);
+      let Err(err) = JwtProvider::try_new(secret.as_bytes(), 60_000)
+      else {
+        panic!("a {} byte secret was accepted", secret.len());
+      };
+      let err = format!("{err:#}");
+      assert!(err.contains("at least 32 random bytes"), "{err}");
+      assert!(err.contains(&format!("{} bytes", secret.len())));
+      assert!(!err.contains("hunter2"), "{err}");
     }
     let provider =
       JwtProvider::try_new(&[7; MIN_SECRET_BYTES], 60_000).unwrap();

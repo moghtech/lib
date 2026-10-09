@@ -1,17 +1,20 @@
 use anyhow::{Context, anyhow};
+use axum::http::StatusCode;
 use mogh_auth_client::config::{
   NamedOauthConfig, TokenExchangeConfig,
 };
+use mogh_error::AddStatusCode as _;
 use openidconnect::{
   ClientId, ClientSecret, EndpointMaybeSet, EndpointNotSet,
   EndpointSet, IssuerUrl, Nonce, RedirectUrl,
   core::{CoreIdTokenClaims, CoreProviderMetadata},
-  reqwest as oidc_reqwest,
 };
 
 use crate::{
   provider::{
-    REQUEST_TIMEOUT, named::STATE_LENGTH, oidc::http_client,
+    REQUEST_TIMEOUT,
+    named::STATE_LENGTH,
+    oidc::{ProviderHttpClient, http_client, token_request_error},
     token_exchange::TokenVerificationKeys,
   },
   rand::random_string,
@@ -27,7 +30,7 @@ type GoogleOidcClient = openidconnect::core::CoreClient<
 >;
 
 pub struct GoogleProvider {
-  http_client: oidc_reqwest::Client,
+  http_client: ProviderHttpClient,
   oidc_client: GoogleOidcClient,
   client_id: String,
   redirect_uri: String,
@@ -86,7 +89,7 @@ impl GoogleProvider {
 
   /// Initialize the provider from already discovered metadata.
   fn from_metadata(
-    http_client: oidc_reqwest::Client,
+    http_client: ProviderHttpClient,
     redirect_uri: String,
     client_id: &str,
     client_secret: &str,
@@ -162,27 +165,35 @@ impl GoogleProvider {
     (state, nonce, redirect_url)
   }
 
+  /// Redeems the callback code, and verifies the ID token it gets
+  /// (signature, audience, nonce). A code or an ID token Google
+  /// refuses is the user's failed login (`401`), like at an OIDC
+  /// provider; Google refusing the app's configuration (its client
+  /// credentials) or not answering is a server error.
   pub async fn get_google_user(
     &self,
     code: String,
     nonce: String,
-  ) -> anyhow::Result<GoogleUser> {
+  ) -> mogh_error::Result<GoogleUser> {
     let token_response = self
       .oidc_client
-      .exchange_code(openidconnect::AuthorizationCode::new(code))?
+      .exchange_code(openidconnect::AuthorizationCode::new(code))
+      .context("Failed to exchange Google authorization code")?
       .request_async(&self.http_client)
       .await
-      .context("Failed to exchange Google authorization code")?;
+      .map_err(|e| token_request_error("Google", e))?;
 
     let id_token = token_response
       .extra_fields()
       .id_token()
       .context("Google did not return an ID token")?;
 
+    // The login can't be trusted, which is not a server error.
     let verifier = self.oidc_client.id_token_verifier();
     let claims = id_token
       .claims(&verifier, &Nonce::new(nonce))
-      .context("Failed to verify Google ID token")?;
+      .context("Failed to verify Google ID token")
+      .status_code(StatusCode::UNAUTHORIZED)?;
 
     Ok(GoogleUser::from_claims(claims))
   }
@@ -222,6 +233,85 @@ mod tests {
     stalled_server, token_exchange::test_tokens::metadata,
   };
 
+  /// The Google of the test metadata, with its token endpoint at
+  /// `token_url`.
+  fn google_at(token_url: &str) -> GoogleProvider {
+    GoogleProvider::from_metadata(
+      http_client("test", Duration::from_secs(10)).unwrap(),
+      "https://app.example.com/auth/google/callback".to_string(),
+      "client-id",
+      "client-secret",
+      metadata().set_token_endpoint(Some(
+        TokenUrl::new(format!("{token_url}/token")).unwrap(),
+      )),
+    )
+    .unwrap()
+  }
+
+  /// A code Google refuses, and an ID token which fails verification
+  /// (here its nonce), are the user's failed login: `401`, as for an
+  /// OIDC provider.
+  #[tokio::test]
+  async fn test_refused_logins_are_the_users() {
+    use crate::provider::{
+      answering_server, oidc::UsernameAdditionalClaims,
+      token_exchange::test_tokens::TestToken,
+    };
+    use axum::http::StatusCode;
+
+    let refused = answering_server(
+      StatusCode::BAD_REQUEST,
+      serde_json::json!({ "error": "invalid_grant" }).to_string(),
+    )
+    .await;
+    let Err(err) = google_at(&refused)
+      .get_google_user("made-up".to_string(), "nonce".to_string())
+      .await
+    else {
+      panic!("a refused code must fail the login");
+    };
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    assert!(format!("{:#}", err.error).contains("invalid_grant"));
+
+    let id_token = TestToken {
+      audiences: vec!["client-id".to_string()],
+      nonce: Some("the-nonce".to_string()),
+      ..TestToken::new(UsernameAdditionalClaims {
+        username: None,
+        extra: Default::default(),
+      })
+    }
+    .mint();
+    let issued = answering_server(
+      StatusCode::OK,
+      serde_json::json!({
+        "access_token": "access-token",
+        "token_type": "bearer",
+        "id_token": id_token,
+      })
+      .to_string(),
+    )
+    .await;
+    let google = google_at(&issued);
+    let Err(err) = google
+      .get_google_user(
+        "code".to_string(),
+        "another-nonce".to_string(),
+      )
+      .await
+    else {
+      panic!("an ID token for another login must fail it");
+    };
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    let Ok(user) = google
+      .get_google_user("code".to_string(), "the-nonce".to_string())
+      .await
+    else {
+      panic!("the login's own ID token logs in");
+    };
+    assert_eq!(user.id, "subject-123");
+  }
+
   /// A Google which accepts the connection but never answers
   /// fails the login, instead of leaving the callback hanging.
   #[tokio::test]
@@ -246,7 +336,7 @@ mod tests {
     else {
       panic!("a login without an answer must fail");
     };
-    let message = format!("{err:#}");
+    let message = format!("{:#}", err.error);
     assert!(message.contains("timed out"), "{message}");
   }
 }

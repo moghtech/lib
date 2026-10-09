@@ -1,25 +1,30 @@
 use std::net::IpAddr;
 
+use anyhow::Context as _;
 use axum::{Router, extract::Path, routing::post};
 use mogh_auth_client::{
   api::login::*, config::ExternalLoginProviderConfig,
+  passkey::RequestChallengeResponse,
 };
 use mogh_error::Json;
 use mogh_rate_limit::WithFailureRateLimit;
 use mogh_request_ip::RequestIp;
 use mogh_resolver::Resolve;
 use serde::{Deserialize, Serialize};
-use strum::{Display, EnumDiscriminants};
-use tracing::{debug, instrument};
+use strum::{Display, EnumDiscriminants, IntoStaticStr};
+use tracing::{debug, info, instrument};
 use typeshare::typeshare;
 use uuid::Uuid;
 
 use crate::{
-  AuthImpl, BoxAuthImpl,
+  AuthImpl, BoxAuthImpl, Login, LoginKind, SecondFactor,
   api::{Variant, parse_variant_request},
   middleware::check_user_cidr_whitelist,
-  provider::external::list_external_providers_lossy,
+  provider::{
+    external::list_external_providers_lossy, jwt::EncodedJwt,
+  },
   session::Session,
+  user::AuthUserImpl,
 };
 
 pub mod external;
@@ -40,7 +45,10 @@ pub struct LoginArgs {
 #[args(LoginArgs)]
 #[response(mogh_error::Response)]
 #[error(mogh_error::Error)]
-#[strum_discriminants(name(LoginRequestMethod), derive(Display))]
+#[strum_discriminants(
+  name(LoginRequestMethod),
+  derive(Display, IntoStaticStr)
+)]
 #[serde(tag = "type", content = "params")]
 #[allow(clippy::enum_variant_names, clippy::large_enum_variant)]
 pub enum LoginRequest {
@@ -77,6 +85,7 @@ async fn handler<I: AuthImpl>(
 ) -> mogh_error::Result<axum::response::Response> {
   let req_id = Uuid::new_v4();
   let method: LoginRequestMethod = (&request).into();
+  crate::context::set_request_method(method.into());
 
   debug!(
     api = "Auth Login",
@@ -103,6 +112,113 @@ async fn handler<I: AuthImpl>(
   }
 
   res.map(|res| res.0)
+}
+
+/// How the token of a login is issued, see [issue_login].
+pub(crate) enum IssueToken {
+  /// For the app's ttl, a login now.
+  Now,
+  /// For `ttl_ms` (capped at the app's ttl), a login now: a
+  /// workload's token.
+  Ttl(u128),
+  /// For the app's ttl, a login when the provider authenticated the
+  /// user (unix seconds): token exchange, see
+  /// [JwtProvider::encode_sub_with_auth_time][crate::provider::jwt::JwtProvider::encode_sub_with_auth_time].
+  AuthTime(u64),
+}
+
+/// Issues the token of a login of the user `user_id` (`username`),
+/// and records the login ([AuthImpl::record_login]) with the token's
+/// own expiry. Encoded first, so the record says when the token the
+/// user gets expires (without a second computation of it), and handed
+/// out only once the hook accepted the login. The one way every login
+/// which issues a token is recorded: a local sign up or login, a
+/// second factor completed, a token exchange.
+pub(crate) async fn issue_login<I: AuthImpl + ?Sized>(
+  auth: &I,
+  user_id: &str,
+  username: &str,
+  ip: IpAddr,
+  kind: LoginKind,
+  second_factor: Option<SecondFactor>,
+  issue: IssueToken,
+) -> mogh_error::Result<EncodedJwt> {
+  let jwt = auth.jwt_provider();
+  let token = match issue {
+    IssueToken::Now => jwt.encode_sub(user_id),
+    IssueToken::Ttl(ttl_ms) => {
+      jwt.encode_sub_with_ttl(user_id, ttl_ms)
+    }
+    IssueToken::AuthTime(auth_time) => {
+      jwt.encode_sub_with_auth_time(user_id, auth_time)
+    }
+  }?;
+  auth
+    .record_login(Login {
+      user_id: user_id.to_string(),
+      username: username.to_string(),
+      ip,
+      kind,
+      second_factor,
+      token_expires: token.exp,
+    })
+    .await?;
+  Ok(token)
+}
+
+/// The second factor a login continues with, begun on the session
+/// by [begin_second_factor].
+pub(crate) enum SecondFactorChallenge {
+  /// Completed with `CompletePasskeyLogin`, signing this challenge.
+  Passkey(RequestChallengeResponse),
+  /// Completed with `CompleteTotpLogin` (or a recovery code).
+  Totp,
+}
+
+/// Begins the second factor of a login whose first factor passed, if
+/// the user is enrolled in one: their passkey if they have one, else
+/// TOTP. The login's first factor (`kind`, which records the login
+/// once it is complete) is stored on the session with it, and the
+/// session id is cycled. `None` for a user enrolled in neither.
+///
+/// The one place the precedence and the session state of a second
+/// factor are decided, for local logins and the external ones (a
+/// provider's callback, `ExchangeExternalForJwt`) alike.
+pub(crate) async fn begin_second_factor<I: AuthImpl + ?Sized>(
+  auth: &I,
+  session: &Session,
+  user: &dyn AuthUserImpl,
+  kind: &LoginKind,
+) -> mogh_error::Result<Option<SecondFactorChallenge>> {
+  match (user.passkey(), user.totp_secret()) {
+    (Some(passkey), _) => {
+      let passkeys = auth.passkey_provider().context(
+        "No passkey provider available, possibly invalid 'host' config.",
+      )?;
+      let (response, state) = passkeys
+        .start_passkey_authentication(passkey)
+        .context("Failed to start passkey authentication flow")?;
+      session.insert_passkey_login(user.id(), &state).await?;
+      session.insert_login_kind(kind).await?;
+      info!(
+        user_id = user.id(),
+        username = user.username(),
+        "Passkey 2FA flow initiated"
+      );
+      Ok(Some(SecondFactorChallenge::Passkey(response)))
+    }
+    (None, Some(_)) => {
+      session.insert_totp_login_user_id(user.id()).await?;
+      session.insert_login_kind(kind).await?;
+      info!(
+        user_id = user.id(),
+        username = user.username(),
+        "TOTP 2FA flow initiated"
+      );
+      Ok(Some(SecondFactorChallenge::Totp))
+    }
+    (None, None) => Ok(None),
+  }
 }
 
 pub async fn get_login_options<I: AuthImpl + ?Sized>(
@@ -176,6 +292,7 @@ impl Resolve<LoginArgs> for ExchangeForJwt {
       auth
         .jwt_provider()
         .encode_sub_with_auth_time(user.id(), login.authenticated_at)
+        .map(Into::into)
         .map_err(Into::into)
     }
     .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), ip)
@@ -186,7 +303,10 @@ impl Resolve<LoginArgs> for ExchangeForJwt {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::AuthImpl;
+  use crate::{
+    AuthImpl,
+    test_support::{session, stub_auth_impl},
+  };
   use mogh_auth_client::config::{
     ExternalLoginKind, ExternalLoginProvider, NamedOauthConfig,
     OidcConfig,
@@ -251,32 +371,11 @@ mod tests {
         .unwrap_or_else(|| self.registration_disabled())
     }
 
-    fn get_user(
-      &self,
-      _user_id: String,
-    ) -> crate::DynFuture<mogh_error::Result<crate::user::BoxAuthUser>>
-    {
-      Box::pin(async {
-        Err(anyhow::anyhow!("not implemented").into())
-      })
-    }
-
-    fn handle_request_authentication(
-      &self,
-      _auth: crate::RequestAuthentication,
-      _ip: std::net::IpAddr,
-      _require_user_enabled: bool,
-      _req: axum::extract::Request,
-    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-    {
-      Box::pin(async {
-        Err(anyhow::anyhow!("not implemented").into())
-      })
-    }
-
-    fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
-      panic!("not needed for these tests")
-    }
+    stub_auth_impl!(
+      get_user,
+      handle_request_authentication,
+      jwt_provider
+    );
   }
 
   fn oidc(
@@ -479,44 +578,21 @@ mod tests {
         if user_id == "user-1" {
           Ok(Box::new(RedeemUser) as crate::user::BoxAuthUser)
         } else {
-          Err(anyhow::anyhow!("User not found").into())
+          // UNAUTHORIZED, as AuthImpl::get_user asks: a server
+          // error is no failed attempt (mogh_rate_limit 3.0).
+          Err(mogh_error::AddStatusCodeError::status_code(
+            anyhow::anyhow!("User not found"),
+            reqwest::StatusCode::UNAUTHORIZED,
+          ))
         }
       })
     }
 
-    fn handle_request_authentication(
-      &self,
-      _auth: crate::RequestAuthentication,
-      _ip: std::net::IpAddr,
-      _require_user_enabled: bool,
-      _req: axum::extract::Request,
-    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-    {
-      Box::pin(async {
-        Err(anyhow::anyhow!("not implemented").into())
-      })
-    }
-
-    fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
-      static PROVIDER: std::sync::LazyLock<
-        crate::provider::jwt::JwtProvider,
-      > = std::sync::LazyLock::new(|| {
-        crate::provider::jwt::JwtProvider::new(b"secret", 60_000)
-      });
-      &PROVIDER
-    }
+    stub_auth_impl!(handle_request_authentication, jwt_provider);
 
     fn general_rate_limiter(&self) -> &mogh_rate_limit::RateLimiter {
       &self.limiter
     }
-  }
-
-  fn session() -> Session {
-    Session(tower_sessions::Session::new(
-      None,
-      std::sync::Arc::new(tower_sessions::MemoryStore::default()),
-      None,
-    ))
   }
 
   fn unix_timestamp_secs() -> u64 {
@@ -639,6 +715,108 @@ mod tests {
       .unwrap();
     let err = ExchangeForJwt {}.resolve(&args).await.unwrap_err();
     assert_eq!(err.status, reqwest::StatusCode::TOO_MANY_REQUESTS);
+  }
+
+  /// A user enrolled in a passkey and / or TOTP.
+  struct EnrolledUser {
+    passkey: bool,
+    totp: bool,
+  }
+
+  impl crate::user::AuthUserImpl for EnrolledUser {
+    fn id(&self) -> &str {
+      "user-1"
+    }
+    fn username(&self) -> &str {
+      "user"
+    }
+    fn passkey(&self) -> Option<crate::passkey::Passkey> {
+      self
+        .passkey
+        .then(|| crate::provider::passkey::test_passkey(&[1; 16]))
+    }
+    fn totp_secret(&self) -> Option<&str> {
+      self.totp.then_some("secret")
+    }
+  }
+
+  struct PasskeyAuth;
+
+  impl AuthImpl for PasskeyAuth {
+    fn new() -> Self {
+      PasskeyAuth
+    }
+    fn passkey_provider(
+      &self,
+    ) -> Option<&crate::provider::passkey::PasskeyProvider> {
+      static PROVIDER: std::sync::LazyLock<
+        crate::provider::passkey::PasskeyProvider,
+      > = std::sync::LazyLock::new(|| {
+        crate::provider::passkey::PasskeyProvider::new(
+          "https://example.com",
+        )
+        .unwrap()
+      });
+      Some(&PROVIDER)
+    }
+    stub_auth_impl!(
+      get_user,
+      handle_request_authentication,
+      jwt_provider
+    );
+  }
+
+  /// One precedence for every first factor: the passkey before TOTP,
+  /// stored on the session with the first factor's kind (which records
+  /// the login once complete). Nothing for a user without either.
+  #[tokio::test]
+  async fn test_begin_second_factor() {
+    let provider = LoginKind::Provider {
+      provider_id: "oidc".into(),
+      provider_name: "OIDC".into(),
+    };
+    for kind in [LoginKind::Local, provider] {
+      let begin = |passkey, totp| {
+        let session = session();
+        let kind = kind.clone();
+        async move {
+          let challenge = begin_second_factor(
+            &PasskeyAuth,
+            &session,
+            &EnrolledUser { passkey, totp },
+            &kind,
+          )
+          .await
+          .unwrap();
+          (challenge, session)
+        }
+      };
+
+      let (challenge, session) = begin(false, false).await;
+      assert!(challenge.is_none());
+      assert!(!session.0.is_modified());
+
+      let (challenge, session) = begin(false, true).await;
+      assert!(matches!(challenge, Some(SecondFactorChallenge::Totp)));
+      assert_eq!(
+        session.begin_totp_login_attempt().await.unwrap(),
+        "user-1"
+      );
+      assert_eq!(session.take_login_kind().await, kind);
+
+      for totp in [false, true] {
+        let (challenge, session) = begin(true, totp).await;
+        assert!(matches!(
+          challenge,
+          Some(SecondFactorChallenge::Passkey(_))
+        ));
+        let (user_id, _, stored_kind) =
+          session.retrieve_passkey_login().await.unwrap();
+        assert_eq!(user_id, "user-1");
+        assert_eq!(stored_kind, kind);
+        assert!(session.begin_totp_login_attempt().await.is_err());
+      }
+    }
   }
 
   #[tokio::test]

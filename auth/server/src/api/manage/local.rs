@@ -6,8 +6,11 @@ use mogh_resolver::Resolve;
 use tracing::instrument;
 
 use crate::{
-  AuthImpl,
-  api::{login::local::check_username_available, manage::ManageArgs},
+  AuthImpl, CredentialChange,
+  api::{
+    check_new_username, login::local::check_username_available,
+    manage::ManageArgs,
+  },
   bcrypt_pool::bcrypt_hash,
 };
 
@@ -18,7 +21,7 @@ pub async fn update_username<I: AuthImpl + ?Sized>(
   new_username: String,
 ) -> mogh_error::Result<()> {
   auth.check_username_locked(username)?;
-  auth.validate_username(&new_username)?;
+  check_new_username(auth, &new_username)?;
   check_username_available(auth, &new_username, Some(&user_id))
     .await?;
   auth.update_user_username(user_id, new_username).await?;
@@ -70,13 +73,14 @@ impl Resolve<ManageArgs> for UpdatePassword {
     "UpdatePassword",
     skip_all,
     fields(
-      user_id = user.id(),
+      user_id = args.user.id(),
     )
   )]
   async fn resolve(
     self,
-    ManageArgs { auth, user, .. }: &ManageArgs,
+    args: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
+    let ManageArgs { auth, user, .. } = args;
     update_password(
       auth.as_ref(),
       user.username(),
@@ -84,6 +88,7 @@ impl Resolve<ManageArgs> for UpdatePassword {
       &self.password,
     )
     .await?;
+    args.credentials_changed(CredentialChange::Password).await?;
     Ok(NoData {})
   }
 }

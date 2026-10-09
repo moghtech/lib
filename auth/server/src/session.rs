@@ -5,6 +5,7 @@ use axum::extract::FromRequestParts;
 use mogh_error::{AddStatusCode, AddStatusCodeError as _};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
+use tower_sessions::{Expiry, cookie::time::OffsetDateTime};
 use tracing::warn;
 use webauthn_rs::prelude::{
   PasskeyAuthentication, PasskeyRegistration,
@@ -79,6 +80,28 @@ impl Session {
       .map_err(Into::into)
   }
 
+  /// Keeps the session for at least `max_age` from now: the step
+  /// stored on it then has its whole `max_age` to complete. The
+  /// session layer expires a session after its idle time otherwise
+  /// (mogh_server's default is 3 minutes, Cicada's 1), counted from
+  /// the last request which changed the session, and the steps of a
+  /// login wait for the user (at the provider, for an authenticator
+  /// app) without one.
+  ///
+  /// A session which lives longer already (a longer idle expiry) is
+  /// left as it is. A pinned one stops being extended by its requests,
+  /// so it ends `max_age` after its last step began: each step pins it
+  /// again.
+  fn keep_for(&self, max_age: Duration) {
+    let until = OffsetDateTime::now_utc().saturating_add(
+      tower_sessions::cookie::time::Duration::try_from(max_age)
+        .unwrap_or(tower_sessions::cookie::time::Duration::MAX),
+    );
+    if self.0.expiry_date() < until {
+      self.0.set_expiry(Some(Expiry::AtDateTime(until)));
+    }
+  }
+
   /// Takes the value under `key` off the session. Unlike
   /// [tower_sessions::Session::remove], a session without one is
   /// left unmodified: the session layer saves (which extends its
@@ -110,6 +133,11 @@ impl Session {
   /// ([Self::retrieve_authenticated_user_id]). Cycles the session id
   /// first, like the first factor of a login which continues with a
   /// second factor.
+  ///
+  /// Now is the login's time, its token's `auth_time`: a recent login
+  /// for [AuthImpl::reauthentication_window_secs][crate::AuthImpl::reauthentication_window_secs]
+  /// whether or not the provider asked the user for anything (it may
+  /// have answered from its single sign-on session, see there).
   pub async fn insert_authenticated_user_id(
     &self,
     user_id: &str,
@@ -158,7 +186,17 @@ impl Session {
     })
   }
 
-  const EXTERNAL_LOGIN: &str = "external-login";
+  // Stored with when it began. The key is not the one of the earlier
+  // format (the login alone), which then reads as not initiated.
+  const EXTERNAL_LOGIN: &str = "external-login-begun";
+
+  /// How long an external login or link in flight (redirected to the
+  /// provider) can be completed at the provider's callback for. The
+  /// user signs in at the provider in between (a password, maybe a
+  /// second factor there): the session is kept for this long
+  /// ([Self::keep_for]), and an older login is refused.
+  pub const MAX_EXTERNAL_LOGIN_AGE: Duration =
+    Duration::from_secs(10 * 60);
 
   /// Store the in flight external login or link.
   /// Only one can be in flight per session, starting
@@ -168,27 +206,44 @@ impl Session {
     login: &SessionExternalLogin,
   ) -> mogh_error::Result<()> {
     self
-      .0
-      .insert(Self::EXTERNAL_LOGIN, login)
+      .insert_external_login_begun_at(login, unix_timestamp_secs())
       .await
-      .context("Failed to serialize session data")
-      .map_err(Into::into)
+  }
+
+  /// [Self::insert_external_login] begun at `begun_at` (unix
+  /// seconds).
+  pub(crate) async fn insert_external_login_begun_at(
+    &self,
+    login: &SessionExternalLogin,
+    begun_at: u64,
+  ) -> mogh_error::Result<()> {
+    self
+      .0
+      .insert(Self::EXTERNAL_LOGIN, (login, begun_at))
+      .await
+      .context("Failed to serialize session data")?;
+    self.keep_for(Self::MAX_EXTERNAL_LOGIN_AGE);
+    Ok(())
   }
 
   /// Takes the in flight external login or link,
-  /// it can only be completed once. Without one, the session is
-  /// left unmodified (see [Self::take]): a callback anybody holding
-  /// the cookie can send doesn't keep the session alive.
+  /// it can only be completed once. One older than
+  /// [Self::MAX_EXTERNAL_LOGIN_AGE] is refused (and taken all the
+  /// same). Without one, the session is left unmodified (see
+  /// [Self::take]): a callback anybody holding the cookie can send
+  /// doesn't keep the session alive.
   pub async fn retrieve_external_login(
     &self,
   ) -> mogh_error::Result<SessionExternalLogin> {
-    self
-      .take(Self::EXTERNAL_LOGIN)
+    let (login, begun_at) = self
+      .take::<(SessionExternalLogin, u64)>(Self::EXTERNAL_LOGIN)
       .await?
       .context(
         "External login has not been initiated for this session",
       )
-      .status_code(StatusCode::UNAUTHORIZED)
+      .status_code(StatusCode::UNAUTHORIZED)?;
+    check_external_login_age(begun_at, unix_timestamp_secs())?;
+    Ok(login)
   }
 
   // =============
@@ -242,8 +297,9 @@ impl Session {
       .0
       .insert(Self::PASSKEY_LOGIN, (user_id, state, begun_at))
       .await
-      .context("Failed to serialize session data")
-      .map_err(Into::into)
+      .context("Failed to serialize session data")?;
+    self.keep_for(Self::MAX_SECOND_FACTOR_LOGIN_AGE);
+    Ok(())
   }
 
   /// Takes the passkey login in progress, and with it the kind of
@@ -353,8 +409,9 @@ impl Session {
       .0
       .insert(Self::TOTP_LOGIN, (user_id, begun_at))
       .await
-      .context("Failed to serialize session data")
-      .map_err(Into::into)
+      .context("Failed to serialize session data")?;
+    self.keep_for(Self::MAX_SECOND_FACTOR_LOGIN_AGE);
+    Ok(())
   }
 
   /// Returns the user id which began totp login, and counts an attempt
@@ -432,6 +489,13 @@ impl Session {
   // are not those of the earlier format (the state alone), which
   // then reads as not initiated.
 
+  /// How long the session is kept for an enrollment begun on it to be
+  /// confirmed ([Self::keep_for]): scanning the QR code, maybe
+  /// installing an authenticator app first. Confirming also needs a
+  /// recent login ([AuthImpl::reauthentication_window_secs][crate::AuthImpl::reauthentication_window_secs]).
+  pub const MAX_ENROLLMENT_AGE: Duration =
+    Duration::from_secs(10 * 60);
+
   const PASSKEY_ENROLLMENT: &str = "passkey-enrollment-of-user";
 
   /// Stores the passkey registration `user_id` began, replacing
@@ -445,8 +509,11 @@ impl Session {
       .0
       .insert(Self::PASSKEY_ENROLLMENT, (user_id, state))
       .await
-      .context("Session: Failed to insert passkey enrollment state")
-      .map_err(Into::into)
+      .context(
+        "Session: Failed to insert passkey enrollment state",
+      )?;
+    self.keep_for(Self::MAX_ENROLLMENT_AGE);
+    Ok(())
   }
 
   /// Takes the passkey registration in flight, which only
@@ -484,8 +551,9 @@ impl Session {
       .0
       .insert(Self::TOTP_ENROLLMENT, (user_id, totp))
       .await
-      .context("Failed to serialize session data")
-      .map_err(Into::into)
+      .context("Failed to serialize session data")?;
+    self.keep_for(Self::MAX_ENROLLMENT_AGE);
+    Ok(())
   }
 
   /// Takes the TOTP enrollment in flight, which only `user_id`
@@ -512,10 +580,10 @@ impl Session {
   // = LINK =
   // ========
 
-  // Stored with when the link was begun. The key is not the one of
-  // the earlier format (the user id alone), which then reads as not
-  // initiated.
-  const EXTERNAL_LINK: &str = "external-link-begun";
+  // Stored with the provider it was begun for, and when. The key is
+  // not the one of the earlier formats (the user id alone, then with
+  // when it was begun), which then read as not initiated.
+  const EXTERNAL_LINK: &str = "external-link-to-provider";
 
   /// How long a link begun with
   /// [BeginExternalLoginLink][mogh_auth_client::api::manage::BeginExternalLoginLink]
@@ -525,8 +593,9 @@ impl Session {
   pub const MAX_EXTERNAL_LINK_AGE: Duration =
     Duration::from_secs(10 * 60);
 
-  /// Stores the user id which began external login linking, and
-  /// when, replacing any other link begun on the session.
+  /// Stores the user id which began external login linking, the
+  /// slug of the provider it is for, and when, replacing any other
+  /// link begun on the session.
   ///
   /// Cycles the session id first, like the first factor of a login:
   /// the link is only reachable with the cookie issued in the
@@ -536,9 +605,10 @@ impl Session {
   pub async fn insert_external_link_user_id(
     &self,
     user_id: &str,
+    slug: &str,
   ) -> mogh_error::Result<()> {
     self
-      .insert_external_link(user_id, unix_timestamp_secs())
+      .insert_external_link(user_id, slug, unix_timestamp_secs())
       .await
   }
 
@@ -547,32 +617,40 @@ impl Session {
   pub(crate) async fn insert_external_link(
     &self,
     user_id: &str,
+    slug: &str,
     begun_at: u64,
   ) -> mogh_error::Result<()> {
     self.cycle_id().await?;
     self
       .0
-      .insert(Self::EXTERNAL_LINK, (user_id, begun_at))
+      .insert(Self::EXTERNAL_LINK, (user_id, slug, begun_at))
       .await
-      .context("Failed to serialize session data")
-      .map_err(Into::into)
+      .context("Failed to serialize session data")?;
+    self.keep_for(Self::MAX_EXTERNAL_LINK_AGE);
+    Ok(())
   }
 
   /// Takes the link begun on the session, it can only be started
-  /// once. Check [ExternalLink::check_age] before using it: the link
-  /// is taken either way, so an expired one has to be begun again.
-  /// Without one, the session is left unmodified (see [Self::take]).
+  /// once. Check [ExternalLink::check_age] and
+  /// [ExternalLink::check_slug] before using it: the link is taken
+  /// either way, so an expired one, or one started at another
+  /// provider, has to be begun again. Without one, the session is
+  /// left unmodified (see [Self::take]).
   pub async fn retrieve_external_link(
     &self,
   ) -> mogh_error::Result<ExternalLink> {
-    let (user_id, begun_at) = self
-      .take::<(String, u64)>(Self::EXTERNAL_LINK)
+    let (user_id, slug, begun_at) = self
+      .take::<(String, String, u64)>(Self::EXTERNAL_LINK)
       .await?
       .context(
         "External link has not been initiated for this session",
       )
       .status_code(StatusCode::UNAUTHORIZED)?;
-    Ok(ExternalLink { user_id, begun_at })
+    Ok(ExternalLink {
+      user_id,
+      slug,
+      begun_at,
+    })
   }
 }
 
@@ -593,6 +671,9 @@ pub struct CompletedLogin {
 pub struct ExternalLink {
   /// The user who began the link.
   pub user_id: String,
+  /// The slug of the provider the link was begun for
+  /// ([BeginExternalLoginLink::slug][mogh_auth_client::api::manage::BeginExternalLoginLink::slug]).
+  pub slug: String,
   /// When the link was begun, unix seconds.
   pub begun_at: u64,
 }
@@ -602,6 +683,23 @@ impl ExternalLink {
   /// [Session::MAX_EXTERNAL_LINK_AGE].
   pub fn check_age(&self) -> mogh_error::Result<()> {
     check_external_link_age(self.begun_at, unix_timestamp_secs())
+  }
+
+  /// Refuses the link at another provider than the one it was begun
+  /// for: `/link` is a plain GET, any page the user visits can make
+  /// the browser send it, for any provider. Started at the provider
+  /// of that page's choosing, the link would join the account to
+  /// whatever login the browser has there (the page's own, say).
+  pub fn check_slug(&self, slug: &str) -> mogh_error::Result<()> {
+    if self.slug == slug {
+      return Ok(());
+    }
+    Err(
+      anyhow::anyhow!(
+        "External link was begun for another login provider, begin linking again"
+      )
+      .status_code(StatusCode::UNAUTHORIZED),
+    )
   }
 }
 
@@ -617,6 +715,23 @@ fn check_external_link_age(
   }
   Err(
     anyhow::anyhow!("External link has expired, begin linking again")
+      .status_code(StatusCode::UNAUTHORIZED),
+  )
+}
+
+/// Refuses the callback of an external login `begun_at` more than
+/// [Session::MAX_EXTERNAL_LOGIN_AGE] before `now` (unix seconds). One
+/// begun in the future (the clock of the instance which began it runs
+/// ahead) is as good as new.
+fn check_external_login_age(
+  begun_at: u64,
+  now: u64,
+) -> mogh_error::Result<()> {
+  if is_within(begun_at, now, Session::MAX_EXTERNAL_LOGIN_AGE) {
+    return Ok(());
+  }
+  Err(
+    anyhow::anyhow!("External login has expired. Log in again.")
       .status_code(StatusCode::UNAUTHORIZED),
   )
 }
@@ -800,7 +915,7 @@ mod tests {
     let store = Arc::new(MemoryStore::default());
     let (session, planted) = saved_session(&store).await;
     session
-      .insert_external_link_user_id("user-1")
+      .insert_external_link_user_id("user-1", "github")
       .await
       .unwrap();
     session.0.save().await.unwrap();
@@ -1056,6 +1171,15 @@ mod tests {
       .1
   }
 
+  /// A passkey registration state, for a made up user.
+  fn passkey_registration() -> PasskeyRegistration {
+    PasskeyProvider::new("https://example.com")
+      .unwrap()
+      .start_passkey_registration("user")
+      .unwrap()
+      .1
+  }
+
   fn test_totp() -> totp_rs::Totp {
     totp_rs::Builder::new()
       .with_secret(vec![7; 20])
@@ -1207,7 +1331,7 @@ mod tests {
   async fn test_external_link_expires() {
     let session = session();
     session
-      .insert_external_link_user_id("user-1")
+      .insert_external_link_user_id("user-1", "github")
       .await
       .unwrap();
     let link = session.retrieve_external_link().await.unwrap();
@@ -1220,7 +1344,7 @@ mod tests {
     let max_age = Session::MAX_EXTERNAL_LINK_AGE.as_secs();
     let expired = unix_timestamp_secs() - max_age - 60;
     session
-      .insert_external_link("user-1", expired)
+      .insert_external_link("user-1", "github", expired)
       .await
       .unwrap();
     let link = session.retrieve_external_link().await.unwrap();
@@ -1232,6 +1356,155 @@ mod tests {
     assert!(
       format!("{:#}", err.error).contains("not been initiated")
     );
+  }
+
+  fn external_login() -> SessionExternalLogin {
+    SessionExternalLogin {
+      provider_id: String::from("oidc"),
+      link_user_id: None,
+      state: String::from("state"),
+      nonce: None,
+      pkce_verifier: None,
+      redirect: None,
+    }
+  }
+
+  /// An external login is completed at the callback within
+  /// [Session::MAX_EXTERNAL_LOGIN_AGE], once.
+  #[tokio::test]
+  async fn test_external_login_expires() {
+    let session = session();
+    session
+      .insert_external_login(&external_login())
+      .await
+      .unwrap();
+    let login = session.retrieve_external_login().await.unwrap();
+    assert_eq!(login.state, "state");
+    // Taken, it can only be completed once.
+    let err = session.retrieve_external_login().await.err().unwrap();
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+
+    let max_age = Session::MAX_EXTERNAL_LOGIN_AGE.as_secs();
+    let expired = unix_timestamp_secs() - max_age - 60;
+    session
+      .insert_external_login_begun_at(&external_login(), expired)
+      .await
+      .unwrap();
+    let err = session.retrieve_external_login().await.err().unwrap();
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    assert!(format!("{:#}", err.error).contains("expired"));
+    // Used up all the same.
+    let err = session.retrieve_external_login().await.err().unwrap();
+    assert!(
+      format!("{:#}", err.error).contains("not been initiated")
+    );
+
+    // One stored by an earlier version (without when it began) reads
+    // as not initiated.
+    let session = self::session();
+    session
+      .0
+      .insert("external-login", external_login())
+      .await
+      .unwrap();
+    let err = session.retrieve_external_login().await.err().unwrap();
+    assert!(
+      format!("{:#}", err.error).contains("not been initiated")
+    );
+  }
+
+  #[test]
+  fn test_check_external_login_age() {
+    let max_age = Session::MAX_EXTERNAL_LOGIN_AGE.as_secs();
+    let now = 1_000_000;
+    for begun_at in [now, now - max_age, now + 30, u64::MAX] {
+      check_external_login_age(begun_at, now).unwrap();
+    }
+    for begun_at in [now - max_age - 1, 0] {
+      let err = check_external_login_age(begun_at, now).unwrap_err();
+      assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    }
+  }
+
+  /// A session with the expiry the session layer gives it (idle
+  /// for `idle`).
+  fn session_idle_for(idle: Duration) -> Session {
+    Session(tower_sessions::Session::new(
+      None,
+      Arc::new(tower_sessions::MemoryStore::default()),
+      Some(Expiry::OnInactivity(idle.try_into().unwrap())),
+    ))
+  }
+
+  /// Each step stored on the session keeps it for the step's max age,
+  /// however short the session layer's idle expiry: the user has the
+  /// whole step to complete it (at the provider, with an authenticator
+  /// app). A session which lives longer already is left alone.
+  #[tokio::test]
+  async fn test_pending_steps_keep_the_session() {
+    let state = passkey_authentication();
+    let registration = passkey_registration();
+    let totp = test_totp();
+    for (step, max_age) in [
+      ("totp login", Session::MAX_SECOND_FACTOR_LOGIN_AGE),
+      ("passkey login", Session::MAX_SECOND_FACTOR_LOGIN_AGE),
+      ("external login", Session::MAX_EXTERNAL_LOGIN_AGE),
+      ("external link", Session::MAX_EXTERNAL_LINK_AGE),
+      ("totp enrollment", Session::MAX_ENROLLMENT_AGE),
+      ("passkey enrollment", Session::MAX_ENROLLMENT_AGE),
+    ] {
+      for idle in
+        [Duration::from_secs(60), Duration::from_secs(86_400)]
+      {
+        let session = session_idle_for(idle);
+        let before = OffsetDateTime::now_utc();
+        match step {
+          "totp login" => {
+            session.insert_totp_login_user_id("user-1").await.unwrap()
+          }
+          "passkey login" => session
+            .insert_passkey_login("user-1", &state)
+            .await
+            .unwrap(),
+          "external login" => session
+            .insert_external_login(&external_login())
+            .await
+            .unwrap(),
+          "external link" => session
+            .insert_external_link_user_id("user-1", "github")
+            .await
+            .unwrap(),
+          "totp enrollment" => session
+            .insert_totp_enrollment("user-1", &totp)
+            .await
+            .unwrap(),
+          _ => session
+            .insert_passkey_enrollment("user-1", &registration)
+            .await
+            .unwrap(),
+        }
+        if idle > max_age {
+          // Unchanged: it lives longer.
+          assert_eq!(
+            session.0.expiry(),
+            Some(Expiry::OnInactivity(idle.try_into().unwrap())),
+            "{step}"
+          );
+        } else {
+          let Some(Expiry::AtDateTime(until)) = session.0.expiry()
+          else {
+            panic!("{step}: {:?}", session.0.expiry());
+          };
+          // Whole seconds are enough here.
+          let kept = (until - before).whole_seconds();
+          let max_age = max_age.as_secs() as i64;
+          assert!(
+            (max_age..max_age + 5).contains(&kept),
+            "{step}: {kept}"
+          );
+        }
+      }
+    }
   }
 
   #[test]
@@ -1247,14 +1520,49 @@ mod tests {
     }
   }
 
-  /// A link stored by an earlier version (the user id alone) reads
-  /// as not initiated, rather than a server error.
+  /// A link stored by an earlier version (the user id alone, then
+  /// with when it was begun but not for which provider) reads as not
+  /// initiated, rather than a server error or a link for any
+  /// provider.
   #[tokio::test]
   async fn test_external_link_of_earlier_format_is_not_initiated() {
     let session = session();
     session.0.insert("external-link", "user-1").await.unwrap();
     let err = session.retrieve_external_link().await.err().unwrap();
     assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    let session = self::session();
+    session
+      .0
+      .insert(
+        "external-link-begun",
+        ("user-1", unix_timestamp_secs()),
+      )
+      .await
+      .unwrap();
+    let err = session.retrieve_external_link().await.err().unwrap();
+    assert!(
+      format!("{:#}", err.error).contains("not been initiated")
+    );
+  }
+
+  /// A link is started at the provider it was begun for only.
+  #[tokio::test]
+  async fn test_external_link_is_bound_to_its_provider() {
+    let session = session();
+    session
+      .insert_external_link_user_id("user-1", "github")
+      .await
+      .unwrap();
+    let link = session.retrieve_external_link().await.unwrap();
+    assert_eq!(link.slug, "github");
+    link.check_slug("github").unwrap();
+    for other in ["oidc", "github-2", "", "GITHUB"] {
+      let err = link.check_slug(other).unwrap_err();
+      assert_eq!(err.status, StatusCode::UNAUTHORIZED, "{other}");
+      assert!(
+        format!("{:#}", err.error).contains("another login provider")
+      );
+    }
   }
 
   #[tokio::test]

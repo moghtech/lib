@@ -31,16 +31,29 @@
 //! asked might have accepted it. A token one of them verified whose
 //! user is unknown, or which matches no rule, stays `invalid_grant`,
 //! as does a user one of them accepted who fails the login rules.
+//! Login providers and trusted issuers are ranked together, the
+//! furthest any of them got is reported. Such a `503` still counts
+//! against the rate limit when another rejected the token: the
+//! caller picks the issuer, and a forged token aimed at one with a
+//! candidate down would otherwise never count.
 //!
 //! Apps serving the exchange on another surface (a Vault compatible
 //! `auth/jwt/login`) use [exchange_token] and [token_exchange_error].
+//!
+//! The endpoint takes a form, which any web page can make its
+//! visitors' browsers post without asking (a CORS "simple" request).
+//! Such a request is refused before anything counts against the
+//! visitor's ip ([check_not_cross_site]): failing exchanges on purpose,
+//! a page could otherwise get everybody behind that ip refused by
+//! [AuthImpl::token_exchange_rate_limiter], which is the general rate
+//! limiter of their logins and api requests by default.
 
 use std::{net::IpAddr, sync::Arc};
 
 use axum::{
   Form, Json, Router,
   extract::rejection::FormRejection,
-  http::{HeaderValue, StatusCode, header},
+  http::{HeaderMap, HeaderValue, StatusCode, header},
   response::{IntoResponse, Response},
   routing::post,
 };
@@ -56,17 +69,22 @@ use mogh_auth_client::{
   },
 };
 use mogh_error::AddStatusCodeError as _;
-use mogh_rate_limit::{FailedAttempt, WithFailureRateLimit as _};
+use mogh_rate_limit::{
+  FailedAttempt, RateLimiter, WithFailureRateLimit as _,
+};
 use mogh_request_ip::RequestIp;
-use tracing::{error, info, instrument};
+use tracing::{debug, error, info, instrument};
 
 use crate::{
-  AuthImpl, Login, LoginKind,
+  AuthImpl, LoginKind,
   api::{
     external::load_provider_client,
     external_login_requires_two_factor,
+    login::{IssueToken, issue_login},
   },
-  middleware::check_user_cidr_whitelist,
+  middleware::{
+    check_user_cidr_whitelist, is_cross_site_browser_request,
+  },
   provider::{
     external::{
       BuiltProvider, ExternalLoginInfo, list_external_providers,
@@ -78,9 +96,9 @@ use crate::{
       authenticated_at, issuers_match, unverified_issuer,
     },
     workload::{
-      Claims, WorkloadIdentity, list_trusted_issuers,
-      load_verification_keys, lock_workload_user, lookup_claim,
-      match_rule,
+      Claims, WorkloadIdentity, hold_off_removal,
+      list_trusted_issuers, load_verification_keys,
+      lock_workload_user, lookup_claim, match_rule,
     },
   },
   user::BoxAuthUser,
@@ -289,10 +307,13 @@ fn no_store(mut response: Response) -> Response {
 
 async fn token<I: AuthImpl>(
   RequestIp(ip): RequestIp,
+  headers: HeaderMap,
   form: Result<Form<TokenExchangeRequest>, FormRejection>,
 ) -> Response {
   let auth = I::new();
   let res = async {
+    // Before anything is counted, see the module doc.
+    check_not_cross_site(&auth, &headers)?;
     let Form(request) = form.map_err(|e| {
       invalid_request(format!("Invalid token request | {e}"))
     })?;
@@ -307,29 +328,74 @@ async fn token<I: AuthImpl>(
   }
 }
 
+/// Refuses a request a web browser sent from a page of another site
+/// ([is_cross_site_browser_request]) with `invalid_request`, before
+/// anything about it is counted.
+///
+/// A form post is a CORS "simple" request: any page can have its
+/// visitors' browsers send one, from their ip. Failing token
+/// exchanges on purpose, a page could get everybody behind that ip
+/// refused by the rate limiter
+/// ([AuthImpl::token_exchange_rate_limiter]), which is the one of
+/// their logins and api requests by default. RFC 8693 clients (CLIs,
+/// CI jobs, other servers) send neither header the check looks at.
+///
+/// The `/token` endpoint calls it first. Apps serving the exchange on
+/// another surface which takes bodies a browser can post across sites
+/// (a form, or a body of any content type) call it before
+/// [exchange_token], or [is_cross_site_browser_request] to answer in
+/// that surface's own error format.
+///
+/// ⚠️ An `Origin` without `Sec-Fetch-Site` is compared with
+/// [AuthImpl::host], whose default panics: an app serving token
+/// exchange implements it.
+pub fn check_not_cross_site<I: AuthImpl + ?Sized>(
+  auth: &I,
+  headers: &HeaderMap,
+) -> mogh_error::Result<()> {
+  if is_cross_site_browser_request(auth, headers) {
+    debug!(
+      "Refused a token request a browser sent from another site"
+    );
+    return Err(invalid_request(
+      "A web browser sent this request from another site. Token exchange is refused to web pages of other sites.",
+    ));
+  }
+  Ok(())
+}
+
 /// The RFC 8693 exchange of the `/token` endpoint as a function,
 /// for apps serving it on another surface, eg. a Vault compatible
 /// `auth/jwt/login`. Exactly what the endpoint does, the failure
-/// rate limit by client `ip` included (the surface is
+/// rate limit by client `ip` included
+/// ([AuthImpl::token_exchange_rate_limiter]: the surface is
 /// unauthenticated wherever it is served): the token is verified
 /// by the login providers and trusted issuers, the user's login
 /// rules apply, and the app is told about the login through its
 /// hooks. Errors map with [token_exchange_error].
+///
+/// The endpoint refuses requests browsers send from other sites
+/// before calling this, see [check_not_cross_site].
 pub async fn exchange_token<I: AuthImpl>(
   auth: &I,
   ip: IpAddr,
   request: TokenExchangeRequest,
   options: TokenExchangeOptions,
 ) -> mogh_error::Result<ExchangedToken> {
-  exchange(
-    auth,
-    ip,
-    request,
-    |provider| async move { load_provider_client(auth, &provider).await },
-    load_issuer_keys,
-    options.role.as_deref(),
+  with_exchange_rate_limit(
+    exchange(
+      auth,
+      ip,
+      request,
+      |provider| async move {
+        load_provider_client(auth, &provider).await
+      },
+      load_issuer_keys,
+      options.role.as_deref(),
+    ),
+    auth.token_exchange_rate_limiter(),
+    &ip,
   )
-  .with_failure_rate_limit_using_ip(auth.general_rate_limiter(), &ip)
   .await
 }
 
@@ -439,8 +505,8 @@ where
   let issued_token_type = validate_request(&request)?;
   let token = request.subject_token.as_str();
 
-  let user_rejection =
-    match verify_exchange(auth, token, load_client, role).await {
+  let user =
+    match verify_user_token(auth, token, load_client, role).await {
       Ok(Some(verified)) => {
         return complete_exchange(
           auth,
@@ -451,10 +517,10 @@ where
         .await;
       }
       Ok(None) => None,
-      Err(e) => Some(e),
+      Err(not_accepted) => Some(not_accepted),
     };
 
-  let workload_rejection =
+  let workload =
     match verify_workload(auth, token, load_keys, role).await {
       Ok(Some(verified)) => {
         return complete_workload(
@@ -466,11 +532,15 @@ where
         .await;
       }
       Ok(None) => None,
-      Err(e) => Some(e),
+      Err(not_accepted) => Some(not_accepted),
     };
 
-  Err(user_rejection.or(workload_rejection).unwrap_or_else(|| {
-    match role {
+  // Login providers and trusted issuers can share an issuer: the
+  // furthest any of them got, with the order each path uses.
+  if let Some(not_accepted) = NotAccepted::furthest(user, workload) {
+    return Err(not_accepted.into_error());
+  }
+  Err(match role {
       // Nothing of that name takes the token's issuer, told
       // apart from a rejected token for Vault's "role not found".
       Some(role) => anyhow::Error::new(RoleNotFound {
@@ -483,11 +553,156 @@ where
         ),
       })
       .status_code(StatusCode::BAD_REQUEST),
-      None => invalid_grant(
-        "No login provider or trusted issuer accepts tokens of this issuer",
-      ),
+    None => invalid_grant(
+      "No login provider or trusted issuer accepts tokens of this issuer",
+    ),
+  })
+}
+
+/// How far the candidates of one path, the login providers or the
+/// trusted issuers of the token's issuer, got with a token none of
+/// them accepted. The furthest is reported, within a path and across
+/// both, see [NotAccepted::furthest].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Reach {
+  /// Every candidate which could be asked rejected the token: its
+  /// signature, audience, expiry, or a provider's `allowed_groups`.
+  Rejected,
+  /// A candidate couldn't be asked (it couldn't be loaded, or the
+  /// app's storage failed): it might have accepted what the others
+  /// rejected, so the client should try again later.
+  Unavailable,
+  /// A candidate verified the token, and refused it for what it
+  /// says: no user is linked to it, or it matches no rule. That is
+  /// the token's, whatever the others would have said.
+  Refused,
+}
+
+/// A token none of the candidates of a path accepted.
+pub(crate) struct NotAccepted {
+  reach: Reach,
+  error: mogh_error::Error,
+  /// Whether a candidate rejected the token as the client's
+  /// (a client error), see [NotAccepted::into_error].
+  rejected: bool,
+}
+
+impl NotAccepted {
+  fn rejected(error: mogh_error::Error) -> NotAccepted {
+    NotAccepted {
+      reach: Reach::Rejected,
+      rejected: error.status.is_client_error(),
+      error,
     }
-  }))
+  }
+
+  fn unavailable(error: mogh_error::Error) -> NotAccepted {
+    NotAccepted {
+      reach: Reach::Unavailable,
+      error,
+      rejected: false,
+    }
+  }
+
+  /// The furthest of what the login providers (`user`) and the
+  /// trusted issuers (`workload`) got to, the login providers' when
+  /// they got as far.
+  fn furthest(
+    user: Option<NotAccepted>,
+    workload: Option<NotAccepted>,
+  ) -> Option<NotAccepted> {
+    let (user, workload) = match (user, workload) {
+      (Some(user), Some(workload)) => (user, workload),
+      (user, workload) => return user.or(workload),
+    };
+    let rejected = user.rejected || workload.rejected;
+    let mut furthest = if workload.reach > user.reach {
+      workload
+    } else {
+      user
+    };
+    furthest.rejected = rejected;
+    Some(furthest)
+  }
+
+  /// The error answered. A candidate which couldn't be asked while
+  /// another rejected the token is a `503` (the client should retry,
+  /// that one might accept it), which still counts as the failed
+  /// attempt it may be: the caller picks the issuer of the token, and
+  /// a forged token aimed at an issuer with a candidate down would
+  /// otherwise never count. See [CountedServerError].
+  fn into_error(self) -> mogh_error::Error {
+    if self.reach == Reach::Unavailable
+      && self.rejected
+      && self.error.status.is_server_error()
+    {
+      let status = self.error.status;
+      let mut error = anyhow::Error::new(CountedServerError {
+        status,
+        error: self.error.error,
+      })
+      .status_code(status);
+      error.headers = self.error.headers;
+      return error;
+    }
+    self.error
+  }
+}
+
+/// A server error which counts against the failure rate limit all
+/// the same, see [NotAccepted::into_error]. The rate limiter only
+/// counts client errors, so [with_exchange_rate_limit] passes it as a
+/// `400` and gives it back its status afterwards.
+///
+/// Transparent, like `mogh_error::NotAnAttempt`: it displays as the
+/// error it carries, whose causes are its own.
+#[derive(Debug)]
+struct CountedServerError {
+  status: StatusCode,
+  error: anyhow::Error,
+}
+
+impl std::fmt::Display for CountedServerError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    std::fmt::Display::fmt(&self.error, f)
+  }
+}
+
+impl std::error::Error for CountedServerError {
+  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    self.error.source()
+  }
+}
+
+/// Runs an exchange under the failure rate limit of `limiter`, which
+/// also counts the [CountedServerError]s (answered with their own
+/// status).
+pub(crate) async fn with_exchange_rate_limit<T>(
+  exchange: impl Future<Output = mogh_error::Result<T>>,
+  limiter: &RateLimiter,
+  ip: &IpAddr,
+) -> mogh_error::Result<T> {
+  let status_of = |e: &mogh_error::Error| {
+    e.error
+      .downcast_ref::<CountedServerError>()
+      .map(|counted| counted.status)
+  };
+  async {
+    exchange.await.map_err(|mut e| {
+      if status_of(&e).is_some() {
+        e.status = StatusCode::BAD_REQUEST;
+      }
+      e
+    })
+  }
+  .with_failure_rate_limit_using_ip(limiter, ip)
+  .await
+  .map_err(|mut e| {
+    if let Some(status) = status_of(&e) {
+      e.status = status;
+    }
+    e
+  })
 }
 
 /// A verified token, and the user it belongs to.
@@ -509,6 +724,8 @@ pub(crate) struct VerifiedExchange {
 ///
 /// `None` if no login provider (named `role`, if one is) takes
 /// tokens of the issuer.
+///
+/// Errors count as failed attempts under [with_exchange_rate_limit].
 pub(crate) async fn verify_exchange<I, L, F>(
   auth: &I,
   token: &str,
@@ -522,20 +739,45 @@ where
   L: Fn(ExternalLoginProvider) -> F,
   F: Future<Output = mogh_error::Result<Arc<BuiltProvider>>>,
 {
+  verify_user_token(auth, token, load_client, role)
+    .await
+    .map_err(NotAccepted::into_error)
+}
+
+/// [verify_exchange], telling how far the providers got with a
+/// token none of them accepted.
+async fn verify_user_token<I, L, F>(
+  auth: &I,
+  token: &str,
+  load_client: L,
+  role: Option<&str>,
+) -> Result<Option<VerifiedExchange>, NotAccepted>
+where
+  I: AuthImpl + ?Sized,
+  L: Fn(ExternalLoginProvider) -> F,
+  F: Future<Output = mogh_error::Result<Arc<BuiltProvider>>>,
+{
   if token.is_empty() {
-    return Err(invalid_request("The token is empty"));
+    return Err(NotAccepted::rejected(invalid_request(
+      "The token is empty",
+    )));
   }
   if token.len() > MAX_SUBJECT_TOKEN_LENGTH {
-    return Err(invalid_request("The token is too large"));
+    return Err(NotAccepted::rejected(invalid_request(
+      "The token is too large",
+    )));
   }
 
   let issuer = unverified_issuer(token).ok_or_else(|| {
-    invalid_grant("The token is not a JWT with an issuer")
+    NotAccepted::rejected(invalid_grant(
+      "The token is not a JWT with an issuer",
+    ))
   })?;
 
   let candidates = exchange_candidates(
     list_external_providers(auth)
-      .await?
+      .await
+      .map_err(NotAccepted::unavailable)?
       .into_iter()
       .map(|resolved| resolved.provider),
     &issuer,
@@ -574,7 +816,8 @@ where
         info.provider_id.clone(),
         info.external_id.clone(),
       )
-      .await?
+      .await
+      .map_err(NotAccepted::unavailable)?
     else {
       unknown_user.get_or_insert(invalid_grant(format!(
         "No user is linked to this identity. Log in with '{}' once before exchanging tokens.",
@@ -596,17 +839,27 @@ where
   // be asked might have accepted the token another one rejected
   // (eg. for another audience, or its 'allowed_groups'): a temporary
   // failure, not the token's.
-  if let Some(e) = unknown_user {
-    return Err(e);
-  }
-  match unavailable.or(rejected) {
+  let was_rejected = rejected
+    .as_ref()
+    .is_some_and(|e| e.status.is_client_error());
+  let reached = |reach, error| NotAccepted {
+    reach,
+    error,
+    rejected: was_rejected,
+  };
+  Err(match (unknown_user, unavailable, rejected) {
+    (Some(e), _, _) => reached(Reach::Refused, e),
+    (None, Some(e), _) => reached(Reach::Unavailable, e),
     // Only describes the token the caller presented
-    Some(e) if e.status.is_client_error() => {
-      Err(invalid_grant(format!("{:#}", e.error)))
+    (None, None, Some(e)) if e.status.is_client_error() => reached(
+      Reach::Rejected,
+      invalid_grant(format!("{:#}", e.error)),
+    ),
+    (None, None, Some(e)) => reached(Reach::Rejected, e),
+    (None, None, None) => {
+      NotAccepted::rejected(invalid_grant("Token was rejected"))
     }
-    Some(e) => Err(e),
-    None => Err(invalid_grant("Token was rejected")),
-  }
+  })
 }
 
 /// Loads the keys of a trusted issuer. The reason a load fails may
@@ -647,21 +900,24 @@ async fn verify_workload<I, K, G>(
   token: &str,
   load_keys: K,
   role: Option<&str>,
-) -> mogh_error::Result<Option<VerifiedWorkload>>
+) -> Result<Option<VerifiedWorkload>, NotAccepted>
 where
   I: AuthImpl + ?Sized,
   K: Fn(TrustedIssuer) -> G,
   G: Future<Output = mogh_error::Result<Arc<TokenVerificationKeys>>>,
 {
   let issuer = unverified_issuer(token).ok_or_else(|| {
-    invalid_grant("The token is not a JWT with an issuer")
+    NotAccepted::rejected(invalid_grant(
+      "The token is not a JWT with an issuer",
+    ))
   })?;
 
   // Issuers aren't always unique. Kubernetes clusters share a default
   // issuer and only differ by their keys, so each candidate gets to
   // verify the token with its own.
   let candidates = list_trusted_issuers(auth)
-    .await?
+    .await
+    .map_err(NotAccepted::unavailable)?
     .into_iter()
     .map(|resolved| resolved.issuer)
     .filter(|trusted| {
@@ -726,7 +982,12 @@ where
       }));
       continue;
     };
-    check_rule_id(&trusted, &rule)?;
+    // Verified and matched: as far as a token gets.
+    check_rule_id(&trusted, &rule).map_err(|error| NotAccepted {
+      reach: Reach::Refused,
+      error,
+      rejected: rejected.is_some(),
+    })?;
     return Ok(Some(VerifiedWorkload {
       issuer: trusted,
       rule,
@@ -739,12 +1000,20 @@ where
   // verified a token the others rejected (eg. the other cluster of
   // a shared issuer, which has other keys), so that's a temporary
   // failure (503), not the token's.
-  Err(
-    unmatched
-      .or(unavailable)
-      .or(rejected)
-      .unwrap_or_else(|| invalid_grant("Token was rejected")),
-  )
+  let was_rejected = rejected.is_some();
+  let reached = |reach, error| NotAccepted {
+    reach,
+    error,
+    rejected: was_rejected,
+  };
+  Err(match (unmatched, unavailable, rejected) {
+    (Some(e), _, _) => reached(Reach::Refused, e),
+    (None, Some(e), _) => reached(Reach::Unavailable, e),
+    (None, None, Some(e)) => reached(Reach::Rejected, e),
+    (None, None, None) => {
+      NotAccepted::rejected(invalid_grant("Token was rejected"))
+    }
+  })
 }
 
 /// The rule id identifies the user of the rule. Ids of stored issuers
@@ -858,6 +1127,10 @@ async fn complete_workload<I: AuthImpl + ?Sized>(
   verified: VerifiedWorkload,
   issued_token_type: &str,
 ) -> mogh_error::Result<ExchangedToken> {
+  // Not while sync_all_workload_users has the app remove the users
+  // of the issuers and rules which are gone: a user created after
+  // it listed the live ones would be taken for one of those.
+  let removal = hold_off_removal().await;
   // The first exchanges of a rule (a CI matrix starting) would
   // otherwise all race to create its user, and an update of the
   // issuer with them.
@@ -898,6 +1171,7 @@ async fn complete_workload<I: AuthImpl + ?Sized>(
     })
     .await?;
   drop(user_lock);
+  drop(removal);
   let user = auth.get_user(user_id).await?;
 
   // Without the flag the management API wouldn't
@@ -948,18 +1222,16 @@ async fn complete_workload<I: AuthImpl + ?Sized>(
     0 => default_ttl_ms,
     ttl_ms => ttl_ms.min(default_ttl_ms),
   };
-  auth
-    .record_login(Login::of(
-      user.as_ref(),
-      ip,
-      LoginKind::from(login.clone()),
-      None,
-      auth.jwt_provider().expires_at(ttl_ms)?,
-    ))
-    .await?;
-
-  let jwt =
-    auth.jwt_provider().encode_sub_with_ttl(user.id(), ttl_ms)?;
+  let jwt = issue_login(
+    auth,
+    user.id(),
+    user.username(),
+    ip,
+    LoginKind::from(login.clone()),
+    None,
+    IssueToken::Ttl(ttl_ms),
+  )
+  .await?;
 
   info!(
     user_id = user.id(),
@@ -1016,23 +1288,18 @@ async fn complete_exchange<I: AuthImpl + ?Sized>(
     provider_id: provider.id.clone(),
     provider_name: provider.name.clone(),
   };
-  auth
-    .record_login(Login::of(
-      user.as_ref(),
-      ip,
-      LoginKind::from(login.clone()),
-      None,
-      // encode_sub_with_auth_time's expiry counts from the issue
-      // time (auth_time only sets the authenticated_at claim).
-      auth.jwt_provider().default_expires_at()?,
-    ))
-    .await?;
-
   // A login when the provider authenticated the user, not now: the
   // token may be replayed until it expires.
-  let jwt = auth
-    .jwt_provider()
-    .encode_sub_with_auth_time(user.id(), authenticated_at)?;
+  let jwt = issue_login(
+    auth,
+    user.id(),
+    user.username(),
+    ip,
+    LoginKind::from(login.clone()),
+    None,
+    IssueToken::AuthTime(authenticated_at),
+  )
+  .await?;
 
   info!(
     user_id = user.id(),
@@ -1067,17 +1334,17 @@ mod tests {
 
   use anyhow::anyhow;
 
-  use mogh_auth_client::{
-    config::{
-      NamedOauthConfig, OidcConfig, TokenExchangeConfig,
-      TrustedIssuerKeys, WorkloadClaim,
-    },
-    passkey::Passkey,
+  use mogh_auth_client::config::{
+    NamedOauthConfig, OidcConfig, TokenExchangeConfig,
+    TrustedIssuerKeys, WorkloadClaim,
   };
   use mogh_rate_limit::RateLimiter;
 
   use super::*;
+  use crate::Login;
+  use crate::test_support::stub_auth_impl;
   use crate::{
+    passkey::Passkey,
     provider::{
       jwt::JwtProvider,
       oidc::{OidcProvider, UsernameAdditionalClaims},
@@ -1085,6 +1352,7 @@ mod tests {
         CLIENT_ID, ISSUER, Signer, TestToken, jwks_json, metadata,
         other_jwks_json,
       },
+      workload::{LiveIssuer, WorkloadAccess},
     },
     user::AuthUserImpl,
   };
@@ -1155,7 +1423,17 @@ mod tests {
     jwt: JwtProvider,
     /// Disabled, unless a test enables it.
     rate_limiter: Arc<RateLimiter>,
+    /// An issuer an admin stores while the app removes the users of
+    /// the issuers which are gone, and a token its first exchange
+    /// sends meanwhile.
+    exchange_while_removing: Option<(TrustedIssuer, String)>,
+    /// That exchange, once it began.
+    exchanged_while_removing: Arc<Mutex<Option<ExchangeTask>>>,
   }
+
+  type ExchangeTask = tokio::task::JoinHandle<
+    mogh_error::Result<TokenExchangeResponse>,
+  >;
 
   impl TestAuth {
     fn with_user(user: Option<TestUser>) -> TestAuth {
@@ -1178,6 +1456,8 @@ mod tests {
         logins: Default::default(),
         jwt: JwtProvider::new(b"test-jwt-secret", JWT_TTL_MS),
         rate_limiter: RateLimiter::new(true, 0, Default::default()),
+        exchange_while_removing: None,
+        exchanged_while_removing: Default::default(),
       }
     }
   }
@@ -1263,6 +1543,58 @@ mod tests {
       })
     }
 
+    fn sync_workload_users(
+      &self,
+      _issuer_id: String,
+      _rules: Vec<WorkloadAccess>,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      Box::pin(async { Ok(()) })
+    }
+
+    /// The users are the `workloads`: the ones of no live issuer and
+    /// rule are removed, once the exchange of
+    /// `exchange_while_removing` had every chance to get its user.
+    fn remove_workload_users_except(
+      &self,
+      live: Vec<LiveIssuer>,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      if let Some((issuer, token)) =
+        self.exchange_while_removing.clone()
+      {
+        self.stored_issuers.lock().unwrap().push(issuer);
+        let mut exchanging = TestAuth::with_user(None);
+        exchanging.providers = Vec::new();
+        exchanging.issuers = self.issuers.clone();
+        exchanging.stored_issuers = self.stored_issuers.clone();
+        exchanging.workloads = self.workloads.clone();
+        *self.exchanged_while_removing.lock().unwrap() = Some(
+          tokio::spawn(async move { run(&exchanging, token).await }),
+        );
+      }
+      let exchange = self.exchanged_while_removing.clone();
+      let workloads = self.workloads.clone();
+      Box::pin(async move {
+        for _ in 0..1000 {
+          let done = exchange
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|exchange| exchange.is_finished());
+          if done {
+            break;
+          }
+          tokio::task::yield_now().await;
+        }
+        workloads.lock().unwrap().retain(|identity| {
+          live.iter().any(|live| {
+            live.issuer_id == identity.issuer_id
+              && live.rule_ids.contains(&identity.rule_id)
+          })
+        });
+        Ok(())
+      })
+    }
+
     fn get_user(
       &self,
       user_id: String,
@@ -1274,16 +1606,7 @@ mod tests {
       })
     }
 
-    fn handle_request_authentication(
-      &self,
-      _auth: crate::RequestAuthentication,
-      _ip: IpAddr,
-      _require_user_enabled: bool,
-      _req: axum::extract::Request,
-    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-    {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
-    }
+    stub_auth_impl!(handle_request_authentication);
 
     fn jwt_provider(&self) -> &JwtProvider {
       &self.jwt
@@ -1348,6 +1671,11 @@ mod tests {
       username: None,
       extra: Default::default(),
     })
+  }
+
+  /// A token of the login provider's user (audience CLIENT_ID).
+  fn token_for_user() -> TestToken<UsernameAdditionalClaims> {
+    token()
   }
 
   /// Builds the client from fixed metadata, in place of network discovery.
@@ -1462,6 +1790,71 @@ mod tests {
     auth
   }
 
+  /// The first exchange of an issuer stored while
+  /// `sync_all_workload_users` has the app remove the users of the
+  /// issuers which are gone (after it listed the live ones) waits for
+  /// the app to be done: its user is created after the removal, not
+  /// taken for the user of an issuer which is gone. The users of the
+  /// issuers which are gone go.
+  #[tokio::test]
+  async fn test_exchange_waits_for_the_removal_of_gone_users() {
+    use crate::provider::workload::sync_all_workload_users;
+
+    let mut auth = workload_auth(Vec::new());
+    auth.issuers = Vec::new();
+    *auth.stored_issuers.lock().unwrap() = vec![TrustedIssuer {
+      id: "removal-live".to_string(),
+      issuer: "https://other-ci.example.com".to_string(),
+      ..trusted_issuer(vec![deploy_rule()])
+    }];
+    *auth.workloads.lock().unwrap() =
+      ["removal-live", "removal-gone"]
+        .into_iter()
+        .map(|issuer_id| WorkloadIdentity {
+          issuer_id: issuer_id.to_string(),
+          rule_id: "deploy".to_string(),
+          rule_name: "Deploy".to_string(),
+          groups: Vec::new(),
+          admin: false,
+          claims: Default::default(),
+        })
+        .collect();
+    auth.exchange_while_removing = Some((
+      TrustedIssuer {
+        id: "removal-new".to_string(),
+        ..trusted_issuer(vec![deploy_rule()])
+      },
+      workload_token(12345, "refs/heads/release/1").mint(),
+    ));
+
+    tokio::time::timeout(
+      Duration::from_secs(10),
+      sync_all_workload_users(&auth),
+    )
+    .await
+    .expect("the sync finishes")
+    .unwrap();
+    let exchange = auth
+      .exchanged_while_removing
+      .lock()
+      .unwrap()
+      .take()
+      .expect("the exchange began");
+    tokio::time::timeout(Duration::from_secs(10), exchange)
+      .await
+      .expect("the exchange finishes")
+      .unwrap()
+      .unwrap();
+    let users = auth
+      .workloads
+      .lock()
+      .unwrap()
+      .iter()
+      .map(|identity| identity.issuer_id.clone())
+      .collect::<Vec<_>>();
+    assert_eq!(users, ["removal-live", "removal-new"]);
+  }
+
   #[tokio::test]
   async fn test_workload_gets_short_lived_token_for_rule_user() {
     let auth = workload_auth(vec![deploy_rule()]);
@@ -1499,7 +1892,12 @@ mod tests {
         rule_name: "Deploy".into(),
       }
     );
-    // Stamped with the token's expiry: the rule's 900s ttl.
+    // Stamped with the expiry of the token it issued.
+    assert_eq!(
+      logins[0].token_expires,
+      auth.jwt.decode_claims(&response.access_token).unwrap().exp
+    );
+    // The rule's 900s ttl.
     let now = std::time::SystemTime::now()
       .duration_since(std::time::UNIX_EPOCH)
       .unwrap()
@@ -1836,6 +2234,32 @@ mod tests {
 
   /// Static issuers come from the app configuration. Rules without
   /// (or sharing) an id would share a user, and each others groups.
+  /// A static issuer whose rule matches the audience alone would
+  /// accept the token of anybody who can ask the platform for one: it
+  /// is skipped (the management api refuses to store it), and accepts
+  /// no token.
+  #[tokio::test]
+  async fn test_static_rule_matching_the_audience_alone_accepts_nothing()
+   {
+    let everybody = WorkloadRule {
+      id: "everybody".to_string(),
+      name: "Everybody".to_string(),
+      claims: vec![WorkloadClaim {
+        claim: "aud".to_string(),
+        pattern: WORKLOAD_AUDIENCE.to_string(),
+      }],
+      admin: true,
+      ..deploy_rule()
+    };
+    let auth = workload_auth(vec![everybody]);
+    let err = run(&auth, workload_token(1, "refs/heads/main").mint())
+      .await
+      .unwrap_err();
+    assert_eq!(code(&err), "invalid_grant");
+    assert!(err.error.to_string().contains("No login provider"));
+    assert!(auth.workloads.lock().unwrap().is_empty());
+  }
+
   #[tokio::test]
   async fn test_workload_rules_need_unique_ids() {
     let token =
@@ -2493,6 +2917,132 @@ mod tests {
     assert_eq!(auth.synced.lock().unwrap().len(), 1);
   }
 
+  /// A login provider and a trusted issuer of one issuer: whichever
+  /// got further with a token neither accepted is reported, in the
+  /// order each path uses (verified but refused, over unavailable,
+  /// over rejected), not the login provider's whatever it says.
+  #[tokio::test]
+  async fn test_furthest_refusal_across_providers_and_issuers() {
+    // The provider (client CLIENT_ID) rejects workload tokens for
+    // their audience.
+    let shared = |id: &str, keys: TrustedIssuerKeys| {
+      let mut auth = TestAuth::with_user(None);
+      let mut issuer = trusted_issuer(vec![deploy_rule()]);
+      issuer.id = id.to_string();
+      issuer.keys = keys;
+      auth.issuers = vec![issuer];
+      auth
+    };
+
+    // The issuer can't be asked: it might accept the token, so the
+    // client is told to try again.
+    let auth = shared(
+      "shared-down",
+      TrustedIssuerKeys::Static("broken".into()),
+    );
+    let token =
+      || workload_token(12345, "refs/heads/release/1").mint();
+    let err = run(&auth, token()).await.unwrap_err();
+    assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+    let (status, body) = token_exchange_error(&err);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body.error, "temporarily_unavailable");
+
+    // The issuer verified the token, which matches no rule: that is
+    // what the token is told, not the provider's audience.
+    let auth =
+      shared("shared-up", TrustedIssuerKeys::Static(jwks_json()));
+    let err =
+      run(&auth, workload_token(99999, "refs/heads/x").mint())
+        .await
+        .unwrap_err();
+    assert_eq!(code(&err), "invalid_grant");
+    assert!(err.error.to_string().contains("matches no rule"));
+
+    // The provider verified a token whose user isn't linked, which
+    // the issuer rejects (audience) or can't be asked about.
+    for keys in [
+      TrustedIssuerKeys::Static(jwks_json()),
+      TrustedIssuerKeys::Static("broken".into()),
+    ] {
+      let auth = shared("shared-user-token", keys);
+      let err =
+        run(&auth, token_for_user().mint()).await.unwrap_err();
+      assert_eq!(code(&err), "invalid_grant");
+      assert!(err.error.to_string().contains("No user is linked"));
+    }
+
+    // Both reject it: the provider's (first) rejection.
+    let auth = shared(
+      "shared-reject",
+      TrustedIssuerKeys::Static(other_jwks_json()),
+    );
+    let err = run(&auth, token()).await.unwrap_err();
+    assert_eq!(code(&err), "invalid_grant");
+  }
+
+  /// The exchange endpoint's, rate limit included, of a workload
+  /// token at `ip`.
+  async fn exchange_workload_at(
+    auth: &TestAuth,
+    ip: IpAddr,
+  ) -> mogh_error::Result<ExchangedToken> {
+    let token = workload_token(12345, "refs/heads/release/1").mint();
+    exchange_token(
+      auth,
+      ip,
+      TokenExchangeRequest::id_token(token),
+      Default::default(),
+    )
+    .await
+  }
+
+  /// A token one candidate rejected while another couldn't be asked
+  /// is a `503`, which still counts against the rate limit: the
+  /// caller picks the issuer, and a forged token aimed at one with a
+  /// candidate down would otherwise never count. Without a rejection,
+  /// an unavailable issuer counts nothing.
+  #[tokio::test]
+  async fn test_unavailable_masking_a_rejection_counts() {
+    let mut other_cluster = trusted_issuer(vec![deploy_rule()]);
+    other_cluster.id = "counted-other-cluster".to_string();
+    other_cluster.keys = TrustedIssuerKeys::Static(other_jwks_json());
+    let mut down = trusted_issuer(vec![deploy_rule()]);
+    down.id = "counted-down-cluster".to_string();
+    down.name = "Down".to_string();
+    down.keys = TrustedIssuerKeys::Static("broken".into());
+    let mut auth = workload_auth(Vec::new());
+    auth.issuers = vec![other_cluster, down.clone()];
+    auth.rate_limiter =
+      RateLimiter::new(false, 2, std::time::Duration::from_secs(60));
+    let ip: IpAddr = "10.0.0.2".parse().unwrap();
+    for remaining in [1, 0] {
+      let err = exchange_workload_at(&auth, ip).await.unwrap_err();
+      assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+      let (status, body) = token_exchange_error(&err);
+      assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+      assert_eq!(body.error, "temporarily_unavailable");
+      assert_eq!(
+        body.error_description.unwrap(),
+        format!(
+          "Trusted issuer 'Down' is not available | You have {remaining} attempts remaining"
+        )
+      );
+    }
+    let err = exchange_workload_at(&auth, ip).await.unwrap_err();
+    assert_eq!(err.status, StatusCode::TOO_MANY_REQUESTS);
+
+    // Only the issuer which is down: nothing rejected the token.
+    auth.issuers = vec![down];
+    let ip: IpAddr = "10.0.0.3".parse().unwrap();
+    for _ in 0..5 {
+      let err = exchange_workload_at(&auth, ip).await.unwrap_err();
+      assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+      let message = format!("{:#}", err.error);
+      assert!(!message.contains("attempts"), "{message}");
+    }
+  }
+
   /// [exchange_token] is [exchange] behind the app's failure rate
   /// limit, which must keep the errors' types: the OAuth codes of
   /// the endpoint and the [RoleNotFound] apps tell apart.
@@ -2659,31 +3209,55 @@ mod tests {
       HttpTestAuth
     }
 
-    fn get_user(
-      &self,
-      _user_id: String,
-    ) -> crate::DynFuture<mogh_error::Result<BoxAuthUser>> {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
+    fn host(&self) -> &str {
+      "https://app.example.com"
     }
 
-    fn handle_request_authentication(
-      &self,
-      _auth: crate::RequestAuthentication,
-      _ip: IpAddr,
-      _require_user_enabled: bool,
-      _req: axum::extract::Request,
-    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-    {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
+    fn extra_hosts(&self) -> &[String] {
+      static EXTRA: std::sync::LazyLock<Vec<String>> =
+        std::sync::LazyLock::new(|| {
+          vec![String::from("http://10.0.0.5:9120")]
+        });
+      &EXTRA
     }
 
-    fn jwt_provider(&self) -> &JwtProvider {
-      panic!("not needed for these tests")
+    stub_auth_impl!(
+      get_user,
+      handle_request_authentication,
+      jwt_provider
+    );
+  }
+
+  /// [HttpTestAuth], counting failures: one per ip.
+  struct LimitedHttpAuth;
+
+  impl AuthImpl for LimitedHttpAuth {
+    fn new() -> Self {
+      LimitedHttpAuth
+    }
+    fn host(&self) -> &str {
+      HttpTestAuth.host()
+    }
+    stub_auth_impl!(
+      get_user,
+      handle_request_authentication,
+      jwt_provider
+    );
+    fn general_rate_limiter(&self) -> &RateLimiter {
+      static LIMITER: std::sync::LazyLock<Arc<RateLimiter>> =
+        std::sync::LazyLock::new(|| {
+          RateLimiter::new(false, 1, Duration::from_secs(60))
+        });
+      &LIMITER
     }
   }
 
   /// Serves the token endpoint on a free local port.
   async fn serve() -> String {
+    serve_with::<HttpTestAuth>().await
+  }
+
+  async fn serve_with<I: AuthImpl>() -> String {
     let listener =
       tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address =
@@ -2691,13 +3265,126 @@ mod tests {
     tokio::spawn(async move {
       axum::serve(
         listener,
-        router::<HttpTestAuth>()
+        router::<I>()
           .into_make_service_with_connect_info::<std::net::SocketAddr>(),
       )
       .await
       .unwrap();
     });
     address
+  }
+
+  /// Fetch metadata decides, else the `Origin` of the post must be
+  /// the app's host or one of its extra hosts.
+  #[test]
+  fn test_check_not_cross_site() {
+    let check = |headers: &[(&'static str, &'static str)]| {
+      let mut map = HeaderMap::new();
+      for (name, value) in headers {
+        map.insert(*name, HeaderValue::from_static(value));
+      }
+      check_not_cross_site(&HttpTestAuth, &map)
+    };
+    // RFC 8693 clients, and the app's own pages.
+    for headers in [
+      &[][..],
+      &[("sec-fetch-site", "same-origin")],
+      &[("sec-fetch-site", "none")],
+      &[("origin", "https://app.example.com")],
+      &[("origin", "https://app.example.com:443")],
+      &[("origin", "http://10.0.0.5:9120")],
+      // Fetch metadata can't be set by a page: it decides.
+      &[
+        ("sec-fetch-site", "same-origin"),
+        ("origin", "https://reached.another.way"),
+      ],
+    ] {
+      assert!(check(headers).is_ok(), "{headers:?}");
+    }
+    // Pages of other sites, sandboxed pages, other ports / schemes.
+    for headers in [
+      &[("sec-fetch-site", "cross-site")][..],
+      &[("sec-fetch-site", "same-site")],
+      &[
+        ("sec-fetch-site", "cross-site"),
+        ("origin", "https://app.example.com"),
+      ],
+      &[("origin", "https://evil.example")],
+      &[("origin", "null")],
+      &[("origin", "http://app.example.com")],
+      &[("origin", "https://app.example.com:8443")],
+      &[("origin", "https://app.example.com.evil.example")],
+    ] {
+      let err = check(headers).unwrap_err();
+      assert_eq!(code(&err), "invalid_request", "{headers:?}");
+      let (status, _) = token_exchange_error(&err);
+      assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+  }
+
+  /// Any page can make its visitors' browsers post the form. Those
+  /// requests are refused before they count against the ip, so they
+  /// can't get it refused by the (general) rate limiter. The same
+  /// exchange from another client counts.
+  #[tokio::test]
+  async fn test_http_cross_site_requests_are_not_counted() {
+    let address = serve_with::<LimitedHttpAuth>().await;
+    let token = token().mint();
+    let form = [
+      ("grant_type", GRANT_TYPE_TOKEN_EXCHANGE),
+      ("subject_token", token.as_str()),
+      ("subject_token_type", TOKEN_TYPE_ID_TOKEN),
+    ];
+    let post =
+      |headers: &'static [(&'static str, &'static str)]| {
+        let mut request =
+          reqwest::Client::new().post(format!("{address}/token"));
+        for (name, value) in headers {
+          request = request.header(*name, *value);
+        }
+        let request = request.form(&form);
+        async move {
+          let response = request.send().await.unwrap();
+          let status = response.status();
+          let error: TokenExchangeError =
+            response.json().await.unwrap();
+          (status, error)
+        }
+      };
+    for _ in 0..3 {
+      for headers in [
+        &[
+          ("sec-fetch-site", "cross-site"),
+          ("sec-fetch-mode", "no-cors"),
+        ][..],
+        &[("origin", "https://evil.example")],
+      ] {
+        let (status, error) = post(headers).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.error, "invalid_request");
+        assert!(
+          !error
+            .error_description
+            .unwrap_or_default()
+            .contains("attempts remaining")
+        );
+      }
+    }
+    // The ip has its whole budget: the first failure of a client
+    // exchanging the same token counts...
+    let (status, error) = post(&[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error.error, "invalid_grant");
+    assert!(
+      error
+        .error_description
+        .unwrap_or_default()
+        .contains("0 attempts remaining")
+    );
+    // ...and uses it up.
+    let (status, error) = post(&[]).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error, "temporarily_unavailable");
   }
 
   async fn post_form(

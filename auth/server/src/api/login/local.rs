@@ -11,8 +11,14 @@ use mogh_resolver::Resolve;
 use tracing::{info, instrument, warn};
 
 use crate::{
-  AuthImpl, Login, LoginKind,
-  api::login::LoginArgs,
+  AuthImpl, LoginKind,
+  api::{
+    check_new_username,
+    login::{
+      IssueToken, LoginArgs, SecondFactorChallenge,
+      begin_second_factor, issue_login,
+    },
+  },
   bcrypt_pool::{bcrypt_hash, bcrypt_verify},
   middleware::check_user_cidr_whitelist,
   session::Session,
@@ -40,7 +46,7 @@ pub async fn sign_up_local_user<I: AuthImpl + ?Sized>(
     );
   }
 
-  auth.validate_username(&username)?;
+  check_new_username(auth, &username)?;
   auth.validate_password(password)?;
   check_username_available(auth, &username, None).await?;
 
@@ -59,18 +65,17 @@ pub async fn sign_up_local_user<I: AuthImpl + ?Sized>(
   info!(user_id, username, "New user registration (Local)");
 
   // Signing up logs the new user in.
-  auth
-    .record_login(Login {
-      user_id: user_id.clone(),
-      username,
-      ip,
-      kind: LoginKind::Local,
-      second_factor: None,
-      token_expires: auth.jwt_provider().default_expires_at()?,
-    })
-    .await?;
-
-  auth.jwt_provider().encode_sub(&user_id).map_err(Into::into)
+  let token = issue_login(
+    auth,
+    &user_id,
+    &username,
+    ip,
+    LoginKind::Local,
+    None,
+    IssueToken::Now,
+  )
+  .await?;
+  Ok(token.into())
 }
 
 /// Rejects a username another user already has with CONFLICT,
@@ -188,49 +193,29 @@ pub async fn login_local_user<I: AuthImpl + ?Sized>(
     );
   }
 
-  let res = match (user.passkey(), user.totp_secret()) {
-    // Passkey 2FA
-    (Some(passkey), _) => {
-      let provider = auth.passkey_provider().context(
-        "No passkey provider available, possibly invalid 'host' config.",
-      )?;
-      let (response, state) = provider
-        .start_passkey_authentication(passkey)
-        .context("Failed to start passkey authentication flow")?;
-      session.insert_passkey_login(user.id(), &state).await?;
-      session.insert_login_kind(&LoginKind::Local).await?;
-
-      info!(
-        user_id = user.id(),
-        username = user.username(),
-        "Passkey 2FA flow initiated"
-      );
-
+  let res = match begin_second_factor(
+    auth,
+    session,
+    user.as_ref(),
+    &LoginKind::Local,
+  )
+  .await?
+  {
+    Some(SecondFactorChallenge::Passkey(response)) => {
       JwtOrTwoFactor::Passkey(response)
     }
-    // TOTP 2FA
-    (None, Some(_)) => {
-      session.insert_totp_login_user_id(user.id()).await?;
-      session.insert_login_kind(&LoginKind::Local).await?;
-
-      info!(
-        user_id = user.id(),
-        username = user.username(),
-        "TOTP 2FA flow initiated"
-      );
-
-      JwtOrTwoFactor::Totp {}
-    }
-    (None, None) => {
-      auth
-        .record_login(Login::of(
-          user.as_ref(),
-          ip,
-          LoginKind::Local,
-          None,
-          auth.jwt_provider().default_expires_at()?,
-        ))
-        .await?;
+    Some(SecondFactorChallenge::Totp) => JwtOrTwoFactor::Totp {},
+    None => {
+      let token = issue_login(
+        auth,
+        user.id(),
+        user.username(),
+        ip,
+        LoginKind::Local,
+        None,
+        IssueToken::Now,
+      )
+      .await?;
 
       info!(
         user_id = user.id(),
@@ -238,7 +223,7 @@ pub async fn login_local_user<I: AuthImpl + ?Sized>(
         "User logged in"
       );
 
-      JwtOrTwoFactor::Jwt(auth.jwt_provider().encode_sub(user.id())?)
+      JwtOrTwoFactor::Jwt(token.into())
     }
   };
 
@@ -279,12 +264,14 @@ mod tests {
   use std::sync::Mutex;
 
   use crate::{
-    DynFuture, RequestAuthentication,
+    DynFuture,
     provider::jwt::JwtProvider,
+    test_support::{session, stub_auth_impl, test_jwt_provider},
     user::{AuthUserImpl, BoxAuthUser},
   };
 
   use super::*;
+  use crate::Login;
 
   struct TestUser {
     id: String,
@@ -308,49 +295,57 @@ mod tests {
 
   #[derive(Default)]
   struct TestAuth {
+    /// Its jwt provider has no secret: no token can be encoded.
+    jwt_broken: bool,
     /// (id, username)
     users: Mutex<Vec<(String, String)>>,
     /// user id -> hashed password
     hashes: Mutex<std::collections::HashMap<String, String>>,
     logins: Mutex<Vec<Login>>,
-  }
-
-  fn session() -> Session {
-    Session(tower_sessions::Session::new(
-      None,
-      std::sync::Arc::new(tower_sessions::MemoryStore::default()),
-      None,
-    ))
+    /// Refused by validate_new_username.
+    reserved: Vec<&'static str>,
   }
 
   impl AuthImpl for TestAuth {
     fn new() -> Self {
       Self::default()
     }
-    fn get_user(
-      &self,
-      _user_id: String,
-    ) -> DynFuture<mogh_error::Result<BoxAuthUser>> {
-      Box::pin(async { Err(anyhow!("unimplemented").into()) })
-    }
-    fn handle_request_authentication(
-      &self,
-      _auth: RequestAuthentication,
-      _ip: IpAddr,
-      _require_user_enabled: bool,
-      req: axum::extract::Request,
-    ) -> DynFuture<mogh_error::Result<axum::extract::Request>> {
-      Box::pin(async { Ok(req) })
-    }
+    stub_auth_impl!(get_user, handle_request_authentication);
     fn jwt_provider(&self) -> &JwtProvider {
-      static PROVIDER: std::sync::LazyLock<JwtProvider> =
-        std::sync::LazyLock::new(|| {
-          JwtProvider::new(b"secret", 60_000)
-        });
-      &PROVIDER
+      static BROKEN: std::sync::LazyLock<JwtProvider> =
+        std::sync::LazyLock::new(|| JwtProvider::new(b"", 60_000));
+      if self.jwt_broken {
+        &BROKEN
+      } else {
+        test_jwt_provider()
+      }
     }
     fn local_auth_bcrypt_cost(&self) -> u32 {
       4
+    }
+    fn validate_new_username(
+      &self,
+      username: &str,
+    ) -> mogh_error::Result<()> {
+      if self.reserved.contains(&username) {
+        return Err(
+          anyhow!("Username is reserved")
+            .status_code(StatusCode::BAD_REQUEST),
+        );
+      }
+      Ok(())
+    }
+    fn update_user_username(
+      &self,
+      user_id: String,
+      username: String,
+    ) -> DynFuture<mogh_error::Result<()>> {
+      for user in self.users.lock().unwrap().iter_mut() {
+        if user.0 == user_id {
+          user.1 = username.clone();
+        }
+      }
+      Box::pin(async { Ok(()) })
     }
     fn find_user_with_username(
       &self,
@@ -406,9 +401,14 @@ mod tests {
   #[tokio::test]
   async fn test_login_is_recorded() {
     let auth = TestAuth::default();
-    sign_up_local_user(&auth, IP, "user".into(), "password-1")
-      .await
-      .unwrap();
+    let token =
+      sign_up_local_user(&auth, IP, "user".into(), "password-1")
+        .await
+        .unwrap();
+    // Recorded with the expiry of the token it issued.
+    let exp =
+      auth.jwt_provider().decode_claims(&token.jwt).unwrap().exp;
+    assert_eq!(auth.logins.lock().unwrap()[0].token_expires, exp);
     {
       let logins = auth.logins.lock().unwrap();
       assert_eq!(logins.len(), 1, "signing up logs the user in");
@@ -461,6 +461,35 @@ mod tests {
     assert_eq!(auth.logins.lock().unwrap().len(), 2);
   }
 
+  /// The token is encoded before the login is recorded: one which
+  /// can't be (eg. the jwt secret is missing) fails the login without
+  /// recording one the user never got.
+  #[tokio::test]
+  async fn test_a_token_which_fails_records_no_login() {
+    let mut auth = TestAuth::default();
+    sign_up_local_user(&auth, IP, "user".into(), "password-1")
+      .await
+      .unwrap();
+    auth.jwt_broken = true;
+    let err = login_local_user(
+      &auth,
+      &session(),
+      IP,
+      "user".into(),
+      "password-1",
+    )
+    .await
+    .unwrap_err();
+    assert!(err.status.is_server_error());
+    let err =
+      sign_up_local_user(&auth, IP, "other".into(), "password-1")
+        .await
+        .unwrap_err();
+    assert!(err.status.is_server_error());
+    // Only the first sign up.
+    assert_eq!(auth.logins.lock().unwrap().len(), 1);
+  }
+
   #[tokio::test]
   async fn test_sign_up_rejects_taken_username_with_conflict() {
     let auth = TestAuth::default();
@@ -474,6 +503,57 @@ mod tests {
     assert_eq!(err.status, StatusCode::CONFLICT);
     // The app storage was never asked to create the duplicate.
     assert_eq!(auth.users.lock().unwrap().len(), 1);
+  }
+
+  /// A name the app keeps for itself can't be taken, by a sign up or
+  /// a rename, while the user who had it before keeps logging in.
+  #[tokio::test]
+  async fn test_new_usernames_pass_validate_new_username() {
+    use crate::api::manage::local::update_username;
+
+    let mut auth = TestAuth::default();
+    // Taken before the app reserved it.
+    sign_up_local_user(&auth, IP, "System".into(), "password-1")
+      .await
+      .unwrap();
+    sign_up_local_user(&auth, IP, "user".into(), "password-1")
+      .await
+      .unwrap();
+    auth.reserved = vec!["System", "Action"];
+
+    let err =
+      sign_up_local_user(&auth, IP, "Action".into(), "password-1")
+        .await
+        .unwrap_err();
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert!(
+      err.error.to_string().contains("reserved"),
+      "{:#}",
+      err.error
+    );
+    assert_eq!(auth.users.lock().unwrap().len(), 2);
+
+    let err =
+      update_username(&auth, "user", "id-1".into(), "Action".into())
+        .await
+        .unwrap_err();
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    update_username(&auth, "user", "id-1".into(), "user-2".into())
+      .await
+      .unwrap();
+    assert_eq!(auth.users.lock().unwrap()[1].1, "user-2");
+
+    // Its owner logs in with it all the same.
+    let res = login_local_user(
+      &auth,
+      &session(),
+      IP,
+      "System".into(),
+      "password-1",
+    )
+    .await
+    .unwrap();
+    assert!(matches!(res, JwtOrTwoFactor::Jwt(_)));
   }
 
   #[tokio::test]

@@ -11,9 +11,11 @@ use mogh_auth_client::{
   },
   config::{TrustedIssuer, TrustedIssuerKeys, WorkloadRule},
 };
+use std::sync::Arc;
+
 use mogh_error::{AddStatusCode as _, AddStatusCodeError as _};
 use mogh_resolver::Resolve;
-use tracing::{info, instrument, warn};
+use tracing::{Instrument as _, info, instrument, warn};
 
 use crate::{
   AuthImpl,
@@ -22,29 +24,12 @@ use crate::{
     external::PROVIDER_ID_LENGTH,
     workload::{
       WorkloadAccess, evict_verification_keys, list_trusted_issuers,
-      lock_trusted_issuer, parse_jwks,
+      lock_trusted_issuer, normalize_trusted_issuer, parse_jwks,
     },
   },
   rand::random_string,
   user::AuthUserImpl,
-  validations::validate_public_http_url,
 };
-
-const MAX_NAME_LENGTH: usize = 100;
-const MAX_AUDIENCES: usize = 16;
-const MAX_RULES: usize = 64;
-const MAX_CLAIMS_PER_RULE: usize = 16;
-const MAX_GROUPS_PER_RULE: usize = 64;
-const MAX_VALUE_LENGTH: usize = 512;
-
-/// Claims which verification fixes for every token it accepts: the
-/// issuer, one of the accepted audiences, and times. A rule matching
-/// only these identifies no workload, it accepts every token of the
-/// issuer. For a public platform (Github Actions, Gitlab.com) that is
-/// anybody's, the audience included: anyone can request a token for
-/// any audience there.
-const VERIFIED_CLAIMS: [&str; 6] =
-  ["iss", "aud", "exp", "iat", "nbf", "jti"];
 
 fn bad_request(message: impl std::fmt::Display) -> mogh_error::Error {
   anyhow!("{message}").status_code(StatusCode::BAD_REQUEST)
@@ -61,156 +46,22 @@ fn check_admin(user: &dyn AuthUserImpl) -> mogh_error::Result<()> {
   }
 }
 
-fn validate_name(
-  kind: &str,
-  name: &str,
-) -> mogh_error::Result<String> {
-  let name = name.trim();
-  if name.is_empty() {
-    return Err(bad_request(format!("{kind} name cannot be empty")));
-  }
-  if name.chars().count() > MAX_NAME_LENGTH {
-    return Err(bad_request(format!(
-      "{kind} name cannot be longer than {MAX_NAME_LENGTH} characters"
-    )));
-  }
-  Ok(name.to_string())
-}
-
-/// Credentials are refused, not supported: the discovery document
-/// and the keys are public, and credentials in the url would be
-/// stored, listed and logged in plain text.
-fn validate_http_url(
-  field: &str,
-  url: &str,
-) -> mogh_error::Result<()> {
-  validate_public_http_url(field, url)
-    .status_code(StatusCode::BAD_REQUEST)
-}
-
-/// Trimmed, without empty entries or duplicates.
-fn clean_list(
-  field: &str,
-  values: Vec<String>,
-  max: usize,
-) -> mogh_error::Result<Vec<String>> {
-  let mut cleaned = Vec::<String>::new();
-  for value in values {
-    let value = value.trim();
-    if value.is_empty() || cleaned.iter().any(|v| v == value) {
-      continue;
-    }
-    if value.len() > MAX_VALUE_LENGTH {
-      return Err(bad_request(format!(
-        "'{field}' values cannot be longer than {MAX_VALUE_LENGTH} characters"
-      )));
-    }
-    cleaned.push(value.to_string());
-  }
-  if cleaned.len() > max {
-    return Err(bad_request(format!(
-      "'{field}' accepts at most {max} values"
-    )));
-  }
-  Ok(cleaned)
-}
-
-fn validate_rule(
-  mut rule: WorkloadRule,
-) -> mogh_error::Result<WorkloadRule> {
-  rule.name = validate_name("Rule", &rule.name)?;
-  // Without conditions a rule would accept every token of the issuer.
-  if rule.claims.is_empty() {
-    return Err(bad_request(format!(
-      "Rule '{}' needs at least one claim to match",
-      rule.name
-    )));
-  }
-  if rule.claims.len() > MAX_CLAIMS_PER_RULE {
-    return Err(bad_request(format!(
-      "Rule '{}' can match at most {MAX_CLAIMS_PER_RULE} claims",
-      rule.name
-    )));
-  }
-  for condition in &mut rule.claims {
-    condition.claim = condition.claim.trim().to_string();
-    if condition.claim.is_empty() || condition.pattern.is_empty() {
-      return Err(bad_request(format!(
-        "Rule '{}' has a claim without a name or a value",
-        rule.name
-      )));
-    }
-    if condition.claim.len() > MAX_VALUE_LENGTH
-      || condition.pattern.len() > MAX_VALUE_LENGTH
-    {
-      return Err(bad_request(format!(
-        "Claims of rule '{}' cannot be longer than {MAX_VALUE_LENGTH} characters",
-        rule.name
-      )));
-    }
-    // Matches anything, so it restricts nothing.
-    if condition.pattern.chars().all(|c| c == '*') {
-      return Err(bad_request(format!(
-        "Claim '{}' of rule '{}' matches any value, which doesn't restrict anything",
-        condition.claim, rule.name
-      )));
-    }
-  }
-  // Conditions on these may narrow a rule down further (eg. one of
-  // several audiences), but can't be all it takes.
-  if rule.claims.iter().all(|condition| {
-    VERIFIED_CLAIMS.contains(&condition.claim.as_str())
-  }) {
-    return Err(bad_request(format!(
-      "Rule '{}' only matches claims every accepted token has (issuer, audience, times), which doesn't restrict anything. Add a claim identifying the workload, eg. 'sub' or 'repository_id'.",
-      rule.name
-    )));
-  }
-  rule.groups =
-    clean_list("groups", rule.groups, MAX_GROUPS_PER_RULE)?;
-  Ok(rule)
-}
-
 /// Validates the issuer, and assigns the rule ids: rules keep the id
 /// (and with it their user) they had on `existing`, all others get a
 /// new random one. An id the caller made up could otherwise be the
 /// one of a deleted rule, and take over its user.
 fn validate_issuer(
-  mut issuer: TrustedIssuer,
+  issuer: TrustedIssuer,
   existing: Option<&TrustedIssuer>,
 ) -> mogh_error::Result<TrustedIssuer> {
-  issuer.name = validate_name("Issuer", &issuer.name)?;
-
-  issuer.issuer = issuer.issuer.trim().to_string();
-  validate_http_url("issuer", &issuer.issuer)?;
-
-  issuer.audiences =
-    clean_list("audiences", issuer.audiences, MAX_AUDIENCES)?;
-  if issuer.audiences.is_empty() {
-    return Err(bad_request(
-      "At least one audience is required. Use one specific to this app, eg. its url.",
-    ));
-  }
-
-  match &issuer.keys {
-    TrustedIssuerKeys::Discovery {} => {}
-    TrustedIssuerKeys::JwksUri(url) => {
-      validate_http_url("keys url", url)?
-    }
-    TrustedIssuerKeys::Static(jwks) => {
-      parse_jwks(jwks).status_code(StatusCode::BAD_REQUEST)?;
-    }
-  }
-
-  if issuer.rules.len() > MAX_RULES {
-    return Err(bad_request(format!(
-      "An issuer can have at most {MAX_RULES} rules"
-    )));
+  let mut issuer = normalize_trusted_issuer(issuer)
+    .status_code(StatusCode::BAD_REQUEST)?;
+  if let TrustedIssuerKeys::Static(jwks) = &issuer.keys {
+    parse_jwks(jwks).status_code(StatusCode::BAD_REQUEST)?;
   }
 
   let mut rules = Vec::<WorkloadRule>::new();
-  for rule in issuer.rules {
-    let mut rule = validate_rule(rule)?;
+  for mut rule in issuer.rules {
     let keeps_id = existing.is_some_and(|existing| {
       existing.rules.iter().any(|r| r.id == rule.id)
     }) && !rules.iter().any(|r| r.id == rule.id);
@@ -328,54 +179,80 @@ async fn resolve_managed_issuer<I: AuthImpl + ?Sized>(
 /// Once stored, the update is audited and the issuer's keys evicted
 /// whether or not the sync succeeds: a failed sync fails the request,
 /// but the new trust configuration is already in effect.
+///
+/// The store, the eviction, the audit and the sync run in a task of
+/// their own, which holds the issuer's lock: a request dropped
+/// meanwhile (the admin's client gone) still completes them. Otherwise
+/// the new rules could be stored, and in effect for new exchanges,
+/// without their users synced: the tokens already issued would keep
+/// the access the rules no longer give, with nothing logged. The task
+/// runs in the [request_context][crate::request_context] of the
+/// request, and its tracing span.
 pub async fn update_issuer<I: AuthImpl + ?Sized>(
-  auth: &I,
+  auth: Arc<I>,
   user: &dyn AuthUserImpl,
   issuer: TrustedIssuer,
 ) -> mogh_error::Result<TrustedIssuerListItem> {
   check_admin(user)?;
 
   let lock = lock_trusted_issuer(&issuer.id).await;
-  let existing = resolve_managed_issuer(auth, &issuer.id).await?;
+  let existing =
+    resolve_managed_issuer(auth.as_ref(), &issuer.id).await?;
   let mut issuer = validate_issuer(issuer, Some(&existing))?;
   issuer.id = existing.id;
 
-  auth.update_trusted_issuer(issuer.clone()).await?;
+  let admin_id = user.id().to_string();
+  let admin = user.username().to_string();
+  let update = async move {
+    auth.update_trusted_issuer(issuer.clone()).await?;
 
-  evict_verification_keys(&issuer.id);
+    evict_verification_keys(&issuer.id);
 
-  info!(
-    admin_id = user.id(),
-    admin = user.username(),
-    issuer_id = issuer.id,
-    issuer = issuer.name,
-    "Trusted issuer updated"
-  );
-
-  if let Err(e) = auth
-    .sync_workload_users(
-      issuer.id.clone(),
-      WorkloadAccess::of_issuer(&issuer),
-    )
-    .await
-  {
-    warn!(
-      admin_id = user.id(),
-      admin = user.username(),
+    info!(
+      admin_id,
+      admin,
       issuer_id = issuer.id,
       issuer = issuer.name,
-      "Trusted issuer was stored, but syncing the users of its rules failed. \
-       They may keep their previous access until it is saved again | {:#}",
-      e.error
+      "Trusted issuer updated"
     );
-    return Err(e);
-  }
-  drop(lock);
 
-  Ok(TrustedIssuerListItem {
-    issuer,
-    read_only: false,
-  })
+    if let Err(e) = auth
+      .sync_workload_users(
+        issuer.id.clone(),
+        WorkloadAccess::of_issuer(&issuer),
+      )
+      .await
+    {
+      warn!(
+        admin_id,
+        admin,
+        issuer_id = issuer.id,
+        issuer = issuer.name,
+        "Trusted issuer was stored, but syncing the users of its rules failed. \
+         They may keep their previous access until it is saved again | {:#}",
+        e.error
+      );
+      return Err(e);
+    }
+    drop(lock);
+
+    Ok(TrustedIssuerListItem {
+      issuer,
+      read_only: false,
+    })
+  };
+  let context = crate::request_context();
+  let update = async move {
+    match context {
+      Some(context) => {
+        crate::scope_request_context(context, update).await
+      }
+      None => update.await,
+    }
+  };
+  tokio::spawn(update.instrument(tracing::Span::current()))
+    .await
+    .context("Failed to update the trusted issuer")?
 }
 
 impl Resolve<ManageArgs> for UpdateTrustedIssuer {
@@ -392,7 +269,7 @@ impl Resolve<ManageArgs> for UpdateTrustedIssuer {
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
-    update_issuer(auth.as_ref(), user.as_ref().as_ref(), self.issuer)
+    update_issuer(auth.clone(), user.as_ref().as_ref(), self.issuer)
       .await
   }
 }
@@ -453,7 +330,9 @@ mod tests {
   use mogh_auth_client::config::WorkloadClaim;
 
   use super::*;
-  use crate::provider::token_exchange::test_tokens::jwks_json;
+  use crate::provider::{
+    token_exchange::test_tokens::jwks_json, workload::MAX_RULES,
+  };
 
   struct TestUser {
     admin: bool,
@@ -477,7 +356,8 @@ mod tests {
   /// The calls of sync_workload_users.
   type Synced = Arc<Mutex<Vec<(String, Vec<WorkloadAccess>)>>>;
 
-  #[derive(Default)]
+  /// Cloned, it shares its storage: the server owns one in a task.
+  #[derive(Default, Clone)]
   struct TestAuth {
     static_issuers: Vec<TrustedIssuer>,
     stored: Arc<Mutex<Vec<TrustedIssuer>>>,
@@ -486,6 +366,10 @@ mod tests {
     /// Whether an exchange of the issuer had to wait, for each
     /// call storing, syncing or deleting it.
     exchange_waited: Arc<Mutex<Vec<bool>>>,
+    /// How long storing an update takes.
+    store_delay: std::time::Duration,
+    /// The request context the last sync_workload_users ran in.
+    sync_context: Arc<Mutex<Option<crate::RequestContext>>>,
   }
 
   /// Whether an exchange of a rule of the issuer has to wait.
@@ -548,7 +432,12 @@ mod tests {
       let existing =
         stored.iter_mut().find(|i| i.id == issuer.id).unwrap();
       *existing = issuer;
-      self.record_exchange_waits(id)
+      let delay = self.store_delay;
+      let record = self.record_exchange_waits(id);
+      Box::pin(async move {
+        tokio::time::sleep(delay).await;
+        record.await
+      })
     }
 
     fn sync_workload_users(
@@ -562,6 +451,7 @@ mod tests {
         });
       }
       self.synced.lock().unwrap().push((issuer_id.clone(), rules));
+      *self.sync_context.lock().unwrap() = crate::request_context();
       self.record_exchange_waits(issuer_id)
     }
 
@@ -646,7 +536,7 @@ mod tests {
         .await
         .unwrap_err()
         .status,
-      update_issuer(&auth, &USER, update)
+      update_issuer(Arc::new(auth.clone()), &USER, update)
         .await
         .unwrap_err()
         .status,
@@ -703,7 +593,10 @@ mod tests {
       rule("", "New"),
     ];
     let updated =
-      update_issuer(&auth, &ADMIN, update).await.unwrap().issuer;
+      update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+        .await
+        .unwrap()
+        .issuer;
 
     assert_eq!(updated.id, created.id);
     assert_eq!(updated.rules[0].id, deploy_id);
@@ -827,7 +720,9 @@ mod tests {
     update.keys = TrustedIssuerKeys::JwksUri(
       "https://user:pass@issuer.example.com/keys".into(),
     );
-    let err = update_issuer(&auth, &ADMIN, update).await.unwrap_err();
+    let err = update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+      .await
+      .unwrap_err();
     assert_eq!(err.status, StatusCode::BAD_REQUEST);
     assert_eq!(auth.stored.lock().unwrap()[0].keys, created.keys);
     delete_issuer(&auth, &ADMIN, &created.id).await.unwrap();
@@ -847,6 +742,57 @@ mod tests {
     assert!(create_issuer(&auth, &ADMIN, valid).await.is_ok());
   }
 
+  /// Issuer and rule names refuse control characters (Unicode Cc)
+  /// at create and update, the error not repeating the name.
+  #[tokio::test]
+  async fn test_names_refuse_control_characters() {
+    let auth = TestAuth::default();
+    let created = create_issuer(&auth, &ADMIN, issuer(Vec::new()))
+      .await
+      .unwrap()
+      .issuer;
+    for name in
+      ["CI\tjobs", "CI\njobs", "CI\u{1b}jobs", "CI\u{85}jobs"]
+    {
+      let mut issuer_named = issuer(vec![rule("", "Deploy")]);
+      issuer_named.name = name.into();
+      let mut rule_named = issuer(vec![rule("", name)]);
+      rule_named.name = "Rules".into();
+      for (what, candidate) in
+        [("Issuer", issuer_named), ("Rule", rule_named)]
+      {
+        let mut update = candidate.clone();
+        update.id = created.id.clone();
+        for err in [
+          create_issuer(&auth, &ADMIN, candidate).await.unwrap_err(),
+          update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+            .await
+            .unwrap_err(),
+        ] {
+          assert_eq!(err.status, StatusCode::BAD_REQUEST, "{name:?}");
+          assert_eq!(
+            format!("{:#}", err.error),
+            format!("{what} name cannot contain control characters")
+          );
+        }
+      }
+    }
+    let stored = auth.stored.lock().unwrap().clone();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].name, created.name);
+    drop(stored);
+    // Validated as the api validates (static issuers too).
+    let mut named = issuer(vec![rule("", "Deploy")]);
+    named.name = "CI\tjobs".into();
+    assert!(
+      crate::provider::workload::validate_trusted_issuer(&named)
+        .is_err()
+    );
+    named.name = "  CI jobs (prod)  ".into();
+    crate::provider::workload::validate_trusted_issuer(&named)
+      .unwrap();
+  }
+
   #[tokio::test]
   async fn test_static_issuers_are_read_only() {
     let mut static_issuer = issuer(Vec::new());
@@ -859,9 +805,10 @@ mod tests {
     assert_eq!(listed.len(), 1);
     assert!(listed[0].read_only);
 
-    let err = update_issuer(&auth, &ADMIN, static_issuer)
-      .await
-      .unwrap_err();
+    let err =
+      update_issuer(Arc::new(auth.clone()), &ADMIN, static_issuer)
+        .await
+        .unwrap_err();
     assert_eq!(err.status, StatusCode::BAD_REQUEST);
     let err =
       delete_issuer(&auth, &ADMIN, "github").await.unwrap_err();
@@ -909,7 +856,10 @@ mod tests {
       rule("", "New"),
     ];
     let updated =
-      update_issuer(&auth, &ADMIN, update).await.unwrap().issuer;
+      update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+        .await
+        .unwrap()
+        .issuer;
     let access = |rule_id: &str, groups: &[&str], admin, enabled| {
       WorkloadAccess {
         rule_id: rule_id.to_string(),
@@ -942,7 +892,9 @@ mod tests {
         enabled,
         ..updated.clone()
       };
-      update_issuer(&auth, &ADMIN, update).await.unwrap();
+      update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+        .await
+        .unwrap();
       let synced = auth.synced.lock().unwrap().pop().unwrap().1;
       assert_eq!(
         synced.iter().map(|a| a.enabled).collect::<Vec<_>>(),
@@ -1054,6 +1006,63 @@ mod tests {
 
   /// A failed sync fails the request, but the update is stored and
   /// in effect: it is audited, and the old keys are evicted.
+  /// A request dropped while its update is stored (the admin's client
+  /// gone) doesn't leave the new rules in effect but unapplied to the
+  /// users they had: the update runs to its end, the users synced, the
+  /// issuer unlocked, in the request's context.
+  #[tokio::test]
+  async fn test_a_dropped_update_still_syncs() {
+    let auth = TestAuth {
+      store_delay: std::time::Duration::from_millis(200),
+      ..Default::default()
+    };
+    let created =
+      create_issuer(&auth, &ADMIN, issuer(vec![rule("", "Deploy")]))
+        .await
+        .unwrap()
+        .issuer;
+    let update = TrustedIssuer {
+      enabled: false,
+      ..created.clone()
+    };
+    let context = crate::RequestContext::new(
+      "10.1.2.3".parse().unwrap(),
+      "UpdateTrustedIssuer",
+      Some(String::from("user-id")),
+    );
+
+    let res = crate::scope_request_context(
+      context.clone(),
+      tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        update_issuer(Arc::new(auth.clone()), &ADMIN, update),
+      ),
+    )
+    .await;
+    assert!(res.is_err(), "the update finished before the drop");
+    assert!(auth.synced.lock().unwrap().is_empty());
+
+    // It completes all the same (the budget is generous: the store
+    // takes 200 ms, and the suite runs under load).
+    for _ in 0..500 {
+      if !auth.synced.lock().unwrap().is_empty() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let synced = auth.synced.lock().unwrap().clone();
+    assert_eq!(synced.len(), 1);
+    assert_eq!(synced[0].0, created.id);
+    assert!(synced[0].1.iter().all(|access| !access.enabled));
+    assert!(!auth.stored.lock().unwrap()[0].enabled);
+    // In the request's context, and unlocked once done.
+    assert_eq!(
+      auth.sync_context.lock().unwrap().clone(),
+      Some(context)
+    );
+    assert!(!exchange_waits(&created.id).await);
+  }
+
   #[tokio::test]
   async fn test_failed_sync_fails_the_update() {
     use crate::provider::workload::load_verification_keys;
@@ -1074,9 +1083,10 @@ mod tests {
     let keys = load_verification_keys(&created).await.unwrap();
     auth.sync_fails = true;
 
-    let err = update_issuer(&auth, &ADMIN, created.clone())
-      .await
-      .unwrap_err();
+    let err =
+      update_issuer(Arc::new(auth.clone()), &ADMIN, created.clone())
+        .await
+        .unwrap_err();
     assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
 
     let events = Events::of_issuer(&created.id);
@@ -1111,7 +1121,9 @@ mod tests {
         .await
         .unwrap()
         .issuer;
-    update_issuer(&auth, &ADMIN, created.clone()).await.unwrap();
+    update_issuer(Arc::new(auth.clone()), &ADMIN, created.clone())
+      .await
+      .unwrap();
     delete_issuer(&auth, &ADMIN, &created.id).await.unwrap();
     // Store, sync, delete
     assert_eq!(*auth.exchange_waited.lock().unwrap(), [true; 3]);

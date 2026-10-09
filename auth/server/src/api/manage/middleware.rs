@@ -1,71 +1,24 @@
-use std::sync::Arc;
-
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use axum::{
-  extract::{FromRequestParts, OriginalUri, Request},
+  extract::{OriginalUri, Request},
   http::StatusCode,
   middleware::Next,
   response::Response,
 };
-use mogh_error::{AddStatusCode, AddStatusCodeError as _};
-use mogh_rate_limit::WithFailureRateLimit as _;
+use mogh_error::AddStatusCodeError as _;
 use mogh_request_ip::RequestIp;
 
 use crate::{
-  AuthImpl, RequestAuthentication,
+  AuthImpl,
   api::manage::ManageRequest,
-  middleware::{
-    accept_signed_request, accepted_signature,
-    extract_request_authentication_rate_limited,
-    get_user_from_request_authentication, read_request_body,
-    read_signed_request_body,
-  },
-  user::BoxAuthUser,
+  middleware::{authenticate_user, read_request_body},
 };
 
-#[derive(Clone)]
-pub struct UserExtractor(pub Arc<BoxAuthUser>);
-
-impl<S: Send + Sync> FromRequestParts<S> for UserExtractor {
-  type Rejection = mogh_error::Error;
-
-  async fn from_request_parts(
-    parts: &mut axum::http::request::Parts,
-    _: &S,
-  ) -> Result<Self, Self::Rejection> {
-    parts
-      .extensions
-      .get()
-      .cloned()
-      .context("Missing authorization credentials")
-      .status_code(StatusCode::UNAUTHORIZED)
-  }
-}
-
-/// When the user logged in to get the token the request is
-/// authenticated with (unix seconds), see
-/// [JwtClaims::authenticated_at][crate::provider::jwt::JwtClaims::authenticated_at].
-/// `None` for credentials without a login: api keys, signing keys,
-/// and tokens not issued by [AuthImpl::jwt_provider].
-#[derive(Clone, Copy)]
-pub struct AuthenticatedAt(pub Option<u64>);
-
-impl<S: Send + Sync> FromRequestParts<S> for AuthenticatedAt {
-  type Rejection = mogh_error::Error;
-
-  async fn from_request_parts(
-    parts: &mut axum::http::request::Parts,
-    _: &S,
-  ) -> Result<Self, Self::Rejection> {
-    parts
-      .extensions
-      .get()
-      .copied()
-      .context("Missing authorization credentials")
-      .status_code(StatusCode::UNAUTHORIZED)
-  }
-}
-
+/// Authenticates the requests of the auth management api
+/// ([authenticate_user]) and attaches the user for the handlers
+/// ([UserExtractor][crate::middleware::UserExtractor],
+/// [AuthenticatedAt][crate::middleware::AuthenticatedAt]). A disabled
+/// user may only ask who they are ([check_disabled_user_request]).
 pub async fn attach_user<I: AuthImpl>(
   RequestIp(ip): RequestIp,
   OriginalUri(uri): OriginalUri,
@@ -74,57 +27,17 @@ pub async fn attach_user<I: AuthImpl>(
 ) -> mogh_error::Result<Response> {
   let auth = I::new();
 
-  // The signature of a signed request covers the body. One which
-  // can't verify is refused before it is read.
-  let (req, body) = read_signed_request_body(&auth, ip, req).await?;
+  let mut authenticated =
+    authenticate_user(&auth, ip, &uri, req).await?;
 
-  let req_auth = extract_request_authentication_rate_limited(
-    &auth,
-    ip,
-    req.method(),
-    &uri,
-    req.headers(),
-    &body,
-  )
-  .await?;
-
-  let accepted = accepted_signature(&req_auth, req.headers())?;
-
-  let authenticated_at = match &req_auth {
-    RequestAuthentication::Jwt(jwt) => auth
-      .jwt_provider()
-      .decode_claims(jwt)
-      .ok()
-      // The login, not the token: tokens issued by token exchange
-      // carry when the provider authenticated the user.
-      .map(|claims| claims.authenticated_at()),
-    RequestAuthentication::ApiKey { .. }
-    | RequestAuthentication::PublicKey(_) => None,
-  };
-
-  // Enforces the api key and user cidr whitelists.
-  let user =
-    get_user_from_request_authentication(&auth, req_auth, ip)
-      .with_failure_rate_limit_using_ip(
-        auth.general_rate_limiter(),
-        &ip,
-      )
-      .await?;
-
-  let mut req = if user.is_enabled() {
-    req
-  } else {
-    check_disabled_user_request(req).await?
-  };
+  if !authenticated.user.is_enabled() {
+    authenticated.req =
+      check_disabled_user_request(authenticated.req).await?;
+  }
 
   // The request goes on to be handled: the app gets to refuse its
   // signature (one it has seen before).
-  accept_signed_request(&auth, ip, accepted, &mut req).await?;
-
-  req.extensions_mut().insert(UserExtractor(Arc::new(user)));
-  req
-    .extensions_mut()
-    .insert(AuthenticatedAt(authenticated_at));
+  let req = authenticated.finish(&auth).await?;
 
   Ok(next.run(req).await)
 }

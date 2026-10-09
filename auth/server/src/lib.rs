@@ -9,7 +9,6 @@ use axum::{extract::Request, http::StatusCode};
 use mogh_auth_client::{
   api::manage::CreateApiKey,
   config::{ExternalLoginProvider, TrustedIssuer},
-  passkey::Passkey,
 };
 use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::RateLimiter;
@@ -17,7 +16,10 @@ use serde::{Deserialize, Serialize};
 
 pub mod api;
 pub mod api_key;
+pub mod context;
+pub mod login_start;
 pub mod middleware;
+pub mod passkey;
 pub mod provider;
 pub mod rand;
 pub mod user;
@@ -25,9 +27,12 @@ pub mod validations;
 
 mod bcrypt_pool;
 mod session;
+#[cfg(test)]
+mod test_support;
 
 use crate::{
   api_key::BoxAuthApiKey,
+  passkey::Passkey,
   provider::{
     external::ExternalLoginInfo,
     jwt::JwtProvider,
@@ -51,7 +56,12 @@ pub mod request_ip {
   pub use mogh_request_ip::*;
 }
 
-pub type BoxAuthImpl = Box<dyn AuthImpl>;
+pub use bcrypt_pool::hash_password;
+pub use context::{
+  RequestContext, request_context, scope_request_context,
+};
+
+pub(crate) type BoxAuthImpl = Box<dyn AuthImpl>;
 pub type DynFuture<O> =
   std::pin::Pin<Box<dyn Future<Output = O> + Send>>;
 
@@ -116,11 +126,19 @@ pub struct Login {
   /// When the token the login issued expires, in unix seconds:
   /// the `exp` of the session jwt or exchanged token, computed
   /// with the encode's own arithmetic
-  /// ([JwtProvider::expires_at](provider::jwt::JwtProvider::expires_at))
-  /// just before the token is encoded. An app surfacing logins can
-  /// show how long each granted credential lives without knowing
-  /// the flows' ttl rules (a workload rule's `token_ttl_secs`
-  /// capped at the app ttl, everything else the app ttl).
+  /// ([JwtProvider::expires_at](provider::jwt::JwtProvider::expires_at)).
+  /// An app surfacing logins can show how long each granted
+  /// credential lives without knowing the flows' ttl rules (a
+  /// workload rule's `token_ttl_secs` capped at the app ttl,
+  /// everything else the app ttl).
+  ///
+  /// ⚠️ An external login completed at the provider's callback
+  /// without a second factor is recorded at the callback, while its
+  /// session jwt is only encoded when the app redeems it
+  /// (`ExchangeForJwt`): up to 2 minutes later
+  /// (`Session::MAX_COMPLETED_LOGIN_AGE`), or never when it isn't
+  /// redeemed. Its `token_expires` is the callback time plus the ttl,
+  /// and the jwt, if any, expires up to 2 minutes after it.
   pub token_expires: u64,
 }
 
@@ -202,6 +220,32 @@ impl From<api::token::ExchangedLogin> for LoginKind {
   }
 }
 
+/// A change of how a user logs in, made through the auth management
+/// api, see [AuthImpl::credentials_changed].
+///
+/// Matched exhaustively on purpose, like [LoginKind]: a new kind of
+/// change is meant to be a compile error for an app which treats
+/// them differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialChange {
+  /// `UpdatePassword`: a password set or changed.
+  Password,
+  /// `ConfirmTotpEnrollment`: TOTP enrolled, or enrolled again (a new
+  /// secret and new recovery codes). An error handling it is logged,
+  /// not returned: the response carries the recovery codes.
+  TotpEnrolled,
+  /// `UnenrollTotp`.
+  TotpUnenrolled,
+  /// `ConfirmPasskeyEnrollment`: a passkey enrolled, or replaced.
+  PasskeyEnrolled,
+  /// `UnenrollPasskey`.
+  PasskeyUnenrolled,
+  /// `UnlinkLocalLogin`: the password removed.
+  LocalLoginUnlinked,
+  /// `UnlinkExternalLogin`: the link to the login provider removed.
+  ExternalLoginUnlinked { provider_id: String },
+}
+
 /// The second factor a login was completed with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecondFactor {
@@ -237,9 +281,17 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// `example.com:8443` for `https://example.com:8443`
   /// ([middleware::check_signed_request_hosts] at startup tells
   /// whether one can be read from it).
+  ///
+  /// ⚠️ The default panics. External logins (their callback url and
+  /// the redirect after them), signing keys and token exchange need
+  /// it: an app using any of them implements it. The `/token`
+  /// endpoint compares the `Origin` of a browser request without
+  /// fetch metadata with it
+  /// ([middleware::is_cross_site_browser_request]), so without it
+  /// such a request panics its handler instead of being refused.
   fn host(&self) -> &str {
     panic!(
-      "Must implement 'AuthImpl::host' in order for external logins, signing keys and other features to work."
+      "Must implement 'AuthImpl::host' in order for external logins, signing keys, token exchange and other features to work."
     )
   }
 
@@ -294,7 +346,10 @@ pub trait AuthImpl: Send + Sync + 'static {
   }
 
   /// Validate the CIDR whitelist entries of an api key or signing
-  /// key.
+  /// key, once [validations::normalize_cidr_whitelist] trimmed them
+  /// and dropped the empty and repeated ones. The whitelists an app
+  /// normalizes with it itself (a user's) are validated with this
+  /// too.
   fn validate_cidr_whitelist(
     &self,
     cidr_whitelist: &[String],
@@ -329,9 +384,20 @@ pub trait AuthImpl: Send + Sync + 'static {
     }
   }
 
-  /// Allow user to register even when registration is disabled
-  /// when no users exist. If not implemented, this always evaluates
-  /// to false and does not change any behavior.
+  /// Whether no user exists yet. While none does, a sign up (local,
+  /// or through a login provider) is let through even when
+  /// registration is disabled, so the first user can always sign up.
+  /// If not implemented, this always evaluates to false and does not
+  /// change any behavior.
+  ///
+  /// ⚠️ It is a pre-check, made before the user is stored: sign ups
+  /// sent at the same time all see no user, and are all let through
+  /// as the first user. The app has to decide "first user" again,
+  /// atomically, when it stores the user (in the insert's
+  /// transaction, or under a lock), and refuse a sign up which turns
+  /// out not to be the first while the matching registration is
+  /// disabled, see [Self::sign_up_local_user] and
+  /// [Self::sign_up_external_user].
   fn no_users_exist(&self) -> DynFuture<mogh_error::Result<bool>> {
     Box::pin(async { Ok(false) })
   }
@@ -353,6 +419,23 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// additionally handles the user whitelist. See also
   /// [middleware::check_api_key_cidr_whitelist] and
   /// [middleware::check_user_cidr_whitelist] for custom implementations.
+  ///
+  /// An error refuses the request and counts as a failed attempt
+  /// against [Self::general_rate_limiter], unless it is marked with
+  /// [uncounted][mogh_error::Error::uncounted] (server errors, 5xx, are
+  /// never counted). Mark the refusals which are not guesses: a
+  /// session the app ended (eg. after a log out everywhere), the
+  /// token of a workload user which is out of sync with its rule. The
+  /// credentials are authentic then, and every tab or device of the
+  /// user still sending them (often behind one ip) would otherwise
+  /// lock that ip out. An authentic token which only expired is
+  /// refused uncounted already ([middleware::get_jwt_user_id]).
+  ///
+  /// [middleware::authenticate_request] attaches
+  /// [middleware::AuthenticatedAt] to the request this returns (when
+  /// the user logged in, for a session token), which the app's
+  /// handlers take to require a recent login for some of its
+  /// requests ([middleware::require_recent_login]).
   fn handle_request_authentication(
     &self,
     auth: RequestAuthentication,
@@ -379,28 +462,31 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// is not checked here, as the user is not loaded.
   /// Use [middleware::get_user_from_request_authentication] or
   /// [middleware::check_user_cidr_whitelist] after loading the user.
+  ///
+  /// The auth management api authenticates its requests with this,
+  /// and counts an error as a failed attempt against
+  /// [Self::general_rate_limiter]: an app overriding it marks the
+  /// refusals which are not guesses (an ended session, an out of
+  /// sync workload user) with
+  /// [uncounted][mogh_error::Error::uncounted], as for
+  /// [Self::handle_request_authentication].
+  ///
+  /// The default is [middleware::get_jwt_user_id] for a jwt and
+  /// [middleware::get_key_user_id] for the keys: an override which
+  /// checks more of one kind (eg. the sessions the app ended, for a
+  /// jwt) calls the other's helper.
   fn get_user_id_from_request_authentication(
     &self,
     auth: RequestAuthentication,
     ip: IpAddr,
   ) -> DynFuture<mogh_error::Result<String>> {
-    let api_key = match auth {
+    match auth {
       RequestAuthentication::Jwt(jwt) => {
         let user_id = middleware::get_jwt_user_id(self, &jwt);
-        return Box::pin(async move { user_id });
+        Box::pin(async move { user_id })
       }
-      RequestAuthentication::ApiKey { key, secret } => {
-        self.get_api_key(key, secret)
-      }
-      RequestAuthentication::PublicKey(public_key) => {
-        self.get_signing_key(public_key)
-      }
-    };
-    Box::pin(async move {
-      let api_key = api_key.await?;
-      middleware::check_api_key_cidr_whitelist(api_key.as_ref(), ip)?;
-      Ok(api_key.user_id().to_string())
-    })
+      auth => middleware::get_key_user_id(self, auth, ip),
+    }
   }
 
   // =========
@@ -414,6 +500,11 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// shared by all instances of the app, see [JwtProvider::try_new].
   /// Anyone who knows or guesses the secret can issue tokens for any
   /// user. With an empty secret no token is issued or accepted.
+  ///
+  /// Build it with [JwtProvider::try_new] at startup, and fail to
+  /// start on its error: built lazily on the first request which
+  /// needs it, a refused secret only shows up once the app serves,
+  /// and [JwtProvider::new] only warns about a short one.
   fn jwt_provider(&self) -> &JwtProvider;
 
   /// Get the webauthn passkey provider
@@ -433,16 +524,21 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// It counts the failures of:
   /// - credentials presented to [middleware::authenticate_request] and
   ///   the auth management API: invalid tokens, api keys and secrets
-  ///   (each unknown api key costs a bcrypt hash), and the signatures
-  ///   of requests signed with a signing key (each costs reading the
-  ///   body and verifying a signature);
+  ///   (each wrong secret of an existing key costs a bcrypt), and the
+  ///   signatures of requests signed with a signing key (each costs
+  ///   reading the body and verifying a signature);
   /// - the second factor of logins (TOTP codes, recovery codes,
   ///   passkeys), and local logins unless
   ///   [Self::local_login_rate_limiter] is implemented;
   /// - external logins, and token exchanges (`POST /token`,
   ///   `ExchangeExternalForJwt`).
   ///
-  /// Requests without any credentials are not counted. Clients are
+  /// Requests without any credentials are not counted, nor are
+  /// refusals which are not guesses: an authentic token which only
+  /// expired, an `Authorization` header of another scheme than
+  /// `Bearer`, server errors, and what the app marks
+  /// [uncounted][mogh_error::Error::uncounted] (see
+  /// [Self::handle_request_authentication]). Clients are
   /// counted by ip, IPv6 clients per /64 by default (see
   /// `RateLimiter::builder`). The login steps checking a secret which
   /// can be guessed (passwords, TOTP and recovery codes, passkeys)
@@ -464,6 +560,26 @@ pub trait AuthImpl: Send + Sync + 'static {
         RateLimiter::new(true, 0, Default::default())
       });
     &DISABLED_RATE_LIMITER
+  }
+
+  /// The rate limiter for failed token exchanges at `POST /token`
+  /// (RFC 8693, workload identity included) and
+  /// [exchange_token][api::token::exchange_token]. Defaults to
+  /// [Self::general_rate_limiter], so a client failing exchanges
+  /// uses up the same budget as its logins and api requests.
+  ///
+  /// Give it a limiter of its own (eg. the same settings in another
+  /// static) to keep the two apart: hosted CI runners share their
+  /// ips, and with the shared budget a job failing exchanges
+  /// repeatedly gets the users and jobs behind that ip refused
+  /// their logins and api requests as well.
+  ///
+  /// A request a web browser sent from a page of another site is
+  /// refused before anything counts
+  /// ([check_not_cross_site][api::token::check_not_cross_site]):
+  /// any site could otherwise use up the budget of its visitors' ip.
+  fn token_exchange_rate_limiter(&self) -> &RateLimiter {
+    self.general_rate_limiter()
   }
 
   /// Requests of the auth management API which change how a user (or
@@ -504,6 +620,31 @@ pub trait AuthImpl: Send + Sync + 'static {
   ///   accepts have no known login and count as api keys: they are
   ///   refused the account requests whatever the window, and may make
   ///   only the resource requests.
+  /// - The app's own api can hold its requests which mint or widen
+  ///   lasting access (users with admin rights, keys for other users,
+  ///   a wider cidr whitelist) to the same window, for sessions:
+  ///   [middleware::require_recent_login] with the request's
+  ///   [middleware::AuthenticatedAt]. Api keys and signing keys pass
+  ///   it, they are the automation credentials.
+  /// - ⚠️ A browser login through an external provider (OIDC,
+  ///   Google, GitHub: `/external/{slug}/login`) counts as a fresh
+  ///   login at its callback, also when the provider answered from
+  ///   its single sign-on session without asking the user for
+  ///   anything. The server sends no `prompt=login` / `max_age` and
+  ///   reads no `auth_time` of the ID token there: the login is when
+  ///   the callback completed it. So for a provider user who logs in
+  ///   without a second factor in the app (the default
+  ///   [external_skip_2fa][user::AuthUserImpl::external_skip_2fa], or
+  ///   none enrolled), the window is only as strong as the provider's
+  ///   session: whoever can make their browser log in again (script
+  ///   on the app's origin, a browser left unlocked) gets a recent
+  ///   login without their credentials, and with it the requests the
+  ///   window guards. A second factor in the app
+  ///   (`external_skip_2fa` off, with one enrolled) is asked at every
+  ///   such login, and closes it; so does a provider configured to
+  ///   authenticate the user at every login (a short or no SSO
+  ///   session for the app's client). Token exchange is different:
+  ///   it counts from the provider token's `auth_time`, see above.
   fn reauthentication_window_secs(&self) -> u64 {
     15 * 60
   }
@@ -532,6 +673,28 @@ pub trait AuthImpl: Send + Sync + 'static {
     )
   }
 
+  /// Limits how many external logins (and links) each client ip can
+  /// start, and how many login sessions each user can begin through
+  /// the management api (`BeginExternalLoginLink`,
+  /// `BeginPasskeyEnrollment`, `BeginTotpEnrollment`), see
+  /// [login_start]. Starting a login needs no credentials and holds a
+  /// login session until the provider's callback, so without it a
+  /// flood of starts pushes the logins of other users (at the
+  /// provider, or waiting for their second factor) out of a bounded
+  /// session store.
+  ///
+  /// On by default: [LoginStartLimiter::default][login_start::LoginStartLimiter::default],
+  /// 30 starts per client and 10 sessions per user at once, refilled
+  /// over a minute. Keep one in a static to change them, eg.
+  /// `LoginStartLimiter::new(limit, 10, window)`, or
+  /// `LoginStartLimiter::disabled()`. Keep the client limit well below
+  /// what the session store holds.
+  fn login_start_limiter(&self) -> &login_start::LoginStartLimiter {
+    static DEFAULT: LazyLock<login_start::LoginStartLimiter> =
+      LazyLock::new(Default::default);
+    &DEFAULT
+  }
+
   /// A user logged in: they are authenticated, the hooks the login
   /// needed have run (`sign_up_local_user` / `sign_up_external_user`,
   /// `sync_external_user`, `get_or_create_workload_user`), and their
@@ -546,7 +709,10 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// afterwards is not another login), or once its second factor is
   /// complete; a token exchange, a user's (`POST /token` or
   /// `ExchangeExternalForJwt`, the latter possibly after a second
-  /// factor) or a workload's, when the token is issued.
+  /// factor) or a workload's, when the token is issued. A callback
+  /// login's jwt is issued when the app redeems it, up to 2 minutes
+  /// after the record, or never when it isn't redeemed (see
+  /// [Login::token_expires]).
   ///
   /// An error fails the login. By then a one-time credential may
   /// have been consumed (the TOTP step, a recovery code), so an app
@@ -557,6 +723,50 @@ pub trait AuthImpl: Send + Sync + 'static {
   fn record_login(
     &self,
     _login: Login,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async { Ok(()) })
+  }
+
+  /// A user changed how they log in through the auth management api
+  /// ([CredentialChange] says how), and the change is stored. Called
+  /// once `UpdatePassword`, `ConfirmTotpEnrollment`, `UnenrollTotp`,
+  /// `ConfirmPasskeyEnrollment`, `UnenrollPasskey`, `UnlinkLocalLogin`
+  /// or `UnlinkExternalLogin` succeeded. Not by the logins, which
+  /// store credentials too (a passkey login stores the passkey's new
+  /// signature counter, [Self::update_user_passkey_counter]).
+  ///
+  /// This is where an app ends the user's other sessions. A user who
+  /// changes the password, or enrolls a second factor, because a token
+  /// of theirs leaked expects that token to stop working, not to keep
+  /// using the app until it expires. `kept_jwt` is the session token
+  /// of the request which made the change, which should stay valid:
+  /// the user isn't logged out of the page showing their new recovery
+  /// codes. These requests need a recent login, so there is one (api
+  /// keys are refused them). Eg. store a cutoff time with the user,
+  /// and refuse the tokens issued before it (their `iat`) in
+  /// [Self::get_user_id_from_request_authentication], except the kept
+  /// one (stored as a hash). Refuse them
+  /// [uncounted][mogh_error::Error::uncounted]: they are no guesses.
+  /// Tokens carry whole seconds, so a cutoff is a choice about the
+  /// second of the change: the change's second keeps the tokens issued
+  /// in it (a login right after the change works, one right before it
+  /// survives too), the next second ends them (a login right after
+  /// the change is refused until that second). Each token is unique
+  /// (a random `jti`), so the kept one keeps no other login of its
+  /// second.
+  ///
+  /// The default does nothing, sessions end when their tokens
+  /// expire. An error fails the request, after the change was stored
+  /// (the client sees it, and can make the change again). Except for
+  /// `ConfirmTotpEnrollment`: its response carries the new recovery
+  /// codes, shown only this once, and failing it would leave the user
+  /// enrolled without them. Its error is logged (the user's other
+  /// sessions may then still be valid), and the codes are returned.
+  fn credentials_changed(
+    &self,
+    _user_id: String,
+    _change: CredentialChange,
+    _kept_jwt: Option<String>,
   ) -> DynFuture<mogh_error::Result<()>> {
     Box::pin(async { Ok(()) })
   }
@@ -585,12 +795,37 @@ pub trait AuthImpl: Send + Sync + 'static {
     self.general_rate_limiter()
   }
 
-  /// Validate usernames.
+  /// Validate usernames: of new users and renames, and of every
+  /// local login (a name this refuses is answered `400`, whoever has
+  /// it). For a rule which only new names follow, see
+  /// [Self::validate_new_username].
   fn validate_username(
     &self,
     username: &str,
   ) -> mogh_error::Result<()> {
     validate_username(username).status_code(StatusCode::BAD_REQUEST)
+  }
+
+  /// Validate a username a user takes, after [Self::validate_username]:
+  /// the name of a local sign up, the names an external sign up tries
+  /// (those with a random suffix included), and the new name of
+  /// `UpdateUsername`. Not at login: a user whose name this refuses
+  /// (eg. one reserved after they took it) keeps logging in with it.
+  /// The default accepts every name.
+  ///
+  /// For names the app keeps for itself (eg. Komodo's `System`,
+  /// `Procedure` and `Action`, which its own operations act as), or a
+  /// stricter rule for new names only. Refuse with `400` (eg.
+  /// `Username is reserved`): a local sign up or rename gets the
+  /// error, an external sign up moves on to its next name, and to a
+  /// generated one (a refused generated name fails it, `500`). Apps
+  /// which name users themselves (an admin creating a user) call it
+  /// there too.
+  fn validate_new_username(
+    &self,
+    _username: &str,
+  ) -> mogh_error::Result<()> {
+    Ok(())
   }
 
   /// Validate passwords.
@@ -603,6 +838,17 @@ pub trait AuthImpl: Send + Sync + 'static {
 
   /// Returns created user id, or error.
   /// The username and password have already been validated.
+  ///
+  /// `no_users_exist` is what [Self::no_users_exist] said before:
+  /// `true` let the sign up through even if
+  /// [Self::local_registration_disabled]. Sign ups sent at the same
+  /// time can all get `true`, so decide whether this is the first user
+  /// again as the user is stored, atomically (the same transaction, or
+  /// a lock). One which isn't the first while local registration is
+  /// disabled must be refused (eg. `403 User registration is
+  /// disabled`), not created: nobody could register it. Never give a
+  /// user the first user's privileges (eg. admin) on `no_users_exist`
+  /// alone.
   fn sign_up_local_user(
     &self,
     _username: String,
@@ -685,7 +931,9 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// Note. This is called by the unauthenticated `GetLoginOptions`,
   /// and [Self::get_external_provider] on every external login,
   /// so apps should serve them from a cache rather than hit the
-  /// database every time.
+  /// database every time. `mogh_cache::LoadCache` is made for this:
+  /// concurrent misses share one load, writes invalidate it, and the
+  /// value (client secrets included) is dropped at expiry.
   fn list_external_providers(
     &self,
   ) -> DynFuture<mogh_error::Result<Vec<ExternalLoginProvider>>> {
@@ -786,6 +1034,14 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// `info.groups` / `info.admin` are available to create the
   /// user with the correct access, or to reject the signup.
   /// [AuthImpl::sync_external_user] is also called directly after signup.
+  ///
+  /// `no_users_exist` is what [Self::no_users_exist] said before:
+  /// `true` let the sign up through even if
+  /// [Self::external_registration_disabled] for the provider. As for
+  /// [Self::sign_up_local_user], decide whether this is the first user
+  /// again as the user is stored, atomically, and refuse one which
+  /// isn't the first while registration is disabled for the
+  /// provider.
   fn sign_up_external_user(
     &self,
     _username: String,
@@ -863,8 +1119,9 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// removes the users of rules which were disabled or removed. Call
   /// [sync_all_workload_users][provider::workload::sync_all_workload_users]
   /// when the app starts, which applies the configured rules to their
-  /// users with [Self::sync_workload_users], and remove the users of
-  /// issuers which are no longer configured.
+  /// users with [Self::sync_workload_users], and removes the users of
+  /// issuers which are no longer configured with
+  /// [Self::remove_workload_users_except].
   fn static_trusted_issuers(&self) -> Vec<TrustedIssuer> {
     Vec::new()
   }
@@ -875,6 +1132,9 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// Note. This is called on every token exchange (`POST /token`),
   /// which is unauthenticated, so apps should serve
   /// them from a cache rather than hit the database every time.
+  /// `mogh_cache::LoadCache` is made for this: concurrent misses share
+  /// one load, writes invalidate it, and the value is dropped at
+  /// expiry.
   fn list_trusted_issuers(
     &self,
   ) -> DynFuture<mogh_error::Result<Vec<TrustedIssuer>>> {
@@ -902,6 +1162,10 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// with its rules, which applies them to their users (and removes
   /// the users of the rules which were removed). Exchanges of the
   /// issuer's rules wait for both, within one instance of the app.
+  /// Both run in a task of the server's own, which the request awaits:
+  /// a request dropped in between (the admin's client gone) still
+  /// completes the sync. The task runs in the request's
+  /// [request_context], an app's own task-locals don't reach it.
   ///
   /// ⚠️ Narrowed `claims` of a rule only stop new exchanges, see
   /// [Self::sync_workload_users].
@@ -971,6 +1235,37 @@ pub trait AuthImpl: Send + Sync + 'static {
     })
   }
 
+  /// Remove the users of workload rules
+  /// ([Self::get_or_create_workload_user]) which are gone: the users
+  /// of trusted issuers whose id isn't in `live`, and the users of the
+  /// issuers in `live` whose rule id isn't among its `rule_ids`. Their
+  /// tokens then stop working.
+  ///
+  /// Called at the end of
+  /// [sync_all_workload_users][provider::workload::sync_all_workload_users]
+  /// with every trusted issuer as it is then, static and stored: this
+  /// is how the users of an issuer removed from the app's configuration
+  /// (or a static issuer skipped for its configuration) go away. The
+  /// default removes nothing: implement it to prune them.
+  ///
+  /// While it runs, token exchanges wait before they get or create a
+  /// workload user, and `live` is listed once they do: every user the
+  /// app finds is one of `live`, or of an issuer or rule which is
+  /// gone, never the user of an issuer or rule created after the
+  /// listing (its first exchange creates it once this returned). That
+  /// holds within one instance of the app: an app which creates
+  /// workload users itself (outside the exchange), or runs several
+  /// instances, should check its stored issuers again in the
+  /// statement which removes the users (eg. `NOT EXISTS` against them
+  /// in the `DELETE`), so the user of an issuer stored meanwhile
+  /// stays. Exchanging a token from it would wait for it.
+  fn remove_workload_users_except(
+    &self,
+    _live: Vec<provider::workload::LiveIssuer>,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async { Ok(()) })
+  }
+
   /// Delete the stored trusted issuer.
   /// This should also remove the users of its rules, whose tokens
   /// then stop working. Exchanges of its rules wait for it, within one
@@ -1021,7 +1316,10 @@ pub trait AuthImpl: Send + Sync + 'static {
   ///   deletions of the issuer, and get the rule as it is once they
   ///   are done: an exchange which read the rule before never applies
   ///   the old groups / admin after the update was synced, nor creates
-  ///   the user of a removed rule. ⚠️ Apps running several instances
+  ///   the user of a removed rule. They also wait while
+  ///   [Self::remove_workload_users_except] runs, which therefore never
+  ///   finds a user created after it was told the live issuers.
+  ///   ⚠️ Apps running several instances
   ///   only get this if every instance sees the change right away
   ///   ([Self::list_trusted_issuers] caches), and should otherwise
   ///   apply the rule as it is stored when the user is written (eg.
@@ -1058,10 +1356,15 @@ pub trait AuthImpl: Send + Sync + 'static {
   // ===============
 
   /// If Some(Passkey) is passed, it should be stored,
-  /// overriding any passkey which was on the User.
+  /// overriding any passkey which was on the User
+  /// (`ConfirmPasskeyEnrollment`).
   ///
   /// If None is passed, the user passkey should be removed,
-  /// unenrolling the user from passkey 2fa.
+  /// unenrolling the user from passkey 2fa (`UnenrollPasskey`).
+  ///
+  /// Only the management api calls it, followed by
+  /// [Self::credentials_changed]. A passkey login stores the counter
+  /// of the passkey with [Self::update_user_passkey_counter].
   fn update_user_stored_passkey(
     &self,
     _user_id: String,
@@ -1075,6 +1378,21 @@ pub trait AuthImpl: Send + Sync + 'static {
         .into(),
       )
     })
+  }
+
+  /// Stores the passkey of the user after a login with it: the same
+  /// passkey, with the signature counter (and backup state) the
+  /// authenticator reported, which the next login checks. No change
+  /// of how the user logs in, so no reason to end sessions (see
+  /// [Self::credentials_changed]).
+  ///
+  /// Defaults to [Self::update_user_stored_passkey].
+  fn update_user_passkey_counter(
+    &self,
+    user_id: String,
+    passkey: Passkey,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    self.update_user_stored_passkey(user_id, Some(passkey))
   }
 
   // ============
@@ -1235,51 +1553,86 @@ pub trait AuthImpl: Send + Sync + 'static {
     })
   }
 
-  /// Get the api key ([AuthApiKeyImpl][api_key::AuthApiKeyImpl])
-  /// for a given API key, returning UNAUTHORIZED if none exists.
+  /// Find the api key `key` (a request's X-API-KEY) in storage, `None`
+  /// when no key has it. Find expired keys too: the server refuses
+  /// them to requests ([Self::get_api_key]), and their owner deletes
+  /// them ([Self::get_api_key_owner_id]).
   ///
-  /// DANGER ⚠️ the incoming secret must still be validated as matching the
-  /// known hashed secret for the api key. Use
-  /// [middleware::verify_api_key_secret_async] with the stored hash
-  /// (or `None` if the key does not exist) to do so. bcrypt takes tens
-  /// of milliseconds, and runs for every request carrying X-API-KEY,
-  /// made up keys included. The helper runs it on the blocking thread
-  /// pool, at most one per available core at a time, on a budget of
-  /// its own: a flood of made up keys stalls neither the async runtime
-  /// nor password logins.
+  /// This is the storage of api keys the defaults of
+  /// [Self::get_api_key] and [Self::get_api_key_owner_id] use: the
+  /// server does what a request's key needs checked with it, the
+  /// same for every app.
+  fn find_api_key(
+    &self,
+    _key: String,
+  ) -> DynFuture<mogh_error::Result<Option<api_key::StoredApiKey>>>
+  {
+    Box::pin(async {
+      Err(
+        anyhow!(
+          "Must implement 'AuthImpl::find_api_key' (or override 'AuthImpl::get_api_key' and 'AuthImpl::get_api_key_owner_id')."
+        )
+        .into(),
+      )
+    })
+  }
+
+  /// Get the api key ([AuthApiKeyImpl][api_key::AuthApiKeyImpl]) a
+  /// request's X-API-KEY and X-API-SECRET authenticate, returning
+  /// `401 Invalid client credentials` otherwise.
+  ///
+  /// The default finds the key with [Self::find_api_key] and
+  /// authenticates it with [middleware::verify_api_key]: the secret
+  /// is verified against the stored bcrypt hash, then an expired key
+  /// is refused. A key which doesn't exist is refused right away,
+  /// without a bcrypt: key ids are random, listed by UIs and logged at
+  /// creation, so the timing telling that a key doesn't exist hides
+  /// nothing, and a made up key costs a lookup, not a hash. bcrypt
+  /// takes tens of milliseconds, for every request naming a real key:
+  /// it runs on the blocking thread pool, at most one per available
+  /// core at a time, on a budget of its own, so a flood of guesses at
+  /// a key's secret stalls neither the async runtime nor password
+  /// logins.
+  ///
+  /// Override it for checks of the app's own (eg. a key which can be
+  /// disabled): find the key, authenticate it with
+  /// [middleware::verify_api_key], then refuse what the app refuses
+  /// with the same `401`. ⚠️ An override which doesn't use
+  /// [middleware::verify_api_key] has to verify the secret and refuse
+  /// expired keys itself: the server checks them nowhere else.
   ///
   /// The returned [cidr_whitelist][api_key::AuthApiKeyImpl::cidr_whitelist]
   /// is enforced by [Self::get_user_id_from_request_authentication].
-  ///
-  /// ⚠️ The server never checks the key's `expires`
-  /// ([CreateApiKey::expires], passed to [Self::create_api_key]):
-  /// refuse an expired key here with `401 Invalid client credentials`.
-  /// Check it after the secret was verified, which runs the same for
-  /// an expired key as for any other, so the timing doesn't tell
-  /// expired keys apart. [Self::get_api_key_owner_id] should still
-  /// find expired keys, so they can be deleted.
   fn get_api_key(
     &self,
-    _key: String,
-    _secret: String,
+    key: String,
+    secret: String,
   ) -> DynFuture<mogh_error::Result<BoxAuthApiKey>> {
-    Box::pin(async {
-      Err(anyhow!("Must implement 'AuthImpl::get_api_key'.").into())
+    let stored = self.find_api_key(key);
+    Box::pin(async move {
+      middleware::verify_stored_api_key(stored.await?, secret)
+        .await
+        .map(Into::into)
     })
   }
 
   /// Get the user id which owns the api key, without secret
   /// verification. Used to check ownership before deletion, so it
-  /// should find keys [Self::get_api_key] refuses, eg. expired ones.
+  /// finds keys [Self::get_api_key] refuses (expired ones):
+  /// `404 Not Found` when there is none.
+  ///
+  /// The default finds the key with [Self::find_api_key].
   fn get_api_key_owner_id(
     &self,
-    _key: String,
+    key: String,
   ) -> DynFuture<mogh_error::Result<String>> {
-    Box::pin(async {
-      Err(
-        anyhow!("Must implement 'AuthImpl::get_api_key_owner_id'.")
-          .into(),
-      )
+    let stored = self.find_api_key(key);
+    Box::pin(async move {
+      stored
+        .await?
+        .map(|stored| stored.user_id)
+        .context("No api key found")
+        .status_code(StatusCode::NOT_FOUND)
     })
   }
 
@@ -1299,7 +1652,10 @@ pub trait AuthImpl: Send + Sync + 'static {
   // ================
   /// Whether requests signed with a signing key are accepted (see
   /// [mogh_auth_client::signature]). Off by default: signed requests
-  /// are then refused, before their body is read.
+  /// are then refused, before their body is read, and so is
+  /// `CreateSigningKey` (`400`, the signing key storage hooks are
+  /// never reached). `DeleteSigningKey` still removes the keys stored
+  /// while they were on.
   ///
   /// A request is signed for the host of the server, and accepted
   /// when that is [Self::host] (which must be implemented to enable
@@ -1442,41 +1798,74 @@ pub trait AuthImpl: Send + Sync + 'static {
     })
   }
 
-  /// Get the signing key ([AuthApiKeyImpl][api_key::AuthApiKeyImpl],
-  /// as for an api key) for a given public key, returning
-  /// UNAUTHORIZED if none exists.
+  /// Find the signing key with `public_key` (a request's
+  /// X-API-PUBLIC-KEY, base64 spki der, the form it is stored in) in
+  /// storage, `None` when no key has it. Find expired keys too: the
+  /// server refuses them to requests ([Self::get_signing_key]), and
+  /// their owner deletes them.
   ///
-  /// The returned [cidr_whitelist][api_key::AuthApiKeyImpl::cidr_whitelist]
-  /// is enforced by [Self::get_user_id_from_request_authentication].
-  ///
-  /// ⚠️ The server never checks the key's `expires`
-  /// ([CreateApiKey::expires], passed to [Self::create_signing_key]):
-  /// refuse an expired key here with `401 Invalid client credentials`,
-  /// and implement [Self::get_signing_key_owner_id] so expired keys
-  /// can still be deleted.
-  fn get_signing_key(
+  /// This is the storage of signing keys the default of
+  /// [Self::get_signing_key] uses.
+  fn find_signing_key(
     &self,
     _public_key: String,
-  ) -> DynFuture<mogh_error::Result<BoxAuthApiKey>> {
+  ) -> DynFuture<mogh_error::Result<Option<api_key::StoredSigningKey>>>
+  {
     Box::pin(async {
       Err(
-        anyhow!("Must implement 'AuthImpl::get_signing_key'.").into(),
+        anyhow!(
+          "Must implement 'AuthImpl::find_signing_key' (or override 'AuthImpl::get_signing_key')."
+        )
+        .into(),
       )
     })
   }
 
-  /// Get the user id which owns the signing key, without it
-  /// having to be usable. Used to check ownership before deletion,
-  /// and that a public key isn't stored already before creating one.
+  /// Get the signing key ([AuthApiKeyImpl][api_key::AuthApiKeyImpl],
+  /// as for an api key) of a request whose signature verified with
+  /// its public key, returning `401 Invalid client credentials` if
+  /// there is none, or it expired.
   ///
-  /// Defaults to [Self::get_signing_key]. Implement this if that
-  /// rejects keys which should still be deletable, eg. expired ones.
+  /// The default finds the key with [Self::find_signing_key] and
+  /// authenticates it with [middleware::verify_signing_key]. ⚠️ An
+  /// override which doesn't use it has to refuse expired keys itself:
+  /// the server checks them nowhere else.
+  ///
+  /// The returned [cidr_whitelist][api_key::AuthApiKeyImpl::cidr_whitelist]
+  /// is enforced by [Self::get_user_id_from_request_authentication].
+  fn get_signing_key(
+    &self,
+    public_key: String,
+  ) -> DynFuture<mogh_error::Result<BoxAuthApiKey>> {
+    let stored = self.find_signing_key(public_key);
+    Box::pin(async move {
+      middleware::verify_signing_key(stored.await?).map(Into::into)
+    })
+  }
+
+  /// Get the user id which owns the signing key, without it having to
+  /// be usable: find expired keys too, they must stay deletable.
+  /// `404 Not Found` when no key has the public key, which is what
+  /// `CreateSigningKey` checks for before storing one (any other error
+  /// fails the create). Used to check ownership before deletion, and
+  /// that a public key isn't stored already.
+  ///
+  /// The default finds the key with [Self::find_signing_key]. ⚠️ An
+  /// override must not go through [Self::get_signing_key], which
+  /// refuses expired keys (`401`): those could never be deleted, and a
+  /// client takes the 401 for its own session ending.
   fn get_signing_key_owner_id(
     &self,
     public_key: String,
   ) -> DynFuture<mogh_error::Result<String>> {
-    let api_key = self.get_signing_key(public_key);
-    Box::pin(async move { Ok(api_key.await?.user_id().to_string()) })
+    let stored = self.find_signing_key(public_key);
+    Box::pin(async move {
+      stored
+        .await?
+        .map(|stored| stored.user_id)
+        .context("No signing key found")
+        .status_code(StatusCode::NOT_FOUND)
+    })
   }
 
   fn delete_signing_key(
@@ -1710,6 +2099,359 @@ mod tests {
       .await
       .unwrap_err();
     assert_eq!(err.status, StatusCode::FORBIDDEN);
+  }
+
+  /// An app which checks more of a jwt (it ended every session)
+  /// and leaves the keys to [middleware::get_key_user_id].
+  struct EndedSessionsAuth(TestAuth);
+
+  impl AuthImpl for EndedSessionsAuth {
+    fn new() -> Self {
+      EndedSessionsAuth(TestAuth::new())
+    }
+    fn get_user(
+      &self,
+      user_id: String,
+    ) -> DynFuture<mogh_error::Result<BoxAuthUser>> {
+      self.0.get_user(user_id)
+    }
+    fn handle_request_authentication(
+      &self,
+      auth: RequestAuthentication,
+      ip: IpAddr,
+      require_user_enabled: bool,
+      req: Request,
+    ) -> DynFuture<mogh_error::Result<Request>> {
+      self.0.handle_request_authentication(
+        auth,
+        ip,
+        require_user_enabled,
+        req,
+      )
+    }
+    fn jwt_provider(&self) -> &JwtProvider {
+      self.0.jwt_provider()
+    }
+    fn get_api_key(
+      &self,
+      key: String,
+      secret: String,
+    ) -> DynFuture<mogh_error::Result<BoxAuthApiKey>> {
+      self.0.get_api_key(key, secret)
+    }
+    fn get_signing_key(
+      &self,
+      public_key: String,
+    ) -> DynFuture<mogh_error::Result<BoxAuthApiKey>> {
+      self.0.get_signing_key(public_key)
+    }
+    fn get_user_id_from_request_authentication(
+      &self,
+      auth: RequestAuthentication,
+      ip: IpAddr,
+    ) -> DynFuture<mogh_error::Result<String>> {
+      match auth {
+        RequestAuthentication::Jwt(_) => Box::pin(async {
+          Err(
+            anyhow!("The session has ended")
+              .status_code(StatusCode::UNAUTHORIZED)
+              .uncounted(),
+          )
+        }),
+        auth => middleware::get_key_user_id(self, auth, ip),
+      }
+    }
+  }
+
+  /// The keys of an override are authenticated as the default does
+  /// it: the secret verified, the key's whitelist enforced.
+  #[tokio::test]
+  async fn test_an_override_leaves_the_keys_to_get_key_user_id() {
+    let hashed = bcrypt::hash("S_def_S", 4).unwrap();
+    let mut inner = TestAuth::with_hashed_secret(Some(hashed));
+    inner.cidr_whitelist = vec!["10.0.0.0/8".into()];
+    let auth = EndedSessionsAuth(inner);
+    let outside: IpAddr = "8.8.8.8".parse().unwrap();
+    let api_key = |secret: &str| RequestAuthentication::ApiKey {
+      key: "K_abc_K".into(),
+      secret: secret.into(),
+    };
+    let public_key =
+      || RequestAuthentication::PublicKey("PUBKEY".into());
+
+    // The override's own jwt branch.
+    let jwt = auth.jwt_provider().encode_sub("user-1").unwrap().jwt;
+    let err = auth
+      .get_user_id_from_request_authentication(
+        RequestAuthentication::Jwt(jwt.clone()),
+        IP,
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    assert!(err.is_uncounted());
+
+    // The keys, as the default authenticates them.
+    for (req_auth, user_id) in [
+      (api_key("S_def_S"), "user-of-K_abc_K"),
+      (public_key(), "user-of-PUBKEY"),
+    ] {
+      assert_eq!(
+        auth
+          .get_user_id_from_request_authentication(
+            req_auth.clone(),
+            IP
+          )
+          .await
+          .unwrap(),
+        user_id
+      );
+      let err = auth
+        .get_user_id_from_request_authentication(req_auth, outside)
+        .await
+        .unwrap_err();
+      assert_eq!(err.status, StatusCode::FORBIDDEN);
+    }
+    let err = auth
+      .get_user_id_from_request_authentication(
+        api_key("S_wrong_S"),
+        IP,
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    assert!(!err.is_uncounted());
+
+    // A jwt is the caller's branch: taking it here would skip the
+    // session check.
+    let err = middleware::get_key_user_id(
+      &auth,
+      RequestAuthentication::Jwt(jwt),
+      IP,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+  }
+
+  /// Stores keys, and authenticates them with the defaults of
+  /// [AuthImpl::get_api_key] / [AuthImpl::get_signing_key] /
+  /// [AuthImpl::get_api_key_owner_id].
+  struct StoredKeysAuth {
+    jwt_provider: JwtProvider,
+    api_keys: Vec<(String, api_key::StoredApiKey)>,
+    signing_keys: Vec<(String, api_key::StoredSigningKey)>,
+  }
+
+  impl AuthImpl for StoredKeysAuth {
+    fn new() -> Self {
+      unimplemented!()
+    }
+    fn get_user(
+      &self,
+      _user_id: String,
+    ) -> DynFuture<mogh_error::Result<BoxAuthUser>> {
+      Box::pin(async { Err(anyhow!("unimplemented").into()) })
+    }
+    fn handle_request_authentication(
+      &self,
+      _auth: RequestAuthentication,
+      _ip: IpAddr,
+      _require_user_enabled: bool,
+      req: Request,
+    ) -> DynFuture<mogh_error::Result<Request>> {
+      Box::pin(async { Ok(req) })
+    }
+    fn jwt_provider(&self) -> &JwtProvider {
+      &self.jwt_provider
+    }
+    fn api_secret_bcrypt_cost(&self) -> u32 {
+      4
+    }
+    fn find_api_key(
+      &self,
+      key: String,
+    ) -> DynFuture<mogh_error::Result<Option<api_key::StoredApiKey>>>
+    {
+      let found = if key == "K_broken_K" {
+        Err(anyhow!("database is down").into())
+      } else {
+        Ok(
+          self
+            .api_keys
+            .iter()
+            .find(|(stored, _)| *stored == key)
+            .map(|(_, stored)| stored.clone()),
+        )
+      };
+      Box::pin(async move { found })
+    }
+    fn find_signing_key(
+      &self,
+      public_key: String,
+    ) -> DynFuture<
+      mogh_error::Result<Option<api_key::StoredSigningKey>>,
+    > {
+      let found = self
+        .signing_keys
+        .iter()
+        .find(|(stored, _)| *stored == public_key)
+        .map(|(_, stored)| stored.clone());
+      Box::pin(async move { Ok(found) })
+    }
+  }
+
+  fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_millis() as u64
+  }
+
+  fn stored_keys_auth() -> StoredKeysAuth {
+    let hashed_secret = bcrypt::hash("S_def_S", 4).unwrap();
+    let api_key =
+      |user_id: &str, expires: u64| api_key::StoredApiKey {
+        user_id: user_id.to_string(),
+        hashed_secret: hashed_secret.clone(),
+        expires,
+        cidr_whitelist: vec![String::from("10.0.0.0/8")],
+      };
+    let signing_key =
+      |user_id: &str, expires: u64| api_key::StoredSigningKey {
+        user_id: user_id.to_string(),
+        expires,
+        cidr_whitelist: vec![String::from("10.0.0.0/8")],
+      };
+    let later = now_ms() + 60_000;
+    let earlier = now_ms() - 1;
+    StoredKeysAuth {
+      jwt_provider: JwtProvider::new(b"secret", 60_000),
+      api_keys: vec![
+        (String::from("K_never_K"), api_key("never", 0)),
+        (String::from("K_later_K"), api_key("later", later)),
+        (String::from("K_expired_K"), api_key("expired", earlier)),
+      ],
+      signing_keys: vec![
+        (String::from("never"), signing_key("never", 0)),
+        (String::from("later"), signing_key("later", later)),
+        (String::from("expired"), signing_key("expired", earlier)),
+      ],
+    }
+  }
+
+  /// The default [AuthImpl::get_api_key]: the secret is verified with
+  /// the stored hash, an expired key is refused even with the right
+  /// secret, every refusal is the same 401, and a storage error is
+  /// passed on.
+  #[tokio::test]
+  async fn test_default_get_api_key() {
+    let auth = stored_keys_auth();
+    let get = |key: &str, secret: &str| {
+      auth.get_user_id_from_request_authentication(
+        RequestAuthentication::ApiKey {
+          key: key.into(),
+          secret: secret.into(),
+        },
+        IP,
+      )
+    };
+    for key in ["K_never_K", "K_later_K"] {
+      let user_id = get(key, "S_def_S").await.unwrap();
+      assert_eq!(format!("K_{user_id}_K"), key);
+    }
+    for (key, secret) in [
+      ("K_never_K", "S_wrong_S"),
+      ("K_expired_K", "S_def_S"),
+      ("K_unknown_K", "S_def_S"),
+    ] {
+      let err = get(key, secret).await.unwrap_err();
+      assert_eq!(err.status, StatusCode::UNAUTHORIZED, "{key}");
+      assert_eq!(
+        format!("{:#}", err.error),
+        "Invalid client credentials",
+        "{key}"
+      );
+    }
+    let err = get("K_broken_K", "S_def_S").await.unwrap_err();
+    assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+    // The key's whitelist is the one stored.
+    let err = auth
+      .get_user_id_from_request_authentication(
+        RequestAuthentication::ApiKey {
+          key: "K_never_K".into(),
+          secret: "S_def_S".into(),
+        },
+        "8.8.8.8".parse().unwrap(),
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(err.status, StatusCode::FORBIDDEN);
+  }
+
+  /// The owner of a key is found for an expired key too (it can be
+  /// deleted), 404 for an unknown one.
+  #[tokio::test]
+  async fn test_default_get_api_key_owner_id() {
+    let auth = stored_keys_auth();
+    for key in ["K_never_K", "K_expired_K"] {
+      let owner =
+        auth.get_api_key_owner_id(key.into()).await.unwrap();
+      assert_eq!(format!("K_{owner}_K"), key);
+    }
+    let err = auth
+      .get_api_key_owner_id("K_unknown_K".into())
+      .await
+      .unwrap_err();
+    assert_eq!(err.status, StatusCode::NOT_FOUND);
+  }
+
+  /// The default [AuthImpl::get_signing_key_owner_id] finds the owner
+  /// of an expired key too (it can be deleted), 404 for an unknown
+  /// one: never the 401 of [AuthImpl::get_signing_key].
+  #[tokio::test]
+  async fn test_default_get_signing_key_owner_id() {
+    let auth = stored_keys_auth();
+    for public_key in ["never", "expired"] {
+      let owner = auth
+        .get_signing_key_owner_id(public_key.into())
+        .await
+        .unwrap();
+      assert_eq!(owner, public_key);
+    }
+    let err = auth
+      .get_signing_key_owner_id("unknown".into())
+      .await
+      .unwrap_err();
+    assert_eq!(err.status, StatusCode::NOT_FOUND);
+  }
+
+  /// The default [AuthImpl::get_signing_key]: an unknown or expired
+  /// key is refused with 401.
+  #[tokio::test]
+  async fn test_default_get_signing_key() {
+    let auth = stored_keys_auth();
+    let get = |public_key: &str| {
+      auth.get_user_id_from_request_authentication(
+        RequestAuthentication::PublicKey(public_key.into()),
+        IP,
+      )
+    };
+    for public_key in ["never", "later"] {
+      assert_eq!(get(public_key).await.unwrap(), public_key);
+    }
+    for public_key in ["expired", "unknown"] {
+      let err = get(public_key).await.unwrap_err();
+      assert_eq!(
+        err.status,
+        StatusCode::UNAUTHORIZED,
+        "{public_key}"
+      );
+      assert_eq!(
+        format!("{:#}", err.error),
+        "Invalid client credentials"
+      );
+    }
   }
 
   #[tokio::test]

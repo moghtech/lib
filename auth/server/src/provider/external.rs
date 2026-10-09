@@ -100,8 +100,8 @@ pub struct SessionExternalLogin {
   /// OIDC, Github
   pub pkce_verifier: Option<PkceCodeVerifier>,
   /// Where to send the user after login: an absolute http(s) url
-  /// on the app's hostname, sanitized and bounded
-  /// ([crate::api::MAX_REDIRECT_LENGTH]) when the login starts.
+  /// on the app's hostname, sanitized and bounded (2048 characters)
+  /// when the login starts.
   /// A session written by an older version may hold the raw query
   /// value, so it is sanitized again when used: do the same when
   /// reading it.
@@ -903,28 +903,11 @@ mod tests {
       })
     }
 
-    fn get_user(
-      &self,
-      _user_id: String,
-    ) -> crate::DynFuture<mogh_error::Result<crate::user::BoxAuthUser>>
-    {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
-    }
-
-    fn handle_request_authentication(
-      &self,
-      _auth: crate::RequestAuthentication,
-      _ip: std::net::IpAddr,
-      _require_user_enabled: bool,
-      _req: axum::extract::Request,
-    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-    {
-      Box::pin(async { Err(anyhow!("not implemented").into()) })
-    }
-
-    fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
-      panic!("not needed for these tests")
-    }
+    crate::test_support::stub_auth_impl!(
+      get_user,
+      handle_request_authentication,
+      jwt_provider
+    );
   }
 
   #[tokio::test]

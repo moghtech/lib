@@ -1,6 +1,6 @@
 use anyhow::Context;
 use mogh_auth_client::passkey::{
-  CreationChallengeResponse, Passkey, PublicKeyCredential,
+  CreationChallengeResponse, PublicKeyCredential,
   RegisterPublicKeyCredential, RequestChallengeResponse,
 };
 use tracing::info;
@@ -12,6 +12,8 @@ use webauthn_rs::{
     Url,
   },
 };
+
+use crate::passkey::Passkey;
 
 pub struct PasskeyProvider(Webauthn);
 

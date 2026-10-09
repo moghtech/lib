@@ -1,8 +1,6 @@
 use anyhow::{Context as _, anyhow};
 use axum::http::StatusCode;
-use mogh_auth_client::{
-  api::login::CompletePasskeyLogin, passkey::Passkey,
-};
+use mogh_auth_client::api::login::CompletePasskeyLogin;
 use mogh_error::{AddStatusCode, AddStatusCodeError as _};
 use mogh_rate_limit::WithFailureRateLimit;
 use mogh_resolver::Resolve;
@@ -10,8 +8,10 @@ use tracing::{info, instrument};
 use webauthn_rs::prelude::AuthenticationResult;
 
 use crate::{
-  Login, SecondFactor, api::login::LoginArgs,
+  SecondFactor,
+  api::login::{IssueToken, LoginArgs, issue_login},
   middleware::check_user_cidr_whitelist,
+  passkey::Passkey,
 };
 
 impl Resolve<LoginArgs> for CompletePasskeyLogin {
@@ -58,23 +58,23 @@ impl Resolve<LoginArgs> for CompletePasskeyLogin {
         .status_code(StatusCode::UNAUTHORIZED)?;
 
       if apply_authentication(&mut passkey, &update)? {
-        // Update the stored passkey on the database
+        // The same passkey with its new counter: no change of how the
+        // user logs in (see AuthImpl::credentials_changed).
         auth
-          .update_user_stored_passkey(user_id.clone(), Some(passkey))
+          .update_user_passkey_counter(user_id.clone(), passkey)
           .await?;
       }
 
-      auth
-        .record_login(Login::of(
-          user.as_ref(),
-          *ip,
-          kind,
-          Some(SecondFactor::Passkey),
-          auth.jwt_provider().default_expires_at()?,
-        ))
-        .await?;
-
-      let response = auth.jwt_provider().encode_sub(&user_id)?;
+      let token = issue_login(
+        auth.as_ref(),
+        user.id(),
+        user.username(),
+        *ip,
+        kind,
+        Some(SecondFactor::Passkey),
+        IssueToken::Now,
+      )
+      .await?;
 
       info!(
         user_id = user.id(),
@@ -82,7 +82,7 @@ impl Resolve<LoginArgs> for CompletePasskeyLogin {
         "Passkey 2FA flow complete, user logged in"
       );
 
-      Ok(response)
+      Ok(token.into())
     }
     // Strict, like the other login steps.
     .with_strict_failure_rate_limit_using_ip(

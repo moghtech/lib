@@ -17,8 +17,10 @@ use tracing::{info, instrument, warn};
 use zeroize::Zeroizing;
 
 use crate::{
-  Login, SecondFactor, api::login::LoginArgs,
-  bcrypt_pool::spawn_bcrypt, middleware::check_user_cidr_whitelist,
+  SecondFactor,
+  api::login::{IssueToken, LoginArgs, issue_login},
+  bcrypt_pool::spawn_bcrypt,
+  middleware::check_user_cidr_whitelist,
 };
 
 /// Tracks the latest accepted TOTP step per user, to reject reuse
@@ -335,9 +337,13 @@ async fn finish_totp_login(
   code: &str,
 ) -> mogh_error::Result<JwtResponse> {
   let user = auth.get_user(user_id.to_string()).await?;
+  // Unenrolled since the first factor passed (or reset by an admin):
+  // the login can't be completed with a code, like a recovery code
+  // or a passkey of a user no longer enrolled.
   let totp_secret = user
     .totp_secret()
-    .context("User is not enrolled in TOTP 2FA")?;
+    .context("User is not enrolled in TOTP 2FA")
+    .status_code(StatusCode::UNAUTHORIZED)?;
 
   check_user_cidr_whitelist(user.as_ref(), *ip)?;
 
@@ -363,17 +369,16 @@ async fn finish_totp_login(
   }
 
   let kind = session.complete_totp_login().await?;
-  auth
-    .record_login(Login::of(
-      user.as_ref(),
-      *ip,
-      kind,
-      Some(SecondFactor::Totp),
-      auth.jwt_provider().default_expires_at()?,
-    ))
-    .await?;
-
-  let res = auth.jwt_provider().encode_sub(user_id)?;
+  let token = issue_login(
+    auth.as_ref(),
+    user.id(),
+    user.username(),
+    *ip,
+    kind,
+    Some(SecondFactor::Totp),
+    IssueToken::Now,
+  )
+  .await?;
 
   info!(
     user_id = user.id(),
@@ -381,7 +386,7 @@ async fn finish_totp_login(
     "TOTP 2FA flow complete, user logged in"
   );
 
-  Ok(res)
+  Ok(token.into())
 }
 
 impl Resolve<LoginArgs> for CompleteTotpRecoveryLogin {
@@ -450,17 +455,16 @@ async fn finish_totp_recovery_login(
   drop(recovery_codes);
 
   let kind = session.complete_totp_login().await?;
-  auth
-    .record_login(Login::of(
-      user.as_ref(),
-      *ip,
-      kind,
-      Some(SecondFactor::TotpRecovery),
-      auth.jwt_provider().default_expires_at()?,
-    ))
-    .await?;
-
-  let res = auth.jwt_provider().encode_sub(user_id)?;
+  let token = issue_login(
+    auth.as_ref(),
+    user.id(),
+    user.username(),
+    *ip,
+    kind,
+    Some(SecondFactor::TotpRecovery),
+    IssueToken::Now,
+  )
+  .await?;
 
   info!(
     user_id = user.id(),
@@ -468,7 +472,7 @@ async fn finish_totp_recovery_login(
     "TOTP recovery code flow complete, user logged in"
   );
 
-  Ok(res)
+  Ok(token.into())
 }
 
 /// The stored hash (of `hashed_codes`) which the recovery `code`
@@ -500,8 +504,8 @@ mod tests {
 
   use crate::{
     AuthImpl, Login, LoginKind, SecondFactor,
-    provider::jwt::JwtProvider,
     session::Session,
+    test_support::{session, stub_auth_impl},
     user::{AuthUserImpl, BoxAuthUser},
   };
 
@@ -513,6 +517,8 @@ mod tests {
   struct TestUser {
     id: String,
     recovery_codes: Vec<String>,
+    /// Unenrolled from TOTP after the first factor passed.
+    unenrolled: bool,
   }
 
   impl AuthUserImpl for TestUser {
@@ -525,7 +531,7 @@ mod tests {
     fn totp_secret(&self) -> Option<&str> {
       static ENCODED: std::sync::LazyLock<String> =
         std::sync::LazyLock::new(|| BASE32_NOPAD.encode(SECRET));
-      Some(&ENCODED)
+      (!self.unenrolled).then_some(ENCODED.as_str())
     }
     fn hashed_totp_recovery_codes(&self) -> &[String] {
       &self.recovery_codes
@@ -543,6 +549,8 @@ mod tests {
     recovery_codes: Arc<Mutex<Vec<String>>>,
     /// Keeps the requests in flight, so they overlap.
     delay: Duration,
+    /// The user unenrolled from TOTP after the first factor.
+    unenrolled: bool,
   }
 
   impl TestAuth {
@@ -553,6 +561,7 @@ mod tests {
         get_user_calls: Default::default(),
         recovery_codes: Default::default(),
         delay: Duration::ZERO,
+        unenrolled: false,
       }
     }
   }
@@ -572,32 +581,18 @@ mod tests {
       self.get_user_calls.fetch_add(1, Ordering::SeqCst);
       let recovery_codes = self.recovery_codes.clone();
       let delay = self.delay;
+      let unenrolled = self.unenrolled;
       Box::pin(async move {
         tokio::time::sleep(delay).await;
         let recovery_codes = recovery_codes.lock().unwrap().clone();
         Ok(Box::new(TestUser {
           id: user_id,
           recovery_codes,
+          unenrolled,
         }) as BoxAuthUser)
       })
     }
-    fn handle_request_authentication(
-      &self,
-      _auth: crate::RequestAuthentication,
-      _ip: IpAddr,
-      _require_user_enabled: bool,
-      req: axum::extract::Request,
-    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
-    {
-      Box::pin(async { Ok(req) })
-    }
-    fn jwt_provider(&self) -> &JwtProvider {
-      static PROVIDER: std::sync::LazyLock<JwtProvider> =
-        std::sync::LazyLock::new(|| {
-          JwtProvider::new(b"secret", 60_000)
-        });
-      &PROVIDER
-    }
+    stub_auth_impl!(handle_request_authentication, jwt_provider);
     fn record_login(
       &self,
       login: Login,
@@ -628,14 +623,6 @@ mod tests {
         Ok(())
       })
     }
-  }
-
-  fn session() -> Session {
-    Session(tower_sessions::Session::new(
-      None,
-      Arc::new(tower_sessions::MemoryStore::default()),
-      None,
-    ))
   }
 
   /// A session which passed the first factor of `user_id`.
@@ -909,6 +896,47 @@ mod tests {
       .resolve(&args)
       .await
       .unwrap();
+  }
+
+  /// A user who unenrolled from TOTP (or was reset by an admin) after
+  /// the first factor passed can't complete the login with a code:
+  /// `401`, like the recovery code and passkey completions, not a
+  /// server error. It counts as a refused code.
+  #[tokio::test]
+  async fn test_unenrolled_user_is_refused() {
+    let auth = TestAuth {
+      unenrolled: true,
+      ..TestAuth::with_user("unenrolled-user")
+    };
+    *auth.recovery_codes.lock().unwrap() =
+      vec![bcrypt::hash("code-one", 4).unwrap()];
+    let code = TestAuth::with_user("unenrolled-user")
+      .make_totp(SECRET.to_vec(), None)
+      .unwrap()
+      .generate_current()
+      .to_string();
+    let args =
+      login_args(&auth, pending_login("unenrolled-user").await);
+    let err =
+      CompleteTotpLogin { code }.resolve(&args).await.unwrap_err();
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    assert!(format!("{:#}", err.error).contains("not enrolled"));
+    let err = CompleteTotpRecoveryLogin {
+      code: "code-one".into(),
+    }
+    .resolve(&args)
+    .await
+    .unwrap_err();
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    assert!(format!("{:#}", err.error).contains("not enrolled"));
+    // Both were refused codes of the user.
+    assert_eq!(
+      second_factor_attempts().users["unenrolled-user"]
+        .failures
+        .len(),
+      2
+    );
+    assert!(auth.logins.lock().unwrap().is_empty());
   }
 
   #[test]

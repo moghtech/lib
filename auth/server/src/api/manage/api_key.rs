@@ -10,38 +10,14 @@ use reqwest::StatusCode;
 use tracing::{info, instrument};
 
 use crate::{
-  AuthImpl, api::manage::ManageArgs,
-  bcrypt_pool::spawn_api_key_bcrypt, rand::random_string,
+  AuthImpl,
+  api::manage::ManageArgs,
+  api_key::{ApiKeyParts, generate_api_key_parts},
+  bcrypt_pool::spawn_api_key_bcrypt,
+  validations::normalize_cidr_whitelist,
 };
 
 //
-
-/// Generate a random API (key, secret, bcrypt-hashed secret).
-fn generate_api_key_parts(
-  secret_length: usize,
-  bcrypt_cost: u32,
-) -> anyhow::Result<(String, String, String)> {
-  let key = format!("K_{}_K", random_string(secret_length));
-  let secret = format!("S_{}_S", random_string(secret_length));
-  let hashed_secret = bcrypt::hash(&secret, bcrypt_cost)
-    .context("Failed at hashing secret string")?;
-  Ok((key, secret, hashed_secret))
-}
-
-/// Trim whitelist entries, drop empty ones,
-/// and validate the remaining entries.
-fn normalize_cidr_whitelist<I: AuthImpl + ?Sized>(
-  auth: &I,
-  cidr_whitelist: Vec<String>,
-) -> mogh_error::Result<Vec<String>> {
-  let cidr_whitelist = cidr_whitelist
-    .into_iter()
-    .map(|entry| entry.trim().to_string())
-    .filter(|entry| !entry.is_empty())
-    .collect::<Vec<_>>();
-  auth.validate_cidr_whitelist(&cidr_whitelist)?;
-  Ok(cidr_whitelist)
-}
 
 pub async fn create_api_key<I: AuthImpl + ?Sized>(
   auth: &I,
@@ -56,12 +32,15 @@ pub async fn create_api_key<I: AuthImpl + ?Sized>(
   // budget of api key secrets.
   let secret_length = auth.api_key_secret_length();
   let bcrypt_cost = auth.api_secret_bcrypt_cost();
-  let (key, secret, hashed_secret) =
-    spawn_api_key_bcrypt(move || {
-      generate_api_key_parts(secret_length, bcrypt_cost)
-    })
-    .await
-    .context("Failed to generate api key")??;
+  let ApiKeyParts {
+    key,
+    secret,
+    hashed_secret,
+  } = spawn_api_key_bcrypt(move || {
+    generate_api_key_parts(secret_length, bcrypt_cost)
+  })
+  .await
+  .context("Failed to generate api key")??;
 
   auth
     .create_api_key(user_id.clone(), body, key.clone(), hashed_secret)
@@ -166,28 +145,41 @@ fn normalize_public_key(
 ///
 /// Best effort, a concurrent create can race it, the storage has to
 /// keep public keys unique ([AuthImpl::create_signing_key]).
+///
+/// Only a key which is not found (`404`) is unused: another failure of
+/// the lookup (the storage down, a lookup which refuses some keys) says
+/// nothing about whether it is stored, and fails the create.
 async fn check_public_key_unused<I: AuthImpl + ?Sized>(
   auth: &I,
   public_key: &str,
 ) -> mogh_error::Result<()> {
-  if auth
-    .get_signing_key_owner_id(public_key.to_string())
-    .await
-    .is_ok()
-  {
-    return Err(
+  match auth.get_signing_key_owner_id(public_key.to_string()).await {
+    Ok(_) => Err(
       anyhow!("This public key is already in use")
         .status_code(StatusCode::CONFLICT),
-    );
+    ),
+    Err(e) if e.status == StatusCode::NOT_FOUND => Ok(()),
+    Err(e) => Err(e),
   }
-  Ok(())
 }
 
+/// Creates a signing key of the user, refused up front (BAD_REQUEST)
+/// when the app doesn't take requests signed with one
+/// ([AuthImpl::signing_keys_enabled]): the key could never be used,
+/// and the storage hook of an app without them isn't implemented.
+/// Deleting one ([delete_signing_key]) works either way, so keys
+/// stored while they were enabled can be removed.
 pub async fn create_signing_key<I: AuthImpl + ?Sized>(
   auth: &I,
   user_id: String,
   body: CreateSigningKey,
 ) -> mogh_error::Result<CreateSigningKeyResponse> {
+  if !auth.signing_keys_enabled() {
+    return Err(
+      anyhow!("Signing keys are not enabled")
+        .status_code(StatusCode::BAD_REQUEST),
+    );
+  }
   auth.validate_api_key_name(&body.name)?;
   let cidr_whitelist =
     normalize_cidr_whitelist(auth, body.cidr_whitelist)?;
@@ -299,46 +291,6 @@ mod tests {
   const TEST_BCRYPT_COST: u32 = 4;
 
   #[test]
-  fn test_api_key_parts_format() {
-    let (key, secret, _) =
-      generate_api_key_parts(40, TEST_BCRYPT_COST).unwrap();
-    assert_eq!(key.len(), 44);
-    assert!(key.starts_with("K_") && key.ends_with("_K"));
-    assert_eq!(secret.len(), 44);
-    assert!(secret.starts_with("S_") && secret.ends_with("_S"));
-    assert!(
-      key[2..42].chars().all(|c| c.is_ascii_alphanumeric()),
-      "key body must be alphanumeric"
-    );
-  }
-
-  #[test]
-  fn test_api_key_secret_verifies_against_hash() {
-    let (_, secret, hashed_secret) =
-      generate_api_key_parts(40, TEST_BCRYPT_COST).unwrap();
-    assert!(bcrypt::verify(&secret, &hashed_secret).unwrap());
-  }
-
-  #[test]
-  fn test_api_key_wrong_secret_fails_verification() {
-    let (_, _, hashed_secret) =
-      generate_api_key_parts(40, TEST_BCRYPT_COST).unwrap();
-    let (_, other_secret, _) =
-      generate_api_key_parts(40, TEST_BCRYPT_COST).unwrap();
-    assert!(!bcrypt::verify(&other_secret, &hashed_secret).unwrap());
-  }
-
-  #[test]
-  fn test_api_key_parts_are_unique() {
-    let (key_a, secret_a, _) =
-      generate_api_key_parts(40, TEST_BCRYPT_COST).unwrap();
-    let (key_b, secret_b, _) =
-      generate_api_key_parts(40, TEST_BCRYPT_COST).unwrap();
-    assert_ne!(key_a, key_b);
-    assert_ne!(secret_a, secret_b);
-  }
-
-  #[test]
   fn test_normalize_public_key_encodings() {
     let keys = mogh_pki::EncodedKeyPair::generate(
       mogh_pki::PkiKind::Signature,
@@ -404,6 +356,19 @@ mod tests {
   /// Knows one public key, owned by `owner`.
   struct KnownKeyAuth {
     known: String,
+    signing_keys: bool,
+    /// The owner lookup fails (the storage is down).
+    lookup_fails: bool,
+  }
+
+  impl KnownKeyAuth {
+    fn knowing(known: String) -> KnownKeyAuth {
+      KnownKeyAuth {
+        known,
+        signing_keys: true,
+        lookup_fails: false,
+      }
+    }
   }
 
   impl AuthImpl for KnownKeyAuth {
@@ -433,6 +398,9 @@ mod tests {
     fn api_secret_bcrypt_cost(&self) -> u32 {
       TEST_BCRYPT_COST
     }
+    fn signing_keys_enabled(&self) -> bool {
+      self.signing_keys
+    }
     fn create_api_key(
       &self,
       _: String,
@@ -455,8 +423,11 @@ mod tests {
       public_key: String,
     ) -> crate::DynFuture<mogh_error::Result<String>> {
       let known = public_key == self.known;
+      let fails = self.lookup_fails;
       Box::pin(async move {
-        if known {
+        if fails {
+          Err(anyhow!("database is down").into())
+        } else if known {
           Ok(String::from("owner"))
         } else {
           Err(
@@ -489,9 +460,7 @@ mod tests {
       mogh_pki::PkiKind::Signature,
     )
     .unwrap();
-    let auth = KnownKeyAuth {
-      known: known.public().to_string(),
-    };
+    let auth = KnownKeyAuth::knowing(known.public().to_string());
     let create = |public_key: String| CreateSigningKey {
       name: "key".into(),
       expires: 0,
@@ -564,6 +533,108 @@ mod tests {
     assert_eq!(err.status, StatusCode::BAD_REQUEST);
   }
 
+  /// An app built on the defaults: signing keys are off.
+  struct DefaultsAuth;
+
+  impl AuthImpl for DefaultsAuth {
+    fn new() -> Self {
+      DefaultsAuth
+    }
+    fn get_user(
+      &self,
+      _: String,
+    ) -> crate::DynFuture<mogh_error::Result<crate::user::BoxAuthUser>>
+    {
+      unimplemented!()
+    }
+    fn handle_request_authentication(
+      &self,
+      _: crate::RequestAuthentication,
+      _: std::net::IpAddr,
+      _: bool,
+      _: axum::extract::Request,
+    ) -> crate::DynFuture<mogh_error::Result<axum::extract::Request>>
+    {
+      unimplemented!()
+    }
+    fn jwt_provider(&self) -> &crate::provider::jwt::JwtProvider {
+      unimplemented!()
+    }
+  }
+
+  /// With signing keys off (the default), creating one is refused as
+  /// the client's mistake, up front, and with a key pair to generate
+  /// too: no "Must implement" server error, no key stored. Keys stored
+  /// while they were on can still be deleted.
+  #[tokio::test]
+  async fn test_signing_keys_off_refuses_creating_them() {
+    let public_key = mogh_pki::EncodedKeyPair::generate(
+      mogh_pki::PkiKind::Signature,
+    )
+    .unwrap()
+    .public()
+    .to_string();
+    for public_key in [public_key.clone(), String::new()] {
+      let err = create_signing_key(
+        &DefaultsAuth,
+        "user".into(),
+        CreateSigningKey {
+          name: "key".into(),
+          expires: 0,
+          cidr_whitelist: Vec::new(),
+          public_key,
+        },
+      )
+      .await
+      .err()
+      .unwrap();
+      assert_eq!(err.status, StatusCode::BAD_REQUEST);
+      assert_eq!(
+        format!("{:#}", err.error),
+        "Signing keys are not enabled"
+      );
+    }
+    let auth = KnownKeyAuth {
+      known: public_key.clone(),
+      signing_keys: false,
+      lookup_fails: false,
+    };
+    delete_signing_key(&auth, "owner", public_key)
+      .await
+      .unwrap();
+  }
+
+  /// Only a public key which isn't found (404) is unused: a lookup
+  /// which fails says nothing about it, and fails the create rather
+  /// than store the key a second time.
+  #[tokio::test]
+  async fn test_failed_owner_lookup_fails_the_create() {
+    let auth = KnownKeyAuth {
+      lookup_fails: true,
+      ..KnownKeyAuth::knowing(String::new())
+    };
+    let public_key = mogh_pki::EncodedKeyPair::generate(
+      mogh_pki::PkiKind::Signature,
+    )
+    .unwrap()
+    .public()
+    .to_string();
+    let err = create_signing_key(
+      &auth,
+      "user".into(),
+      CreateSigningKey {
+        name: "key".into(),
+        expires: 0,
+        cidr_whitelist: Vec::new(),
+        public_key,
+      },
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+  }
+
   /// A key stored before 7.0 is an X25519 key: nothing can be signed
   /// with it anymore, but its owner can still delete it.
   #[tokio::test]
@@ -571,9 +642,7 @@ mod tests {
     let x25519 =
       mogh_pki::EncodedKeyPair::generate(mogh_pki::PkiKind::Mutual)
         .unwrap();
-    let auth = KnownKeyAuth {
-      known: x25519.public().to_string(),
-    };
+    let auth = KnownKeyAuth::knowing(x25519.public().to_string());
     let err = delete_signing_key(
       &auth,
       "someone-else",
@@ -591,9 +660,7 @@ mod tests {
       mogh_pki::PkiKind::Signature,
     )
     .unwrap();
-    let auth = KnownKeyAuth {
-      known: ed25519.public().to_string(),
-    };
+    let auth = KnownKeyAuth::knowing(ed25519.public().to_string());
     delete_signing_key(&auth, "owner", ed25519.public.as_pem())
       .await
       .unwrap();
@@ -605,9 +672,7 @@ mod tests {
   async fn test_create_api_key_is_bounded() {
     let held = crate::bcrypt_pool::hold_api_key_permits().await;
     let create = tokio::spawn(async {
-      let auth = KnownKeyAuth {
-        known: String::new(),
-      };
+      let auth = KnownKeyAuth::knowing(String::new());
       let body = CreateApiKey {
         name: "key".into(),
         expires: 0,
@@ -622,13 +687,5 @@ mod tests {
     assert!(
       res.key.starts_with("K_") && res.secret.starts_with("S_")
     );
-  }
-
-  #[test]
-  fn test_api_key_respects_custom_length() {
-    let (key, secret, _) =
-      generate_api_key_parts(10, TEST_BCRYPT_COST).unwrap();
-    assert_eq!(key.len(), 14);
-    assert_eq!(secret.len(), 14);
   }
 }

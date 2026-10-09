@@ -2,8 +2,12 @@
 //! These can be overridden on AuthImpl.
 
 use anyhow::{Context as _, anyhow};
+use axum::http::StatusCode;
+use mogh_error::AddStatusCodeError as _;
 use mogh_validations::{StringValidator, StringValidatorMatches};
 use subtle::ConstantTimeEq as _;
+
+use crate::AuthImpl;
 
 pub use mogh_request_ip::cidr::validate_cidr_whitelist;
 
@@ -16,6 +20,8 @@ pub const MAX_USERNAME_LENGTH: usize = 100;
 ///
 /// - Between [MIN_USERNAME_LENGTH] and [MAX_USERNAME_LENGTH] characters
 /// - Matches `^[a-zA-Z0-9._@-]+$`
+/// - Not 24 hex digits, the shape of a Mongo ObjectId (an app finding
+///   users by id or name must not take one for the other)
 pub fn validate_username(username: &str) -> anyhow::Result<()> {
   StringValidator::default()
     .min_length(MIN_USERNAME_LENGTH)
@@ -44,8 +50,24 @@ pub const MAX_PASSWORD_BYTES: usize = 72;
 /// - Between [MIN_PASSWORD_LENGTH] and [MAX_PASSWORD_LENGTH] characters
 /// - At most [MAX_PASSWORD_BYTES] bytes (UTF-8), bcrypt ignores the rest
 pub fn validate_password(password: &str) -> anyhow::Result<()> {
+  validate_password_with_min_length(password, MIN_PASSWORD_LENGTH)
+}
+
+/// [validate_password] with a minimum length of the app's (eg. a
+/// configurable one), in characters. Everything else is the same:
+/// at most [MAX_PASSWORD_LENGTH] characters and [MAX_PASSWORD_BYTES]
+/// bytes, since bcrypt ignores the rest. A minimum above
+/// [MAX_PASSWORD_LENGTH] refuses every password.
+///
+/// For [AuthImpl::validate_password] of an app whose minimum
+/// differs, and for its own password writes (eg. an admin setting a
+/// user's password), so the rules stay the server's.
+pub fn validate_password_with_min_length(
+  password: &str,
+  min_length: usize,
+) -> anyhow::Result<()> {
   StringValidator::default()
-    .min_length(MIN_PASSWORD_LENGTH)
+    .min_length(min_length)
     .max_length(MAX_PASSWORD_LENGTH)
     .validate(password)
     .context("Failed to validate password")?;
@@ -74,6 +96,54 @@ pub fn validate_api_key_name(name: &str) -> anyhow::Result<()> {
     .context("Failed to validate api key name")
 }
 
+/// The most entries the cidr whitelist of an api key or signing key
+/// takes (`CreateApiKey` / `CreateSigningKey`). The whitelist is
+/// stored with the key and parsed again for every request it makes,
+/// and any user can create keys: an unbounded one costs storage and
+/// time per request for nothing. [normalize_cidr_whitelist] holds a
+/// whitelist to it, the whitelists an app sets itself (a user's, a
+/// device's) included.
+pub const MAX_CIDR_WHITELIST_ENTRIES: usize = 64;
+
+/// Normalizes a cidr whitelist a client sent: trims the entries,
+/// drops empty and repeated ones (keeping the order), refuses more
+/// than [MAX_CIDR_WHITELIST_ENTRIES] distinct entries with
+/// BAD_REQUEST (at the first one over, without reading the rest: the
+/// list is as long as the body allows), then validates what is left
+/// with [AuthImpl::validate_cidr_whitelist] (an invalid entry is
+/// BAD_REQUEST by default), so a whitelist which would fail closed
+/// at request time is never stored.
+///
+/// `CreateApiKey` / `CreateSigningKey` store the whitelist of a key
+/// as this returns it. An app setting whitelists itself (a user's,
+/// a device's, an onboarding key's) normalizes them with this too,
+/// so every whitelist follows the same rules, the entry cap and the
+/// app's own validation included.
+pub fn normalize_cidr_whitelist<I: AuthImpl + ?Sized>(
+  auth: &I,
+  cidr_whitelist: Vec<String>,
+) -> mogh_error::Result<Vec<String>> {
+  let mut seen = std::collections::HashSet::new();
+  let mut normalized = Vec::new();
+  for entry in cidr_whitelist {
+    let entry = entry.trim();
+    if entry.is_empty() || !seen.insert(entry.to_string()) {
+      continue;
+    }
+    if normalized.len() == MAX_CIDR_WHITELIST_ENTRIES {
+      return Err(
+        anyhow!(
+          "A cidr whitelist takes at most {MAX_CIDR_WHITELIST_ENTRIES} entries"
+        )
+        .status_code(StatusCode::BAD_REQUEST),
+      );
+    }
+    normalized.push(entry.to_string());
+  }
+  auth.validate_cidr_whitelist(&normalized)?;
+  Ok(normalized)
+}
+
 /// Compare two secrets (eg oauth `state` / csrf tokens)
 /// in constant time with respect to their contents.
 pub fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -82,7 +152,7 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 
 /// Whether the url carries credentials in its authority
 /// (`scheme://user:password@host`): a username, or any password.
-pub fn url_has_credentials(url: &reqwest::Url) -> bool {
+pub(crate) fn url_has_credentials(url: &reqwest::Url) -> bool {
   !url.username().is_empty() || url.password().is_some()
 }
 
@@ -91,7 +161,8 @@ pub fn url_has_credentials(url: &reqwest::Url) -> bool {
 ///
 /// - Parses as a url
 /// - Has the `http` or `https` scheme
-/// - Carries no credentials ([url_has_credentials]): these would be
+/// - Carries no credentials (`scheme://user:password@host`, a username
+///   or any password): these would be
 ///   stored and shown in plain text with the url, sent along with
 ///   every request to it, and end up in error messages and logs.
 ///
@@ -116,35 +187,54 @@ pub fn validate_public_http_url(
   Ok(())
 }
 
-/// The url with any credentials in its authority replaced by `***`,
-/// for error messages and logs. Urls without credentials are returned
-/// unchanged. Works on urls which don't parse too, by removing
-/// everything up to the last `@` of the authority.
-pub fn redact_url_credentials(url: &str) -> String {
-  if let Ok(mut parsed) = reqwest::Url::parse(url) {
-    if !url_has_credentials(&parsed) {
-      return url.to_string();
-    }
-    if parsed.set_username("***").is_ok()
-      && parsed.set_password(None).is_ok()
-    {
-      return parsed.into();
-    }
-  }
-  let Some(start) = url.find("://").map(|index| index + 3) else {
-    return url.to_string();
-  };
-  let rest = &url[start..];
-  let end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
-  match rest[..end].rfind('@') {
-    Some(at) => format!("{}***@{}", &url[..start], &rest[at + 1..]),
-    None => url.to_string(),
-  }
-}
-
 #[cfg(test)]
 mod tests {
+  use mogh_error::AddStatusCode as _;
+
   use super::*;
+  use crate::test_support::stub_auth_impl;
+
+  /// The default [AuthImpl::validate_cidr_whitelist].
+  struct DefaultAuth;
+
+  impl AuthImpl for DefaultAuth {
+    fn new() -> Self {
+      DefaultAuth
+    }
+    stub_auth_impl!(
+      get_user,
+      handle_request_authentication,
+      jwt_provider
+    );
+  }
+
+  /// Validates whitelists further: no catch all entry.
+  struct NoCatchAllAuth;
+
+  impl AuthImpl for NoCatchAllAuth {
+    fn new() -> Self {
+      NoCatchAllAuth
+    }
+    stub_auth_impl!(
+      get_user,
+      handle_request_authentication,
+      jwt_provider
+    );
+    fn validate_cidr_whitelist(
+      &self,
+      cidr_whitelist: &[String],
+    ) -> mogh_error::Result<()> {
+      validate_cidr_whitelist(cidr_whitelist)
+        .status_code(StatusCode::BAD_REQUEST)?;
+      if cidr_whitelist.iter().any(|entry| entry == "0.0.0.0/0") {
+        return Err(
+          anyhow!("A whitelist must not allow every address")
+            .status_code(StatusCode::UNPROCESSABLE_ENTITY),
+        );
+      }
+      Ok(())
+    }
+  }
 
   #[test]
   fn test_validate_public_http_url() {
@@ -177,39 +267,6 @@ mod tests {
     let err = format!("{err:#}");
     assert!(err.contains("'keys url' must not carry credentials"));
     assert!(!err.contains("hunter2"), "{err}");
-  }
-
-  #[test]
-  fn test_redact_url_credentials() {
-    for (url, redacted) in [
-      (
-        "https://user:hunter2@issuer.example.com/keys",
-        "https://***@issuer.example.com/keys",
-      ),
-      (
-        "http://user@localhost:8080/.well-known/openid-configuration",
-        "http://***@localhost:8080/.well-known/openid-configuration",
-      ),
-      (
-        "https://:hunter2@issuer.example.com",
-        "https://***@issuer.example.com/",
-      ),
-      // Unchanged without credentials, even when not normalized
-      ("https://issuer.example.com", "https://issuer.example.com"),
-      (
-        "https://example.com/users/@me",
-        "https://example.com/users/@me",
-      ),
-      // Not parseable (space in the host), stripped all the same
-      (
-        "https://user:hunter2@bad host/keys",
-        "https://***@bad host/keys",
-      ),
-      ("https://a@b:hunter2@bad host", "https://***@bad host"),
-      ("not a url", "not a url"),
-    ] {
-      assert_eq!(redact_url_credentials(url), redacted, "{url}");
-    }
   }
 
   #[test]
@@ -259,6 +316,50 @@ mod tests {
   }
 
   #[test]
+  fn test_validate_password_with_min_length() {
+    for min_length in [1, 12, MAX_PASSWORD_LENGTH] {
+      assert!(
+        validate_password_with_min_length(
+          &"a".repeat(min_length - 1),
+          min_length
+        )
+        .is_err(),
+        "{min_length}"
+      );
+      validate_password_with_min_length(
+        &"a".repeat(min_length),
+        min_length,
+      )
+      .unwrap();
+    }
+    // Below the default minimum, if the app says so.
+    validate_password_with_min_length("short", 4).unwrap();
+    assert!(validate_password("short").is_err());
+    // The maximum stays, in characters and in bytes.
+    for too_long in
+      ["a".repeat(MAX_PASSWORD_LENGTH + 1), "密".repeat(25)]
+    {
+      assert!(
+        validate_password_with_min_length(&too_long, 1).is_err()
+      );
+    }
+    let err = validate_password_with_min_length(&"密".repeat(25), 1)
+      .unwrap_err();
+    assert!(
+      format!("{err:#}").contains("at most 72 bytes"),
+      "{err:#}"
+    );
+    // A minimum nothing can reach refuses everything.
+    assert!(
+      validate_password_with_min_length(
+        &"a".repeat(MAX_PASSWORD_LENGTH),
+        MAX_PASSWORD_LENGTH + 1
+      )
+      .is_err()
+    );
+  }
+
+  #[test]
   fn test_validate_password_bytes() {
     // bcrypt uses all of a 72 byte password...
     let longest = "a".repeat(MAX_PASSWORD_BYTES);
@@ -291,6 +392,79 @@ mod tests {
     assert!(
       validate_api_key_name(&"a".repeat(MAX_API_KEY_NAME_LENGTH + 1))
         .is_err()
+    );
+  }
+
+  #[test]
+  fn test_normalize_cidr_whitelist() {
+    let auth = DefaultAuth;
+    let normalized = normalize_cidr_whitelist(
+      &auth,
+      ["10.0.0.0/8", " 10.0.0.0/8 ", "", "  ", "192.168.1.1"]
+        .map(String::from)
+        .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(normalized, ["10.0.0.0/8", "192.168.1.1"]);
+
+    let entries = |count: usize| {
+      (0..count)
+        .map(|i| format!("10.0.{}.{}", i / 256, i % 256))
+        .collect::<Vec<_>>()
+    };
+    let most = normalize_cidr_whitelist(
+      &auth,
+      entries(MAX_CIDR_WHITELIST_ENTRIES),
+    )
+    .unwrap();
+    assert_eq!(most.len(), MAX_CIDR_WHITELIST_ENTRIES);
+    // Repeated ones don't count.
+    let repeated = normalize_cidr_whitelist(
+      &auth,
+      vec![String::from("10.0.0.1"); 100_000],
+    )
+    .unwrap();
+    assert_eq!(repeated, ["10.0.0.1"]);
+    for count in [MAX_CIDR_WHITELIST_ENTRIES + 1, 100_000] {
+      let err =
+        normalize_cidr_whitelist(&auth, entries(count)).unwrap_err();
+      assert_eq!(err.status, StatusCode::BAD_REQUEST, "{count}");
+      assert!(format!("{:#}", err.error).contains("at most 64"));
+    }
+    // An invalid entry is still refused.
+    let err = normalize_cidr_whitelist(
+      &auth,
+      vec![String::from("not an ip")],
+    )
+    .unwrap_err();
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+  }
+
+  /// The app's own validation applies, to what is left after the
+  /// trimming and dedupe.
+  #[test]
+  fn test_normalize_cidr_whitelist_validates_with_the_app() {
+    let err = normalize_cidr_whitelist(
+      &NoCatchAllAuth,
+      [" 10.0.0.0/8", "0.0.0.0/0 ", "10.0.0.0/8"]
+        .map(String::from)
+        .to_vec(),
+    )
+    .unwrap_err();
+    assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+    // Passes the default validation.
+    normalize_cidr_whitelist(
+      &DefaultAuth,
+      vec![String::from("0.0.0.0/0")],
+    )
+    .unwrap();
+    assert_eq!(
+      normalize_cidr_whitelist(
+        &NoCatchAllAuth,
+        vec![String::from(" 10.0.0.0/8 "), String::new()],
+      )
+      .unwrap(),
+      ["10.0.0.0/8"]
     );
   }
 }
