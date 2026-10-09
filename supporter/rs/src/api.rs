@@ -1,20 +1,23 @@
 //! The supporter api, which an app serves at `/supporter`
-//! ([crate::server], the `server` feature): posted to
+//! (`server::router`, with the `server` feature): posted to
 //! `/supporter/read` and `/supporter/write` as
 //! `{ "type": "<request>", "params": <request> }`, or to
 //! `/supporter/read/<request>` with the params alone as the body,
 //! like the app's own api. Authenticated like the requests the app's
 //! UI makes, with a jwt, api key or signing key of an enabled user;
 //! the write api and `GetSupporterKeyInfo` are for admins
-//! (`AuthUserImpl::is_admin` of mogh_auth_server).
+//! (`AuthUserImpl::is_admin` of mogh_auth_server) which are no
+//! workload.
 //!
 //! Two things are managed over it: the configured supporter key, and for the
 //! key of an organization or sponsor its branding
 //! ([SupporterBranding]): the icon the badge shows, its size, and
 //! whether it takes the place of the app's home button.
 //!
-//! The clients: [crate::request] in Rust, `MoghSupporterClient` of
-//! the typescript package, and the hooks and components of mogh_ui.
+//! The clients: `MoghSupporterClient` of the typescript package, and
+//! the hooks and components of mogh_ui. A Rust client posts the
+//! requests of this module (their `req_type` and json) with its own
+//! http client and credentials.
 
 use mogh_resolver::{HasResponse, Resolve};
 use serde::{Deserialize, Serialize};
@@ -80,13 +83,23 @@ pub type GetSupporterKeyInfoResponse = SupporterKeyInfo;
 /// the reason, and nothing changes. Admin only.
 /// Response: [SetSupporterKeyResponse].
 #[typeshare]
-#[derive(Serialize, Deserialize, Debug, Clone, Resolve)]
+#[derive(Serialize, Deserialize, Clone, Resolve)]
 #[empty_traits(MoghSupporterWriteRequest)]
 #[response(SetSupporterKeyResponse)]
 #[error(mogh_error::Error)]
 pub struct SetSupporterKey {
-  /// The key as pasted. Whitespace in it is ignored.
+  /// The key as pasted. Whitespace in it is ignored. It holds the
+  /// instance private key: the `Debug` leaves it out.
   pub key: String,
+}
+
+/// Never the key, which holds the instance private key: a request
+/// logged with `{:?}` (also as a `SupporterWriteRequest`) shows
+/// `SetSupporterKey { .. }`.
+impl std::fmt::Debug for SetSupporterKey {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("SetSupporterKey").finish_non_exhaustive()
+  }
 }
 
 /// Response for [SetSupporterKey]: what is configured now.

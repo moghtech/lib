@@ -4,7 +4,12 @@
 //! and maps are decoded whole, which is what lets a field this
 //! version does not know be skipped. Everything else is refused:
 //! indefinite lengths, tags, floats, other simple values, duplicate
-//! map keys and bytes after the item.
+//! map keys, map keys which are neither text nor integers, and bytes
+//! after the item.
+//!
+//! The typescript package's decoder (`decodeCbor`) is the same, error
+//! messages included: both run the vectors of
+//! `supporter/test_vectors.json`.
 
 /// The most nested arrays / maps [decode] follows.
 pub const MAX_DEPTH: usize = 16;
@@ -18,7 +23,8 @@ pub enum Value {
   Bytes(Vec<u8>),
   Text(String),
   Array(Vec<Value>),
-  /// The pairs in the order encoded. Keys are unique.
+  /// The pairs in the order encoded. Keys are unique, and text or
+  /// integers.
   Map(Vec<(Value, Value)>),
   Bool(bool),
   Null,
@@ -58,10 +64,12 @@ pub enum Error {
   Utf8(usize),
   #[error("Duplicate map key at byte {0}")]
   DuplicateKey(usize),
+  #[error("Map key is not text or an integer at byte {0}")]
+  MapKey(usize),
   #[error("Nested deeper than {MAX_DEPTH} at byte {0}")]
   TooDeep(usize),
-  #[error("{0} bytes follow the item")]
-  TrailingBytes(usize),
+  #[error("{count} bytes follow the item at byte {at}")]
+  TrailingBytes { count: usize, at: usize },
 }
 
 /// Decodes `bytes` as exactly one item of the subset.
@@ -69,7 +77,10 @@ pub fn decode(bytes: &[u8]) -> Result<Value, Error> {
   let mut decoder = Decoder { bytes, at: 0 };
   let value = decoder.item(0)?;
   if decoder.at < bytes.len() {
-    return Err(Error::TrailingBytes(bytes.len() - decoder.at));
+    return Err(Error::TrailingBytes {
+      count: bytes.len() - decoder.at,
+      at: decoder.at,
+    });
   }
   Ok(value)
 }
@@ -189,6 +200,14 @@ impl Decoder<'_> {
         for _ in 0..len {
           let key_at = self.at;
           let key = self.item(depth + 1)?;
+          // The keys a payload can name a field by: what `get` and
+          // the typescript decoder's `Map` find a key by.
+          if !matches!(
+            key,
+            Value::Unsigned(_) | Value::Negative(_) | Value::Text(_)
+          ) {
+            return Err(Error::MapKey(key_at));
+          }
           if pairs.iter().any(|(k, _)| *k == key) {
             return Err(Error::DuplicateKey(key_at));
           }

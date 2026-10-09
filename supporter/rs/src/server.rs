@@ -3,13 +3,15 @@
 //! app provides for it, and [`init`], called once at startup.
 //!
 //! Requests are authenticated like the auth management api of
-//! mogh_auth_server (a jwt, api key or signing key of an enabled
-//! user), and the key is managed by admins (`AuthUserImpl::is_admin`
-//! of mogh_auth_server). A key an admin sets is handed to the app to
-//! keep ([`SupporterImpl::store_supporter_key`]), and used over the
-//! key of the app's config until it is removed. So is the branding
-//! of an organization's key (`SetSupporterBranding`), which every
-//! user's browser reads.
+//! mogh_auth_server, with its `middleware::authenticate_user` (a jwt,
+//! api key or signing key), and refused to a disabled user. The key
+//! is managed by admins (`AuthUserImpl::is_admin` of
+//! mogh_auth_server) which are no workload. A key an admin sets is
+//! handed to the app to keep
+//! ([`SupporterImpl::store_supporter_key`]), and used over the key of
+//! the app's config until it is removed. So is the branding of an
+//! organization's key (`SetSupporterBranding`), which every user's
+//! browser reads.
 //!
 //! The server verifies the key in use under the root keys the app
 //! hardcodes ([`SupporterImpl::supporter_root_keys`]), and serves it
@@ -29,23 +31,21 @@ use anyhow::{Context as _, anyhow};
 use arc_swap::ArcSwapOption;
 use axum::{
   Router,
-  extract::{FromRequestParts, OriginalUri, Path, Request},
-  http::{StatusCode, request::Parts},
+  extract::{OriginalUri, Path, Request},
+  http::StatusCode,
   middleware::Next,
   response::Response,
   routing::post,
 };
 use mogh_auth_server::{
   AuthImpl, DynFuture,
-  middleware::{
-    accept_signed_request, accepted_signature,
-    extract_request_authentication_rate_limited,
-    get_user_from_request_authentication, read_signed_request_body,
-  },
+  middleware::{UserExtractor, authenticate_user},
   user::BoxAuthUser,
 };
-use mogh_error::{AddStatusCode as _, AddStatusCodeError as _, Json};
-use mogh_rate_limit::WithFailureRateLimit as _;
+use mogh_error::{
+  AddStatusCode as _, AddStatusCodeError as _, Json, Variant,
+  variant_request,
+};
 use mogh_request_ip::RequestIp;
 use mogh_resolver::Resolve;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,7 @@ use typeshare::typeshare;
 
 use crate::{
   Payload, SupporterBranding, SupporterKey, Tier, VerifyError,
+  Zeroizing,
   api::{
     DeleteSupporterKey, GetSupporterBranding, GetSupporterKey,
     GetSupporterKeyInfo, SetSupporterBranding, SetSupporterKey,
@@ -92,17 +93,22 @@ pub trait SupporterImpl: AuthImpl {
   fn supporter_root_keys(&self) -> &'static [&'static str];
 
   /// The key kept by [Self::store_supporter_key], if any. Read once
-  /// at startup ([init]).
+  /// at startup ([init]). It holds the instance private key: decrypt
+  /// it into the [Zeroizing] buffer it is handed over in, which is
+  /// wiped once the key is parsed, rather than a plain copy which
+  /// would outlive it.
   fn load_stored_supporter_key(
     &self,
-  ) -> DynFuture<mogh_error::Result<Option<String>>>;
+  ) -> DynFuture<mogh_error::Result<Option<Zeroizing<String>>>>;
 
   /// Keeps the key an admin set (`SetSupporterKey`), or removes it
   /// (`None`, `DeleteSupporterKey`). The key holds the instance
-  /// private key: store it like a secret, encrypted at rest.
+  /// private key: store it like a secret, encrypted at rest. It comes
+  /// in a [Zeroizing] buffer, wiped when dropped: encrypt it from the
+  /// reference, without a plain copy (eg. a `to_string()`).
   fn store_supporter_key(
     &self,
-    key: Option<String>,
+    key: Option<Zeroizing<String>>,
   ) -> DynFuture<mogh_error::Result<()>>;
 
   /// The branding kept by [Self::store_supporter_branding], if any.
@@ -280,7 +286,7 @@ fn info<I: SupporterImpl + ?Sized>(imp: &I) -> SupporterKeyInfo {
 /// The supporter api, for the app to nest at `/supporter`: the url
 /// the typescript client and mogh_ui's `setSupporterUrl` take.
 /// Authenticates every request like the auth management api does,
-/// and refuses disabled users.
+/// and refuses disabled users everything.
 pub fn router<I: SupporterImpl>() -> Router {
   Router::new()
     .nest(
@@ -298,29 +304,17 @@ pub fn router<I: SupporterImpl>() -> Router {
     .layer(axum::middleware::from_fn(attach_user::<I>))
 }
 
-/// The user of a request, attached by [attach_user].
-#[derive(Clone)]
-struct SupporterUser(Arc<BoxAuthUser>);
-
-impl<S: Send + Sync> FromRequestParts<S> for SupporterUser {
-  type Rejection = mogh_error::Error;
-
-  async fn from_request_parts(
-    parts: &mut Parts,
-    _: &S,
-  ) -> Result<Self, Self::Rejection> {
-    parts
-      .extensions
-      .get()
-      .cloned()
-      .context("Missing authorization credentials")
-      .status_code(StatusCode::UNAUTHORIZED)
-  }
-}
-
-/// Authenticates the request with the building blocks of
-/// mogh_auth_server, as its management api does, and attaches the
-/// user. A disabled user is refused everything.
+/// Authenticates the request like the auth management api of
+/// mogh_auth_server ([authenticate_user]: the body of a signed
+/// request, the credentials, the user and the cidr whitelists, the
+/// failures counted against the app's rate limiter), and applies the
+/// supporter api's own policy: a disabled user is refused everything,
+/// also what every user reads, where the auth management api still
+/// tells them who they are. The policy is applied before
+/// [Authenticated::finish][mogh_auth_server::middleware::Authenticated::finish]
+/// hands a signed request to the app (`accept_signed_request`, eg. its
+/// replay check), so the app only remembers requests which go on to
+/// be handled. The handlers extract the user as [UserExtractor].
 async fn attach_user<I: AuthImpl>(
   RequestIp(ip): RequestIp,
   OriginalUri(uri): OriginalUri,
@@ -328,35 +322,14 @@ async fn attach_user<I: AuthImpl>(
   next: Next,
 ) -> mogh_error::Result<Response> {
   let auth = I::new();
-  // The signature of a signed request covers the body.
-  let (req, body) = read_signed_request_body(&auth, ip, req).await?;
-  let req_auth = extract_request_authentication_rate_limited(
-    &auth,
-    ip,
-    req.method(),
-    &uri,
-    req.headers(),
-    &body,
-  )
-  .await?;
-  let accepted = accepted_signature(&req_auth, req.headers())?;
-  // Enforces the api key and user cidr whitelists.
-  let user =
-    get_user_from_request_authentication(&auth, req_auth, ip)
-      .with_failure_rate_limit_using_ip(
-        auth.general_rate_limiter(),
-        &ip,
-      )
-      .await?;
-  if !user.is_enabled() {
+  let authenticated = authenticate_user(&auth, ip, &uri, req).await?;
+  if !authenticated.user.is_enabled() {
     return Err(
       anyhow!("User is not enabled")
         .status_code(StatusCode::FORBIDDEN),
     );
   }
-  let mut req = req;
-  accept_signed_request(&auth, ip, accepted, &mut req).await?;
-  req.extensions_mut().insert(SupporterUser(Arc::new(user)));
+  let req = authenticated.finish(&auth).await?;
   Ok(next.run(req).await)
 }
 
@@ -399,36 +372,20 @@ pub enum SupporterWriteRequest {
   SetSupporterBranding(SetSupporterBranding),
 }
 
-#[derive(Deserialize)]
-struct Variant {
-  variant: String,
-}
-
-/// The tagged request (`{ type, params }`) of a `/{variant}` route.
-/// An unknown variant or invalid params is the client's fault.
-fn variant_request<R: serde::de::DeserializeOwned>(
-  variant: String,
-  params: serde_json::Value,
-) -> mogh_error::Result<R> {
-  serde_json::from_value(serde_json::json!({
-    "type": variant,
-    "params": params,
-  }))
-  .context("Invalid request")
-  .status_code(StatusCode::BAD_REQUEST)
-}
-
+/// `/read/{variant}`: the request named by the path, its params the
+/// body. An unknown request or params of the wrong shape are the
+/// client's error, 422 ([variant_request]).
 async fn read_variant_handler<I: SupporterImpl>(
-  user: SupporterUser,
+  user: UserExtractor,
   Path(Variant { variant }): Path<Variant>,
   Json(params): Json<serde_json::Value>,
 ) -> mogh_error::Result<Response> {
-  read_handler::<I>(user, Json(variant_request(variant, params)?))
+  read_handler::<I>(user, Json(variant_request(&variant, params)?))
     .await
 }
 
 async fn read_handler<I: SupporterImpl>(
-  SupporterUser(user): SupporterUser,
+  UserExtractor(user): UserExtractor,
   Json(request): Json<SupporterReadRequest>,
 ) -> mogh_error::Result<Response> {
   let method: ReadRequestMethod = (&request).into();
@@ -454,17 +411,18 @@ async fn read_handler<I: SupporterImpl>(
   res.map(|res| res.0)
 }
 
+/// `/write/{variant}`, like [read_variant_handler].
 async fn write_variant_handler<I: SupporterImpl>(
-  user: SupporterUser,
+  user: UserExtractor,
   Path(Variant { variant }): Path<Variant>,
   Json(params): Json<serde_json::Value>,
 ) -> mogh_error::Result<Response> {
-  write_handler::<I>(user, Json(variant_request(variant, params)?))
+  write_handler::<I>(user, Json(variant_request(&variant, params)?))
     .await
 }
 
 async fn write_handler<I: SupporterImpl>(
-  SupporterUser(user): SupporterUser,
+  UserExtractor(user): UserExtractor,
   Json(request): Json<SupporterWriteRequest>,
 ) -> mogh_error::Result<Response> {
   let method: WriteRequestMethod = (&request).into();
@@ -490,7 +448,9 @@ async fn write_handler<I: SupporterImpl>(
   res.map(|res| res.0)
 }
 
-/// Only non-workload admins manage the key and its branding,.
+/// Only admins manage the key and its branding, and no workload
+/// among them: a CI identity whose trusted issuer rule makes it an
+/// admin can't replace the key or the branding of the instance.
 fn check_admin(user: &BoxAuthUser) -> mogh_error::Result<()> {
   if user.is_admin() && !user.is_workload() {
     Ok(())
@@ -539,8 +499,11 @@ impl Resolve<SupporterArgs> for SetSupporterKey {
     self,
     SupporterArgs { imp, user }: &SupporterArgs,
   ) -> Result<Self::Response, Self::Error> {
+    // The key as pasted is wiped once handled, refused or not. The
+    // body of the request it was read from is not (axum's).
+    let pasted = Zeroizing::new(self.key);
     check_admin(user)?;
-    let key = compact_key(&self.key);
+    let key = compact_key(&pasted);
     let parsed = SupporterKey::parse(imp.supporter_app(), &key)
       .context("Invalid supporter key")
       .status_code(StatusCode::BAD_REQUEST)?;
@@ -552,7 +515,8 @@ impl Resolve<SupporterArgs> for SetSupporterKey {
       .context("Invalid supporter key")
       .status_code(StatusCode::BAD_REQUEST)?;
     let _change = CHANGE.lock().await;
-    imp.store_supporter_key(Some(key.to_string())).await?;
+    // Handed over without a copy, wiped once the app kept it.
+    imp.store_supporter_key(Some(key)).await?;
     info!(
       "Supporter key set by {}: {} ({}), covers releases up to {}",
       user.username(),

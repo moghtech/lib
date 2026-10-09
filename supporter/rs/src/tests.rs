@@ -605,13 +605,37 @@ fn debug_is_redacted() {
 }
 
 #[test]
+fn set_supporter_key_debug_leaves_the_key_out() {
+  let request = crate::api::SetSupporterKey {
+    key: fixture::KEY.into(),
+  };
+  let [payload, _, i1] = parts();
+  for debug in [format!("{request:?}"), format!("{request:#?}")] {
+    assert!(!debug.contains(i1), "{debug}");
+    assert!(!debug.contains(payload), "{debug}");
+  }
+  assert_eq!(format!("{request:?}"), "SetSupporterKey { .. }");
+  // Also as the request the server resolves.
+  #[cfg(feature = "server")]
+  {
+    let request =
+      crate::server::SupporterWriteRequest::SetSupporterKey(request);
+    let debug = format!("{request:?}");
+    assert!(!debug.contains(i1), "{debug}");
+    assert_eq!(debug, "SetSupporterKey(SetSupporterKey { .. })");
+  }
+}
+
+#[test]
 fn load_ignores_what_does_not_parse() {
   assert!(SupporterKey::load(fixture::APP, "", &[]).is_none());
   assert!(SupporterKey::load(fixture::APP, " \n", &[]).is_none());
   assert!(SupporterKey::load(fixture::APP, "garbage", &[]).is_none());
-  // Served even when it would show no badge (no root here).
+  // Kept even when it does not verify (no root here): it stays in
+  // use, and the server, which verifies it, doesn't serve it.
   let key =
     SupporterKey::load(fixture::APP, fixture::KEY, &[]).unwrap();
+  assert!(key.verify(&[]).is_err());
   assert_eq!(key.respond(&nonce()), fixture::response());
   let key =
     SupporterKey::load(fixture::APP, fixture::KEY, &[fixture::ROOT])
@@ -739,8 +763,26 @@ fn cbor_rejects_the_rest() {
     err(&[0xa2, 0x01, 0x01, 0x01, 0x02]),
     CborError::DuplicateKey(3)
   );
-  assert_eq!(err(&[0x01, 0x02]), CborError::TrailingBytes(1));
-  assert_eq!(err(&[0xa0, 0x00, 0x00]), CborError::TrailingBytes(2));
+  // Keys which are neither text nor an integer: a byte string, an
+  // array, a map, null, a boolean.
+  for key in [&[0x41, 0x01][..], &[0x80], &[0xa0], &[0xf6], &[0xf5]] {
+    let mut map = vec![0xa1];
+    map.extend_from_slice(key);
+    map.push(0x01);
+    assert_eq!(err(&map), CborError::MapKey(1), "{map:02x?}");
+  }
+  assert_eq!(
+    err(&[0xa2, 0x01, 0x01, 0x41, 0x02, 0x01]),
+    CborError::MapKey(3)
+  );
+  assert_eq!(
+    err(&[0x01, 0x02]),
+    CborError::TrailingBytes { count: 1, at: 1 }
+  );
+  assert_eq!(
+    err(&[0xa0, 0x00, 0x00]),
+    CborError::TrailingBytes { count: 2, at: 1 }
+  );
   // 16 nested arrays decode, 17 don't.
   let mut nested = vec![0x81; 15];
   nested.push(0x80);
@@ -1149,4 +1191,179 @@ fn branding_json_shape_is_pinned() {
   // A branding kept before the name could be hidden reads as it was.
   assert!(!request.branding.hide_name);
   assert!(!request.branding.uppercase_name);
+}
+
+/// The vectors both implementations run, `supporter/test_vectors.json`
+/// (see its `description`): the typescript package's
+/// `tests/vectors.test.ts` reads the same file, so the two decoders
+/// and checks give the same verdict, and the same reason, on the same
+/// input. The file sits outside the crate, read by the tests only,
+/// which a publish doesn't build.
+mod shared_vectors {
+  use data_encoding::{BASE64, BASE64URL_NOPAD, HEXLOWER};
+  use serde_json::{Value, json};
+
+  use crate::{
+    CborValue, SupporterBranding, decode_cbor, root_key_id,
+  };
+
+  const VECTORS: &str = include_str!("../../test_vectors.json");
+
+  fn entries(name: &str) -> Vec<Value> {
+    let vectors: Value = serde_json::from_str(VECTORS).unwrap();
+    let entries = vectors[name].as_array().unwrap().clone();
+    assert!(!entries.is_empty(), "no {name} vectors");
+    entries
+  }
+
+  fn text<'a>(entry: &'a Value, field: &str) -> &'a str {
+    entry[field]
+      .as_str()
+      .unwrap_or_else(|| panic!("no {field} in {entry}"))
+  }
+
+  /// The expected error of an entry, `None` for one which passes. An
+  /// entry has the one or the other.
+  fn expected_error<'a>(
+    entry: &'a Value,
+    ok_field: &str,
+  ) -> Option<&'a str> {
+    let error = entry.get("error").map(|error| {
+      error.as_str().unwrap_or_else(|| panic!("error of {entry}"))
+    });
+    assert_ne!(
+      error.is_some(),
+      entry.get(ok_field).is_some(),
+      "{entry} needs either `error` or `{ok_field}`"
+    );
+    error
+  }
+
+  /// A decoded value as the vectors write it.
+  fn to_json(value: &CborValue) -> Value {
+    match value {
+      CborValue::Unsigned(n) => json!({ "int": n.to_string() }),
+      CborValue::Negative(n) => {
+        json!({ "int": (-1 - i128::from(*n)).to_string() })
+      }
+      CborValue::Bytes(bytes) => {
+        json!({ "bytes": HEXLOWER.encode(bytes) })
+      }
+      CborValue::Text(text) => json!({ "text": text }),
+      CborValue::Array(items) => {
+        json!({ "array": items.iter().map(to_json).collect::<Vec<_>>() })
+      }
+      CborValue::Map(pairs) => json!({
+        "map": pairs
+          .iter()
+          .map(|(key, value)| json!([to_json(key), to_json(value)]))
+          .collect::<Vec<_>>()
+      }),
+      CborValue::Bool(value) => json!(value),
+      CborValue::Null => Value::Null,
+    }
+  }
+
+  #[test]
+  fn cbor() {
+    for entry in entries("cbor") {
+      let bytes =
+        HEXLOWER.decode(text(&entry, "hex").as_bytes()).unwrap();
+      match (decode_cbor(&bytes), expected_error(&entry, "value")) {
+        (Ok(value), None) => {
+          assert_eq!(to_json(&value), entry["value"], "{entry}")
+        }
+        (Err(e), Some(error)) => {
+          assert_eq!(e.to_string(), error, "{entry}")
+        }
+        (Ok(value), Some(_)) => {
+          panic!("{entry} decoded to {}", to_json(&value))
+        }
+        (Err(e), None) => panic!("{entry} failed: {e}"),
+      }
+    }
+  }
+
+  #[test]
+  fn base64() {
+    for (name, encoding) in
+      [("base64", &BASE64), ("base64url", &BASE64URL_NOPAD)]
+    {
+      for entry in entries(name) {
+        let decoded =
+          encoding.decode(text(&entry, "text").as_bytes());
+        match (decoded, expected_error(&entry, "hex")) {
+          (Ok(bytes), None) => assert_eq!(
+            HEXLOWER.encode(&bytes),
+            text(&entry, "hex"),
+            "{name} {entry}"
+          ),
+          (Err(_), Some(_)) => {}
+          (Ok(bytes), Some(_)) => panic!(
+            "{name} {entry} decoded to {}",
+            HEXLOWER.encode(&bytes)
+          ),
+          (Err(e), None) => panic!("{name} {entry} failed: {e}"),
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn root_keys() {
+    for entry in entries("root_keys") {
+      match (
+        root_key_id(text(&entry, "key")),
+        expected_error(&entry, "id"),
+      ) {
+        (Ok(id), None) => {
+          assert_eq!(id, text(&entry, "id"), "{entry}")
+        }
+        (Err(e), Some(error)) => {
+          assert_eq!(e.to_string(), error, "{entry}")
+        }
+        (Ok(id), Some(_)) => panic!("{entry} has the id {id}"),
+        (Err(e), None) => panic!("{entry} failed: {e}"),
+      }
+    }
+  }
+
+  #[test]
+  fn branding() {
+    for (name, field) in [("icons", "icon"), ("links", "link")] {
+      for entry in entries(name) {
+        let value = Some(text(&entry, field).to_string());
+        let branding = if field == "icon" {
+          SupporterBranding {
+            icon: value,
+            ..Default::default()
+          }
+        } else {
+          SupporterBranding {
+            link: value,
+            ..Default::default()
+          }
+        };
+        match (branding.validated(), expected_error(&entry, "kept")) {
+          (Ok(kept), None) => {
+            let kept = if field == "icon" {
+              kept.icon
+            } else {
+              kept.link
+            };
+            assert_eq!(
+              kept.as_deref(),
+              entry["kept"].as_str(),
+              "{entry}"
+            )
+          }
+          (Err(e), Some(error)) => {
+            assert_eq!(e.to_string(), error, "{entry}")
+          }
+          (Ok(_), Some(_)) => panic!("{entry} was kept"),
+          (Err(e), None) => panic!("{entry} failed: {e}"),
+        }
+      }
+    }
+  }
 }

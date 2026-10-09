@@ -9,7 +9,6 @@ mod payload;
 mod root;
 
 pub mod api;
-pub mod request;
 
 /// Serving the api, with the `server` feature.
 #[cfg(feature = "server")]
@@ -19,6 +18,11 @@ pub mod server;
 /// answer a server gives for it, and that test root. For the tests
 /// of this crate and of apps, see the module.
 pub mod fixture;
+
+/// The type a supporter key is handed to the app and back in
+/// (`server::SupporterImpl`), wiped from memory when dropped: the key
+/// holds the instance private key.
+pub use zeroize::Zeroizing;
 
 pub use branding::*;
 pub use cbor::{

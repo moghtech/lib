@@ -36,15 +36,19 @@ pub struct SignedSupporterKey {
   pub nonce_sig: String,
 }
 
-/// A configured supporter key, parsed once at startup and kept for
-/// the process lifetime. It holds the instance private key (`I1`),
-/// the only secret in a key: it never leaves this struct (the
-/// `Debug` is redacted), and is wiped from memory on drop.
+/// A supporter key, parsed ([Self::parse]). It holds the instance
+/// private key (`I1`), the only secret in a key, as the signing key
+/// built from it, which is wiped from memory on drop. The `Debug` is
+/// redacted.
 ///
-/// The server decides nothing on it. The browser verifies the key
-/// (the typescript package), the server only parses it and answers
-/// `GetSupporterKey` ([Self::respond]). [Self::verify] is for the
-/// startup log.
+/// Both sides verify it. With the `server` feature the app loads the
+/// key in use at startup, verifies it under the root keys it
+/// hardcodes ([Self::verify]), answers `GetSupporterKey` with it
+/// ([Self::respond]) only when it verifies, and replaces it when an
+/// admin sets or removes one, which is refused for a key which does
+/// not verify. The browser verifies what it is served again (the
+/// typescript package), with what only it checks: the nonce
+/// signature, the release date of its build and the revocation list.
 pub struct SupporterKey {
   app: String,
   payload: Vec<u8>,

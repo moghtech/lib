@@ -1,6 +1,6 @@
 # Mogh Supporter
 
-Mogh Supporter schema, client, and embedded API. 
+Mogh Supporter schema and embedded API.
 
 The [typescript package](../ts) verifies the key offline in the browser,
 and [mogh_ui](../../ui) renders the badge and the settings section.
@@ -21,11 +21,13 @@ impl mogh_supporter::server::SupporterImpl for MyAuthImpl {
   fn supporter_config_key(&self) -> &str {
     &config().supporter_key
   }
-  fn load_stored_supporter_key(&self) -> DynFuture<mogh_error::Result<Option<String>>> {
+  // The key holds the instance private key: handed over as
+  // `Zeroizing<String>`, kept encrypted.
+  fn load_stored_supporter_key(&self) -> DynFuture<mogh_error::Result<Option<Zeroizing<String>>>> {
     Box::pin(async { db::load_supporter_key().await })
   }
-  fn store_supporter_key(&self, key: Option<String>) -> DynFuture<mogh_error::Result<()>> {
-    Box::pin(async move { db::store_supporter_key(key).await })
+  fn store_supporter_key(&self, key: Option<Zeroizing<String>>) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async move { db::store_supporter_key(key.as_deref()).await })
   }
   fn load_supporter_branding(&self) -> DynFuture<mogh_error::Result<Option<SupporterBranding>>> {
     Box::pin(async { db::load_supporter_branding().await })
@@ -58,10 +60,17 @@ is long, and wrapped in config files and emails) is removed
 - `P`: the payload, a CBOR map. Kept as decoded, these bytes are what
   the root key signed. At most 4 KiB.
 - `SP`: the root key's Ed25519 signature over `P || I2`, 64 bytes.
-- `I1`: the Ed25519 seed of the key's instance key pair, 32 bytes.
-  The only secret in the key: it never leaves `SupporterKey`, whose
-  `Debug` is redacted, and is wiped from memory on drop. `I2`, the
-  instance public key, is derived from it.
+- `I1`: the Ed25519 seed of the key's instance key pair, 32 bytes,
+  from which `I2`, the instance public key, is derived. The only
+  secret in the key. Parsed, it is kept in `SupporterKey`, whose
+  `Debug` is redacted, and wiped from memory on drop. The key as
+  text, `I1` in it, goes to the app to keep and comes back from it
+  (`SupporterImpl::store_supporter_key` /
+  `load_stored_supporter_key`) as a `Zeroizing<String>`, wiped once
+  dropped, which the app stores encrypted. The `key` of a
+  `SetSupporterKey` is wiped once handled and left out of its
+  `Debug`, but the body of the request it arrived in is read like
+  any request body: that copy isn't wiped.
 
 The payload (`Payload`): `v` the format version (1), `k` the id of
 the root key which signed it, `i` the key's id (a UUID, what the
@@ -71,7 +80,10 @@ name on the badge, `t` the tier (`individual`, `organization`,
 key covers, both `YYYY-MM-DD`. Keys of the map this version does not
 know are ignored. The decoder (`decode_cbor`) reads the subset the
 payload uses: definite length integers, byte and text strings, arrays
-and maps, `false`, `true` and `null`; everything else is refused.
+and maps (whose keys are text or integers), `false`, `true` and
+`null`; everything else is refused. The typescript package's decoder
+and checks are the same, to the error message: both run the vectors
+of `../test_vectors.json` (a case goes there, not to one side).
 
 `SupporterKey::parse` parses a key, `SupporterKey::respond` answers a
 nonce, `SupporterKey::verify` checks the root signature, the format
@@ -84,9 +96,16 @@ Mounted at `/supporter` by the app (`server::router`), and posted to
 like the app's own api: `POST /supporter/read` and
 `POST /supporter/write` with `{ "type": "<request>", "params": <request> }`,
 or `POST /supporter/read/<request>` with the params alone as the
-body. Every request is authenticated like the requests the app's UI
-makes (a jwt, api key or signing key of an enabled user, with
-mogh_auth_server's building blocks).
+body (an unknown request, or params of the wrong shape, is a 422 which
+names the field, never the value). Every request is authenticated
+like the requests the app's UI makes, by mogh_auth_server's
+`middleware::authenticate_user` as its management api is: a jwt, api
+key or signing key, the cidr whitelists, the rate limit, the app's
+`accept_signed_request`. A disabled user is refused every request,
+also the ones for every user (the management api still tells them
+who they are). "Admins" below are `AuthUserImpl::is_admin`, and no
+workload: a CI identity whose trusted issuer rule makes it an admin
+reads what every user reads, and manages nothing.
 
 | Request | Who | Does |
 | --- | --- | --- |
@@ -127,11 +146,11 @@ same root keys hardcoded in the app's UI, with what only it checks:
 the nonce signature, the release date of the build, and the revocation
 list.
 
-Clients: `request::read` / `request::write` here (reqwest, with the
-credentials in the client's default headers), `MoghSupporterClient` of
-the typescript package, and in mogh_ui `setSupporterUrl`,
-`useSupporterBrand` + `SupporterBadge` for the topbar and
-`SupporterKeyConfig` for the settings.
+Clients: `MoghSupporterClient` of the typescript package, and in
+mogh_ui `setSupporterUrl`, `useSupporterBrand` + `SupporterBadge` for
+the topbar and `SupporterKeyConfig` for the settings. This crate has
+no http client: a Rust client posts the requests of `api` with its
+own, with its own credentials (eg. the example app's client).
 
 ## Branding
 
@@ -160,10 +179,10 @@ The branding is no secret and not part of the key, and it decides
 nothing: the browser applies it only for a key it verified as an
 organization's or sponsor's (`supporterBrand` of the typescript
 package), so without such a key it shows nowhere. The server refuses
-to set one while the key in use is none of theirs, as feedback, by
-the payload as decoded. The default (`SupporterBranding::default()`)
-is always accepted: it clears. Removing the key keeps the branding
-for the next one.
+to set one unless the key in use verifies, the check it serves the
+key by, and is an organization's or sponsor's. The default
+(`SupporterBranding::default()`) is always accepted: it clears.
+Removing the key keeps the branding for the next one.
 
 An uploaded icon is the whole image: it is never logged (the log
 says `icon uploaded`), and a request carrying the largest one is
@@ -186,7 +205,11 @@ The `server` feature. `SupporterImpl`, implemented on the app's
   file, environment variable, `_FILE` variant).
 - `load_stored_supporter_key` / `store_supporter_key`: where a key
   set over the api is kept. It holds the instance private key: store
-  it like a secret, encrypted at rest.
+  it like a secret, encrypted at rest. It is handed over both ways as
+  a `Zeroizing<String>` (`mogh_supporter::Zeroizing`), wiped from
+  memory once dropped: encrypt it from the reference and decrypt it
+  into one, without a plain copy (eg. a `to_string()`) which would
+  outlive it.
 - `load_supporter_branding` / `store_supporter_branding`: where the
   branding is kept, whole (as json, say). Nothing in it is secret.
   With an uploaded icon it is up to about 350 KB of text.
