@@ -102,6 +102,16 @@ pub fn decrypt<A: AssociatedData>(
   .map_err(|e| anyhow!("Decryption failed | {e:?}"))
 }
 
+/// [decrypt] for text: the plaintext as a string, wiped when
+/// dropped like the bytes. Plaintext which is not UTF-8 is an error.
+pub fn decrypt_string<A: AssociatedData>(
+  encrypted: &EncryptedData,
+  key: &Key,
+  associated_data: &A,
+) -> anyhow::Result<Zeroizing<String>> {
+  into_string(decrypt(encrypted, key, associated_data)?)
+}
+
 /// The nonce bytes as the cipher's fixed size nonce,
 /// erroring (never panicking) on a length mismatch.
 fn nonce_array<A: AeadCore>(
@@ -119,13 +129,81 @@ pub fn envelope_decrypt<A: AssociatedData>(
   master_key: &Key,
   associated_data: &A,
 ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+  let key = unwrap_data_key(key, master_key, associated_data)?;
+  decrypt(data, &key, associated_data)
+}
+
+/// [envelope_decrypt] for text: the plaintext as a string, wiped
+/// when dropped like the bytes. Plaintext which is not UTF-8 is an
+/// error.
+pub fn envelope_decrypt_string<A: AssociatedData>(
+  envelope: &EnvelopeEncryptedData,
+  master_key: &Key,
+  associated_data: &A,
+) -> anyhow::Result<Zeroizing<String>> {
+  into_string(envelope_decrypt(
+    envelope,
+    master_key,
+    associated_data,
+  )?)
+}
+
+/// Moves the envelope onto another master key (a master key
+/// rotation): its data key is decrypted with `old_master_key` and
+/// encrypted again under `new_master_key` with `cipher`, bound to the
+/// same associated data.
+///
+/// The data layer is kept byte for byte (and keeps its cipher), so
+/// this costs the same whatever the size of the data. It is still
+/// decrypted (the plaintext is dropped, wiped), so an envelope whose
+/// data doesn't decrypt is an error, rather than moved onto the new
+/// key as if it were readable, to fail on its next read.
+pub fn envelope_rewrap<A: AssociatedData>(
+  envelope: &EnvelopeEncryptedData,
+  old_master_key: &Key,
+  new_master_key: &Key,
+  associated_data: &A,
+  cipher: Cipher,
+) -> anyhow::Result<EnvelopeEncryptedData> {
+  let data_key =
+    unwrap_data_key(&envelope.key, old_master_key, associated_data)?;
+  decrypt(&envelope.data, &data_key, associated_data)
+    .context("The envelope's data does not decrypt with its key")?;
+  let key = encrypt(
+    data_key.as_bytes(),
+    new_master_key,
+    associated_data,
+    cipher,
+  )?;
+  Ok(EnvelopeEncryptedData {
+    key,
+    data: envelope.data.clone(),
+  })
+}
+
+/// The data key of an envelope, decrypted with the master key.
+fn unwrap_data_key<A: AssociatedData>(
+  key: &EncryptedData,
+  master_key: &Key,
+  associated_data: &A,
+) -> anyhow::Result<Key> {
   let key = decrypt(key, master_key, associated_data)?;
-  let key = Key::from_slice(&key).ok_or_else(|| {
+  Key::from_slice(&key).ok_or_else(|| {
     anyhow!(
       "The envelope encryption key is not 32 bytes after decryption"
     )
-  })?;
-  decrypt(data, &key, associated_data)
+  })
+}
+
+/// The plaintext as text. Checked in place, then copied into a
+/// buffer wiped on drop: `String::from_utf8` would hand the bytes to
+/// its error value, which is never wiped.
+fn into_string(
+  plaintext: Zeroizing<Vec<u8>>,
+) -> anyhow::Result<Zeroizing<String>> {
+  let text = std::str::from_utf8(&plaintext)
+    .map_err(|_| anyhow!("Decrypted data is not valid UTF-8"))?;
+  Ok(Zeroizing::new(text.to_owned()))
 }
 
 #[cfg(test)]
@@ -335,6 +413,115 @@ mod tests {
       data: b.data,
     };
     assert!(envelope_decrypt(&tampered, &key(), &aad).is_err());
+  }
+
+  #[test]
+  fn envelope_rewrap_moves_the_key_layer_keeping_the_data_layer() {
+    let aad = "row-1";
+    for (from, to) in [
+      (Cipher::XChaCha20Poly1305, Cipher::XChaCha20Poly1305),
+      (Cipher::XChaCha20Poly1305, Cipher::Aes256Gcm),
+      (Cipher::Aes256Gcm, Cipher::XChaCha20Poly1305),
+    ] {
+      let envelope =
+        envelope_encrypt(b"contents", &key(), &aad, from).unwrap();
+      let rewrapped =
+        envelope_rewrap(&envelope, &key(), &other_key(), &aad, to)
+          .unwrap();
+      // The data layer byte for byte, the key layer under the new
+      // master key and cipher.
+      assert_eq!(rewrapped.data, envelope.data);
+      assert_ne!(rewrapped.key, envelope.key);
+      assert_eq!(Cipher::parse(&rewrapped.key.data).unwrap().0, to);
+      assert_eq!(
+        envelope_decrypt(&rewrapped, &other_key(), &aad)
+          .unwrap()
+          .as_slice(),
+        b"contents"
+      );
+      assert!(envelope_decrypt(&rewrapped, &key(), &aad).is_err());
+    }
+  }
+
+  #[test]
+  fn envelope_rewrap_authenticates_both_layers() {
+    let aad = "row-1";
+    let cipher = Cipher::default();
+    let a = envelope_encrypt(b"a", &key(), &aad, cipher).unwrap();
+    let b = envelope_encrypt(b"b", &key(), &aad, cipher).unwrap();
+    // The key layer of one envelope with the data layer of another:
+    // the key layer alone unwraps, but the data no longer opens, so
+    // it must not be moved (and reported) as readable.
+    let spliced = EnvelopeEncryptedData {
+      key: a.key.clone(),
+      data: b.data.clone(),
+    };
+    let err =
+      envelope_rewrap(&spliced, &key(), &other_key(), &aad, cipher)
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("data"), "{err:#}");
+    // Wrong old master key, or associated data.
+    assert!(
+      envelope_rewrap(&a, &other_key(), &key(), &aad, cipher)
+        .is_err()
+    );
+    assert!(
+      envelope_rewrap(&a, &key(), &other_key(), &"row-2", cipher)
+        .is_err()
+    );
+    // A key layer which unwraps to something other than a key.
+    let wrong_len = EnvelopeEncryptedData {
+      key: encrypt(&[1u8; 16], &key(), &aad, cipher).unwrap(),
+      data: a.data,
+    };
+    let err =
+      envelope_rewrap(&wrong_len, &key(), &other_key(), &aad, cipher)
+        .unwrap_err();
+    assert!(err.to_string().contains("not 32 bytes"), "{err}");
+  }
+
+  #[test]
+  fn decrypt_string_round_trips_and_refuses_non_utf8() {
+    let aad = "row-1";
+    for cipher in Cipher::ALL {
+      let encrypted =
+        encrypt("hunter2 ✓".as_bytes(), &key(), &aad, cipher)
+          .unwrap();
+      let text: Zeroizing<String> =
+        decrypt_string(&encrypted, &key(), &aad).unwrap();
+      assert_eq!(text.as_str(), "hunter2 ✓");
+      let envelope = envelope_encrypt(
+        "hunter2 ✓".as_bytes(),
+        &key(),
+        &aad,
+        cipher,
+      )
+      .unwrap();
+      let text: Zeroizing<String> =
+        envelope_decrypt_string(&envelope, &key(), &aad).unwrap();
+      assert_eq!(text.as_str(), "hunter2 ✓");
+
+      // Not UTF-8: an error, which doesn't carry the plaintext.
+      let bytes = [b'p', b'w', 0xff, b'!'];
+      let encrypted = encrypt(&bytes, &key(), &aad, cipher).unwrap();
+      let err = decrypt_string(&encrypted, &key(), &aad).unwrap_err();
+      assert_eq!(
+        err.to_string(),
+        "Decrypted data is not valid UTF-8"
+      );
+      let envelope =
+        envelope_encrypt(&bytes, &key(), &aad, cipher).unwrap();
+      let err =
+        envelope_decrypt_string(&envelope, &key(), &aad).unwrap_err();
+      assert_eq!(
+        err.to_string(),
+        "Decrypted data is not valid UTF-8"
+      );
+      // Failing authentication is still the decryption error.
+      assert!(
+        decrypt_string(&encrypted, &other_key(), &aad).is_err()
+      );
+    }
   }
 
   /// Fixed ciphertexts produced by this crate, so a change to the

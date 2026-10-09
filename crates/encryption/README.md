@@ -24,6 +24,32 @@ let encrypted = aead::envelope_encrypt(
 let decrypted: Zeroizing<Vec<u8>> =
   aead::envelope_decrypt(&encrypted, &master_key, &aad)?;
 assert_eq!(decrypted.as_slice(), data);
+
+// Text, wiped the same way. Plaintext which is not UTF-8 is an error.
+let text: Zeroizing<String> =
+  aead::envelope_decrypt_string(&encrypted, &master_key, &aad)?;
+
+// Rotating the master key: only the data key is encrypted again,
+// after checking the data still decrypts.
+let new_master_key = Key::generate();
+let rotated = aead::envelope_rewrap(
+  &encrypted,
+  &master_key,
+  &new_master_key,
+  &aad,
+  Cipher::default(),
+)?;
+```
+
+Keys come from `Key::generate()`, or from the text people hand over with
+`Key::decode(text)` (a config value, a request field) and `Key::read_file(path)`
+(a key file): base64url or standard base64 (eg. `openssl rand -base64 32`),
+padded or not, surrounding whitespace ignored. The decoded bytes are wiped,
+also when decoding fails part way, and errors never include the key text.
+`key.to_base64url()` is the canonical text form.
+
+```rust
+let key = Key::read_file("/etc/app/encryption.key")?;
 ```
 
 To store the result, use the text form (`Display` / `FromStr`), or

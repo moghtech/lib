@@ -4,16 +4,22 @@
 //! way ([Zeroizing]). Two ciphers ([Cipher]) share one stored
 //! format, told apart by a format marker on the ciphertext.
 
-use std::fmt;
+use std::{
+  fmt,
+  io::{ErrorKind, Read as _},
+  path::Path,
+  sync::LazyLock,
+};
 
 use anyhow::{Context as _, anyhow};
+use data_encoding::Encoding;
 use subtle::ConstantTimeEq as _;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub mod aead;
 
 pub use data_encoding::BASE64URL;
-pub use zeroize::{ZeroizeOnDrop, Zeroizing};
+pub use zeroize::Zeroizing;
 
 /// A 32 byte symmetric key.
 ///
@@ -71,17 +77,62 @@ impl Key {
     Ok(Key::from_bytes(&mut bytes))
   }
 
-  /// Decode base64url encoded key material (the encoding key
-  /// files, backups and the Database kind store).
+  /// Decodes a key from its text form, the way people hand keys
+  /// over (a config value, a key file, a request field): base64url
+  /// or standard base64 (eg. `openssl rand -base64 32`), padded or
+  /// not, surrounding whitespace ignored. It must decode to exactly
+  /// [Key::LEN] bytes. [Key::to_base64url] gives the canonical form.
+  ///
+  /// The decoded bytes are wiped, also when decoding fails part way,
+  /// and errors never include the input, only what is wrong with it.
+  pub fn decode(text: &str) -> anyhow::Result<Key> {
+    // Padding is optional: dropped here, the decoder takes none.
+    let text = text.trim().trim_end_matches('=');
+    let len = KEY_TEXT
+      .decode_len(text.len())
+      .map_err(|e| anyhow!("{EXPECTED_KEY_TEXT}: {e}"))?;
+    // Checked before decoding: only text the length of a key is
+    // decoded, so a long input costs no allocation of its size.
+    if len != Key::LEN {
+      return Err(anyhow!("{EXPECTED_KEY_TEXT}, got {len} bytes"));
+    }
+    // Into a buffer of its own, wiped on drop. `Encoding::decode`
+    // would free the bytes decoded before a bad symbol (part of the
+    // key) without wiping them.
+    let mut decoded = Zeroizing::new(vec![0u8; len]);
+    let len = KEY_TEXT
+      .decode_mut(text.as_bytes(), &mut decoded)
+      .map_err(|e| anyhow!("{EXPECTED_KEY_TEXT}: {}", e.error))?;
+    Key::from_slice(&decoded[..len])
+      .ok_or_else(|| anyhow!("{EXPECTED_KEY_TEXT}, got {len} bytes"))
+  }
+
+  /// [Key::decode] for bytes, which have to be UTF-8 text.
   pub fn from_base64url(encoded: &[u8]) -> anyhow::Result<Key> {
-    let decoded = Zeroizing::new(
-      BASE64URL
-        .decode(encoded)
-        .context("Invalid base64url encoding")?,
-    );
-    Key::from_slice(&decoded).ok_or_else(|| {
-      anyhow!("Invalid decoded base64url bytes length")
-    })
+    let text = std::str::from_utf8(encoded)
+      .map_err(|_| anyhow!("{EXPECTED_KEY_TEXT}: not UTF-8 text"))?;
+    Key::decode(text)
+  }
+
+  /// Reads the key in a key file, decoding its contents as
+  /// [Key::decode] does (so a trailing newline is fine). The
+  /// contents are read into a buffer wiped on drop. Errors name the
+  /// path, never the contents, and keep the [std::io::Error] of a
+  /// failed read, eg. to tell a missing file
+  /// (`err.downcast_ref::<std::io::Error>()`).
+  pub fn read_file(path: impl AsRef<Path>) -> anyhow::Result<Key> {
+    let path = path.as_ref();
+    let contents = read_key_file(path)
+      .with_context(|| format!("Failed to read key file {path:?}"))?;
+    let key = if contents.len() > MAX_KEY_FILE_LEN {
+      Err(anyhow!(
+        "{EXPECTED_KEY_TEXT}, the file is larger than \
+         {MAX_KEY_FILE_LEN} bytes"
+      ))
+    } else {
+      Key::from_base64url(&contents)
+    };
+    key.with_context(|| format!("Invalid key in key file {path:?}"))
   }
 
   /// The base64url encoding of the material, wiped on drop.
@@ -108,6 +159,50 @@ impl fmt::Debug for Key {
   }
 }
 
+/// What [Key::decode] takes, for its errors.
+const EXPECTED_KEY_TEXT: &str =
+  "Expected a 32 byte key, base64url or base64 encoded";
+
+/// The decoder of [Key::decode]: base64url, also reading the two
+/// symbols standard base64 spells differently (`+` and `/`), so
+/// either alphabet decodes without a normalized copy of the key.
+/// Takes no padding, which is dropped before decoding.
+static KEY_TEXT: LazyLock<Encoding> = LazyLock::new(|| {
+  let mut spec = data_encoding::BASE64URL_NOPAD.specification();
+  spec.translate.from.push_str("+/");
+  spec.translate.to.push_str("-_");
+  spec
+    .encoding()
+    .expect("base64url with the standard symbols translated is valid")
+});
+
+/// The most of a key file [Key::read_file] reads. A key's text form
+/// is 44 characters: a file much longer holds no key, and is refused
+/// without reading it in full.
+const MAX_KEY_FILE_LEN: usize = 4096;
+
+/// The contents of the file at `path`, up to one byte over
+/// [MAX_KEY_FILE_LEN] (to tell a file which is too long), in a
+/// buffer wiped on drop. The buffer is sized up front and never
+/// grown, as growing it would leave a copy of the contents behind
+/// in the freed one.
+fn read_key_file(path: &Path) -> std::io::Result<Zeroizing<Vec<u8>>> {
+  let mut file = std::fs::File::open(path)?;
+  let mut contents = Zeroizing::new(vec![0u8; MAX_KEY_FILE_LEN + 1]);
+  let mut len = 0;
+  while len < contents.len() {
+    match file.read(&mut contents[len..]) {
+      Ok(0) => break,
+      Ok(read) => len += read,
+      Err(e) if e.kind() == ErrorKind::Interrupted => {}
+      Err(e) => return Err(e),
+    }
+  }
+  // The rest of the buffer is still wiped on drop.
+  contents.truncate(len);
+  Ok(contents)
+}
+
 /// The AEAD cipher a ciphertext was produced with. Both take a 32
 /// byte [Key] and a random nonce per encryption; they differ in
 /// nonce size and hardware acceleration.
@@ -126,25 +221,25 @@ pub enum Cipher {
 }
 
 impl Cipher {
-  pub const ALL: [Cipher; 2] =
+  pub(crate) const ALL: [Cipher; 2] =
     [Cipher::XChaCha20Poly1305, Cipher::Aes256Gcm];
 
   /// The name in the format marker.
-  pub fn marker(self) -> &'static str {
+  pub(crate) fn marker(self) -> &'static str {
     match self {
       Cipher::XChaCha20Poly1305 => "xchacha20poly1305",
       Cipher::Aes256Gcm => "aes256gcm",
     }
   }
 
-  pub fn from_marker(marker: &str) -> Option<Cipher> {
+  pub(crate) fn from_marker(marker: &str) -> Option<Cipher> {
     Cipher::ALL
       .into_iter()
       .find(|cipher| cipher.marker() == marker)
   }
 
   /// The nonce size the cipher needs, in bytes.
-  pub fn nonce_len(self) -> usize {
+  pub(crate) fn nonce_len(self) -> usize {
     match self {
       Cipher::XChaCha20Poly1305 => 24,
       Cipher::Aes256Gcm => 12,
@@ -154,14 +249,14 @@ impl Cipher {
   /// Prefix a base64url payload with the cipher's format marker:
   /// `$<marker>$<payload>`. `$` is outside the base64url alphabet,
   /// so the marker never collides with an unmarked payload.
-  pub fn mark(self, payload: &str) -> String {
+  pub(crate) fn mark(self, payload: &str) -> String {
     format!("${}${payload}", self.marker())
   }
 
   /// Split a stored ciphertext into its cipher and base64url
   /// payload. Ciphertexts written before the marker existed carry
   /// none and are XChaCha20-Poly1305, the only cipher then.
-  pub fn parse(data: &str) -> anyhow::Result<(Cipher, &str)> {
+  pub(crate) fn parse(data: &str) -> anyhow::Result<(Cipher, &str)> {
     let Some(rest) = data.strip_prefix('$') else {
       return Ok((Cipher::XChaCha20Poly1305, data));
     };
@@ -447,19 +542,148 @@ mod tests {
   }
 
   #[test]
-  fn key_from_base64url_rejects_wrong_lengths_and_padding() {
+  fn key_from_base64url_rejects_wrong_lengths() {
     // Valid base64url, wrong decoded length.
     let short = BASE64URL.encode(&[1u8; 31]);
     let err = Key::from_base64url(short.as_bytes()).unwrap_err();
-    assert!(err.to_string().contains("length"));
+    assert!(err.to_string().contains("got 31 bytes"), "{err}");
     let long = BASE64URL.encode(&[1u8; 33]);
     assert!(Key::from_base64url(long.as_bytes()).is_err());
     assert!(Key::from_base64url(b"").is_err());
-    // The stored format is padded base64url;
-    // unpadded input is not accepted.
-    let unpadded = BASE64URL.encode(&[7u8; 32]);
+    // Not UTF-8, so not base64 either.
+    assert!(Key::from_base64url(&[0xff; 44]).is_err());
+    // Delegates to Key::decode: unpadded input is accepted too.
+    let key = Key::from_bytes(&mut [7u8; 32]);
+    let unpadded = key.to_base64url();
     let unpadded = unpadded.trim_end_matches('=');
-    assert!(Key::from_base64url(unpadded.as_bytes()).is_err());
+    assert_eq!(
+      Key::from_base64url(unpadded.as_bytes()).unwrap(),
+      key
+    );
+  }
+
+  /// A key whose text form has the two symbols base64url and
+  /// standard base64 spell differently (`-` / `+`, `_` / `/`).
+  fn key_with_url_symbols() -> (Key, Zeroizing<String>) {
+    let key = Key::from_bytes(&mut [0xfb; 32]);
+    let text = key.to_base64url();
+    assert!(text.contains('-') && text.contains('_'), "{}", *text);
+    assert!(text.ends_with('='), "{}", *text);
+    (key, text)
+  }
+
+  #[test]
+  fn key_decode_accepts_the_common_text_forms() {
+    let (key, padded) = key_with_url_symbols();
+    let unpadded = padded.trim_end_matches('=').to_string();
+    // eg. `openssl rand -base64 32`.
+    let standard = padded.replace('-', "+").replace('_', "/");
+    for text in [
+      padded.to_string(),
+      unpadded.clone(),
+      standard.clone(),
+      standard.trim_end_matches('=').to_string(),
+      format!("  {}\n", *padded),
+      format!("\t{unpadded} \r\n"),
+    ] {
+      assert_eq!(Key::decode(&text).unwrap(), key, "{text:?}");
+    }
+  }
+
+  #[test]
+  fn key_decode_errors_never_include_the_input() {
+    let short = BASE64URL.encode(&[0x5a; 31]);
+    let long = BASE64URL.encode(&[0x5a; 33]);
+    let (_, valid) = key_with_url_symbols();
+    // A bad symbol near the end, once part of the key is decoded.
+    let mut bad_symbol = valid.to_string();
+    bad_symbol.replace_range(40..41, ".");
+    let truncated = valid[..41].to_string();
+    for (text, detail) in [
+      (short.as_str(), "got 31 bytes"),
+      (short.trim_end_matches('='), "got 31 bytes"),
+      (long.as_str(), "got 33 bytes"),
+      (bad_symbol.as_str(), "invalid symbol"),
+      (truncated.as_str(), "invalid length"),
+      ("not base64 !!", "invalid"),
+      ("", "got 0 bytes"),
+      ("  \n", "got 0 bytes"),
+    ] {
+      let err = format!("{:#}", Key::decode(text).unwrap_err());
+      assert!(
+        err.starts_with("Expected a 32 byte key")
+          && err.contains(detail),
+        "{text:?}: {err}"
+      );
+      let text = text.trim();
+      if !text.is_empty() {
+        assert!(!err.contains(text), "{err}");
+      }
+      // No part of the encoded material either.
+      assert!(
+        !err.contains("Wlpa") && !err.contains("-_v7"),
+        "{err}"
+      );
+    }
+  }
+
+  /// Inputs which can't be a key are refused by their length,
+  /// before anything is decoded.
+  #[test]
+  fn key_decode_refuses_long_input_by_its_length() {
+    let long = "A".repeat(1 << 20);
+    let err = Key::decode(&long).unwrap_err().to_string();
+    assert!(err.contains("got 786432 bytes"), "{err}");
+  }
+
+  fn temp_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+      "mogh_encryption_test_{}_{name}",
+      std::process::id()
+    ))
+  }
+
+  #[test]
+  fn key_read_file_decodes_the_contents() {
+    let (key, text) = key_with_url_symbols();
+    let path = temp_path("key_file");
+    std::fs::write(&path, format!("{}\n", *text)).unwrap();
+    let read = Key::read_file(&path);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(read.unwrap(), key);
+  }
+
+  #[test]
+  fn key_read_file_errors_name_the_path_not_the_contents() {
+    // Missing: the io error is kept, so callers can tell.
+    let missing = temp_path("missing_key_file");
+    let err = Key::read_file(&missing).unwrap_err();
+    assert!(format!("{err:#}").contains(&format!("{missing:?}")));
+    assert_eq!(
+      err.downcast_ref::<std::io::Error>().map(|e| e.kind()),
+      Some(std::io::ErrorKind::NotFound)
+    );
+
+    let path = temp_path("bad_key_file");
+    let short = BASE64URL.encode(&[0x5a; 31]);
+    let not_utf8 = [0xfbu8; 32];
+    let too_long = "A".repeat(10_000);
+    for (contents, detail) in [
+      (short.as_bytes(), "got 31 bytes"),
+      // Raw key bytes, rather than their text form.
+      (&not_utf8[..], "not UTF-8"),
+      (too_long.as_bytes(), "larger than"),
+    ] {
+      std::fs::write(&path, contents).unwrap();
+      let err = format!("{:#}", Key::read_file(&path).unwrap_err());
+      assert!(err.contains(&format!("{path:?}")), "{err}");
+      assert!(err.contains(detail), "{err}");
+      assert!(
+        !err.contains("Wlpa") && !err.contains("AAAA"),
+        "{err}"
+      );
+    }
+    std::fs::remove_file(&path).unwrap();
   }
 
   #[test]
