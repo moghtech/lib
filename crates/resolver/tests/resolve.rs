@@ -111,13 +111,10 @@ enum RequestNoArgs {
 #[test]
 fn derive_implements_has_response() {
   assert_eq!(GetNumber::req_type(), "GetNumber");
-  assert_eq!(GetNumber::res_type(), "i64");
   assert_eq!(Request::req_type(), "Request");
-  assert_eq!(Request::res_type(), "Response");
   assert_eq!(DefaultError::req_type(), "DefaultError");
-  // Note. Interpolated tokens stringify with spaces
-  // between the individual tokens.
-  assert_eq!(DefaultError::res_type(), "Vec < String >");
+  fn assert_response<T: HasResponse<Response = Vec<String>>>() {}
+  assert_response::<DefaultError>();
 }
 
 #[test]

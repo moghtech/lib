@@ -61,9 +61,6 @@ fn impl_derive_resolve(
       fn req_type() -> &'static str {
         stringify!(#ident)
       }
-      fn res_type() -> &'static str {
-        stringify!(#response_type)
-      }
     }
     #(impl #empty_traits for #ident {})*
   };
