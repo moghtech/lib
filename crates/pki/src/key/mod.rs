@@ -90,6 +90,26 @@ fn encode_pem(label: &str, base64_body: &str) -> String {
   pem
 }
 
+/// Refuses a private key path ending in `.pub`, in any case (as a
+/// case insensitive filesystem takes it). The public key is written
+/// beside the private key, at `path.with_extension("pub")`, which
+/// would be the private key file itself: replaced by the public key
+/// right after it is written (and again on every rotation), the key
+/// in use would exist nowhere on disk, and the next start would
+/// fail to load it. A private key also has no place in a file named
+/// like a public one, which is meant to be shared.
+fn check_private_key_path(path: &Path) -> anyhow::Result<()> {
+  if path
+    .extension()
+    .is_some_and(|extension| extension.eq_ignore_ascii_case("pub"))
+  {
+    return Err(anyhow!(
+      "The private key path {path:?} ends in `.pub`, which names the public key file written beside it: use another extension, eg. `.key`"
+    ));
+  }
+  Ok(())
+}
+
 #[derive(Clone)]
 pub struct EncodedKeyPair {
   /// pkcs8 encoded private key
@@ -131,11 +151,17 @@ impl EncodedKeyPair {
     }
   }
 
+  /// A new key pair, its private key written to `path` (replacing
+  /// a key file there) and its public key beside it
+  /// (`path.with_extension("pub")`). A `path` ending in `.pub` is
+  /// refused, it would be overwritten by the public key. To generate
+  /// a key only when there is none, see [Self::load_maybe_generate].
   pub fn generate_write_sync(
     pki_kind: PkiKind,
     path: impl AsRef<Path>,
   ) -> anyhow::Result<Self> {
     let path = path.as_ref();
+    check_private_key_path(path)?;
     // Generate and write pems to path
     let keys = Self::generate(pki_kind)?;
     keys.private.write_pem_sync(path)?;
@@ -143,11 +169,13 @@ impl EncodedKeyPair {
     Ok(keys)
   }
 
+  /// [Self::generate_write_sync], writing with tokio.
   pub async fn generate_write_async(
     pki_kind: PkiKind,
     path: impl AsRef<Path>,
   ) -> anyhow::Result<Self> {
     let path = path.as_ref();
+    check_private_key_path(path)?;
     // Generate and write pems to path
     let keys = Self::generate(pki_kind)?;
     keys.private.write_pem_async(path).await?;
@@ -159,21 +187,86 @@ impl EncodedKeyPair {
   }
 
   /// Loads the pair from the private key file, or generates and
-  /// writes a new one when there is no file at the path. An existing
+  /// writes a new one when there is no file at the path. The new key
+  /// file is created, never written over one: of processes starting
+  /// at once on the same missing key file, one creates it and the
+  /// others load its key, so every one of them runs on the key on
+  /// disk. A symlink at the path to a file which does not exist is an
+  /// error (no key is written through it, or over it). An existing
   /// file that holds no valid key (an empty file) is an error, never
-  /// replaced.
+  /// replaced. A path ending in `.pub` is an error too, whether or
+  /// not there is a file: it names the public key file written
+  /// beside it (see [Self::generate_write_sync]).
   pub fn load_maybe_generate(
     pki_kind: PkiKind,
     private_key_path: impl AsRef<Path>,
   ) -> anyhow::Result<Self> {
     let path = private_key_path.as_ref();
+    check_private_key_path(path)?;
+    match Self::load_existing(pki_kind, path)? {
+      Some(keys) => Ok(keys),
+      None => {
+        Self::generate_missing(pki_kind, path).map(|(keys, _)| keys)
+      }
+    }
+  }
 
+  /// For a private key file found missing at `path`: generates a
+  /// pair, creates the key file with it and writes its public key
+  /// beside it, returning it with `true`.
+  ///
+  /// Processes starting at once on the same missing key file all
+  /// find it missing, so the file is created, never written over
+  /// (see `mogh_secret_file::write_new`): one process creates it, the
+  /// others load the key it holds, returned with `false`. Were it
+  /// written over (as before 3.1), each process would run on the key
+  /// it generated, of which only the last one written stays on disk:
+  /// the others would run on a key no restart loads again (and
+  /// register a public key nobody holds anymore).
+  ///
+  /// Something at the path which holds no key file is an error, a
+  /// symlink to a file which does not exist: no key is written
+  /// through it (a planted link could point anywhere), or over it.
+  fn generate_missing(
+    pki_kind: PkiKind,
+    path: &Path,
+  ) -> anyhow::Result<(Self, bool)> {
+    let keys = Self::generate(pki_kind)?;
+    if keys.private.write_pem_new_sync(path)? {
+      keys.public.write_pem_sync(path.with_extension("pub"))?;
+      return Ok((keys, true));
+    }
+    // Created since it was found missing, eg. by another process
+    // starting on the same key file, which writes the public key
+    // file too.
+    match Self::load_existing(pki_kind, path)? {
+      Some(existing) => {
+        tracing::info!(
+          "Loaded the private key at {path:?}, which another process created while this one was about to"
+        );
+        Ok((existing, false))
+      }
+      None if path.is_symlink() => Err(anyhow!(
+        "The private key path {path:?} is a symlink to a file which does not exist: create the key file it points to, or remove the link to have a key generated at the path"
+      )),
+      None => Err(anyhow!(
+        "Failed to create the private key file at {path:?}: something was created there meanwhile, and is gone again"
+      )),
+    }
+  }
+
+  /// The pair of the private key file at `path`, `None` when there
+  /// is no file, see [Self::load_maybe_generate].
+  fn load_existing(
+    pki_kind: PkiKind,
+    path: &Path,
+  ) -> anyhow::Result<Option<Self>> {
     let exists = path.try_exists().with_context(|| {
       format!("Invalid private key path: {path:?}")
     })?;
 
     if !exists {
-      return Self::generate_write_sync(pki_kind, path);
+      return Ok(None);
     }
 
     let private = Pkcs8PrivateKey::from_file(pki_kind, path)
@@ -194,12 +287,27 @@ impl EncodedKeyPair {
       })?;
     let public = private.compute_public_key(pki_kind)?;
 
+    Ok(Some(Self { private, public }))
+  }
+
+  /// The pair of a private key given inline, in a form
+  /// [Pkcs8PrivateKey::from_inline_key] accepts (pkcs8, or exactly 32
+  /// raw bytes), deriving the public key.
+  pub fn from_inline_key(
+    pki_kind: PkiKind,
+    private_key: &str,
+  ) -> anyhow::Result<Self> {
+    let private =
+      Pkcs8PrivateKey::from_inline_key(pki_kind, private_key)?;
+    let public = private.compute_public_key(pki_kind)?;
     Ok(Self { private, public })
   }
 
   /// The pair of a private key in any form
   /// [Pkcs8PrivateKey::from_maybe_raw_bytes] accepts, deriving the
-  /// public key.
+  /// public key. For keys handed out as raw values on purpose
+  /// (onboarding, recovery keys): a key a person writes down takes
+  /// [Self::from_inline_key].
   pub fn from_private_key(
     pki_kind: PkiKind,
     maybe_pkcs8_private_key: &str,
@@ -267,6 +375,86 @@ const NEXT_SUFFIX: &str = ".next";
 /// [RotatableKeyPair::finish_rotation].
 const OLD_SUFFIX: &str = ".old";
 
+/// Refuses a rotation file beside the key file at `path`
+/// (`<path>.next`, `<path>.old`) which holds a key of the other
+/// algorithm than `pki_kind` uses, with the [WrongKeyAlgorithm] of
+/// loading it and a context naming it.
+///
+/// A pair rotates within its algorithm, so such a file was left by
+/// a rotation of an earlier key of the other algorithm (a key file
+/// moved away to have a key of this kind generated). It is no part
+/// of a rotation of this key, and none could resume or finish with
+/// it there: a `.old` reads as a retired key which can't be loaded,
+/// so [RotatableKeyPair::begin_rotation] refuses to start, and a
+/// `.next` as a pending rotation. Whether its key is still
+/// registered somewhere, to be revoked, is for the operator to
+/// find out, so the file is left as it is, never removed or
+/// replaced.
+///
+/// A rotation file which doesn't load for another reason (it holds
+/// no key) is left to the rotation, see
+/// [RotatableKeyPair::begin_rotation].
+fn check_rotation_files(
+  pki_kind: PkiKind,
+  path: &Path,
+) -> anyhow::Result<()> {
+  for suffix in [NEXT_SUFFIX, OLD_SUFFIX] {
+    let file = sibling(path, suffix);
+    if let Err(e) = Pkcs8PrivateKey::from_file(pki_kind, &file)
+      && e.is::<WrongKeyAlgorithm>()
+    {
+      return Err(e.context(format!(
+        "{file:?}, left by a rotation of an earlier key, holds a key of the other algorithm, with which no rotation of this key can resume or finish: move the file away"
+      )));
+    }
+  }
+  Ok(())
+}
+
+/// The key file at the configured `path` of a `file:` spec,
+/// resolved (`std::fs::canonicalize`): absolute, with every symlink
+/// followed. A [RotatableKeyPair] keeps this path, and its rotations
+/// write this file, and its rotation files (`.next`, `.old`) and
+/// public key file (`.pub`) beside it.
+///
+/// A key path is often a symlink into where keys are kept, eg. from
+/// the config directory into a persistent volume. A rotation replaces
+/// the key file through a temporary file renamed over it (see
+/// `mogh_secret_file::write`), which over the link itself would
+/// replace the link with a file of its own, leaving the previous key
+/// where the link pointed: recreated (a container or host
+/// provisioned again), the link would bring the retired key back,
+/// which the server no longer accepts. Resolved, the rename replaces
+/// the file the link points to, and the link stays.
+///
+/// The resolved file is refused as a private key path ending in
+/// `.pub` is ([check_private_key_path]). So are rotation files of an
+/// earlier version beside a symlink at `path` (`<path>.next`,
+/// `<path>.old`), which rotated the link's path: a rotation in
+/// flight would carry on without its candidate, or leave its retired
+/// key unrevoked. The operator moves them beside the resolved file
+/// (where the error says), or away.
+fn resolve_key_file(path: &Path) -> anyhow::Result<PathBuf> {
+  let resolved = std::fs::canonicalize(path).with_context(|| {
+    format!("Failed to resolve the private key path {path:?}")
+  })?;
+  check_private_key_path(&resolved)?;
+  let is_link = std::fs::symlink_metadata(path)
+    .is_ok_and(|metadata| metadata.file_type().is_symlink());
+  if is_link {
+    for suffix in [NEXT_SUFFIX, OLD_SUFFIX] {
+      let left = sibling(path, suffix);
+      if left.symlink_metadata().is_ok() {
+        return Err(anyhow!(
+          "{left:?} was left beside the symlink {path:?} by a key rotation of an earlier version, which rotated the path of the link: rotations now write the key file it points to, {resolved:?}, and keep their files beside it. Move it to {:?} to carry that rotation on (or away, if its key was never registered anywhere)",
+          sibling(&resolved, suffix)
+        ));
+      }
+    }
+  }
+  Ok(resolved)
+}
+
 /// Whether a private key given inline reads as the path of a key
 /// file: taken as the key it would be the raw key (up to 32 bytes
 /// are), one anybody can derive from where key files usually are.
@@ -321,6 +509,36 @@ pub fn looks_like_a_path(private_key: &str) -> bool {
     || (spec.starts_with('/') && !random())
 }
 
+/// The key file a key spec names: `Some(path)` for
+/// `file:/path/to/key`, `None` for a key given inline. This is how
+/// [RotatableKeyPair::from_private_key_spec] and
+/// [SpkiPublicKey::from_spec] read a spec, for apps which need the
+/// path of a spec themselves (eg. to write a key there later), so
+/// they agree on it.
+///
+/// Whitespace around the spec, and around the path after `file:`,
+/// is no part of the path. A spec usually comes from an environment
+/// variable or a config line, where a stray space or `\r` is easily
+/// left, and taken with it the path names another file: one which
+/// doesn't exist, where a new key would be generated in place of
+/// the configured one. The prefix is a lowercase `file:`
+/// ([RotatableKeyPair::from_private_key_spec] refuses one in
+/// another case, see [looks_like_a_path]).
+///
+/// `file:` without a path is an error.
+pub fn key_spec_path(spec: &str) -> anyhow::Result<Option<&Path>> {
+  let Some(path) = spec.trim().strip_prefix("file:") else {
+    return Ok(None);
+  };
+  let path = path.trim();
+  if path.is_empty() {
+    return Err(anyhow!(
+      "The key spec `file:` names no key file, use `file:/path/to/key`"
+    ));
+  }
+  Ok(Some(Path::new(path)))
+}
+
 /// A key pair loaded from a private key spec, which a file backed
 /// pair can replace while in use: [Self::rotate] in one step, or
 /// [Self::begin_rotation] in two phases.
@@ -338,6 +556,8 @@ pub struct RotatableKeyPair {
   keys: ArcSwap<EncodedKeyPair>,
   pki_kind: PkiKind,
   path: Option<PathBuf>,
+  /// See [Self::generated].
+  generated: bool,
   /// Whether a rotation is in flight, see [RotationGuard].
   rotating: AtomicBool,
 }
@@ -346,42 +566,93 @@ impl RotatableKeyPair {
   /// Parses from either direct private key (raw / der / pem),
   /// or from file containing raw / der / pem.
   /// Use `file:/path/to/private.key` to specify file: a key is
-  /// generated and written there when the file does not exist.
+  /// generated and written there when the file does not exist. The
+  /// file is created, never written over one: of processes starting
+  /// at once on the same missing key file, one generates the key and
+  /// the others load it (see [EncodedKeyPair::load_maybe_generate]),
+  /// and a symlink to a file which does not exist is an error.
+  /// Whitespace around the spec and the path is ignored (see
+  /// [key_spec_path]), and `file:` without a path is an error.
   /// An empty key, or an existing empty file, is an error, and so
   /// is a key of the other algorithm than `pki_kind` uses
-  /// ([WrongKeyAlgorithm]).
+  /// ([WrongKeyAlgorithm]). Whether a key was generated is told by
+  /// [Self::generated].
   ///
-  /// A spec which looks like a path but lacks the `file:` prefix (or
-  /// has it misspelled) is an error too ([looks_like_a_path]): up to
-  /// 32 bytes are a raw key, so the path would be taken for the key
-  /// itself, one anybody can derive.
+  /// The pair keeps the path resolved ([Self::path]): absolute, with
+  /// every symlink followed. A key path which is a symlink (eg. into
+  /// a persistent volume) is rotated where it points: the link stays,
+  /// the file it points to is replaced, and the rotation files
+  /// (`.next`, `.old`) and the public key file (`.pub`) are written
+  /// beside that file. A file it points to whose name ends in `.pub`
+  /// is refused, and so are rotation files an earlier version left
+  /// beside the link (which rotated the link's path): the error says
+  /// where they belong now, beside the file the link points to.
+  ///
+  /// A rotation file beside the key file (`<path>.next`,
+  /// `<path>.old`) which holds a key of the other algorithm is an
+  /// error too ([WrongKeyAlgorithm], with a context naming the
+  /// file), checked before a key is generated. A pair rotates within
+  /// its algorithm, so it was left by a rotation of an earlier key
+  /// (one moved away for a key of this kind), and no rotation of
+  /// this key could resume or finish with it there. The file is left
+  /// as it is: whether its key is still registered somewhere is for
+  /// the operator to find out, before moving it away.
+  ///
+  /// A key given inline is pkcs8 encoded (pem, or base64 der), or
+  /// exactly 32 raw bytes ([Pkcs8PrivateKey::from_inline_key]): a
+  /// shorter raw value would be the key itself, zero padded, one
+  /// anybody can find from the public key (`changeme`, the name of
+  /// the node). It is refused, with an error naming the accepted
+  /// forms (never the value). A spec which looks like a path but
+  /// lacks the `file:` prefix (or has it misspelled) is an error too
+  /// ([looks_like_a_path]): taken as raw bytes, the path would be the
+  /// key, one anybody can derive.
   pub fn from_private_key_spec(
     pki_kind: PkiKind,
     private_key_spec: &str,
   ) -> anyhow::Result<Self> {
-    let (keys, path) = if let Some(path) =
-      private_key_spec.strip_prefix("file:")
-    {
-      let path = PathBuf::from(path);
-      (
-        EncodedKeyPair::load_maybe_generate(pki_kind, &path)?,
-        Some(path),
-      )
-    } else {
-      if looks_like_a_path(private_key_spec) {
-        return Err(anyhow!(
-          "The private key looks like a file path, which would be taken for the key itself: use `file:/path/to/key` (lowercase, nothing before it) to load a key file. A raw key which reads like a path is not taken: give the key as pkcs8 (base64 der or pem)"
-        ));
+    let (keys, path, generated) = match key_spec_path(
+      private_key_spec,
+    )? {
+      Some(configured) => {
+        check_private_key_path(configured)?;
+        let (keys, generated) = match EncodedKeyPair::load_existing(
+          pki_kind, configured,
+        )? {
+          Some(keys) => (keys, false),
+          None => {
+            // Where the key is created: no link (one to a file
+            // which does not exist is refused).
+            check_rotation_files(pki_kind, configured)?;
+            EncodedKeyPair::generate_missing(pki_kind, configured)?
+          }
+        };
+        let path = resolve_key_file(configured)?;
+        check_rotation_files(pki_kind, &path)?;
+        (keys, Some(path), generated)
       }
-      (
-        EncodedKeyPair::from_private_key(pki_kind, private_key_spec)?,
-        None,
-      )
+      None => {
+        if looks_like_a_path(private_key_spec) {
+          return Err(anyhow!(
+            "The private key looks like a file path, which would be taken for the key itself: use `file:/path/to/key` (a lowercase `file:`) to load a key file. A raw key which reads like a path is not taken: give the key as pkcs8 (base64 der or pem)"
+          ));
+        }
+        // Not trimmed: a raw key is used exactly as given.
+        (
+          EncodedKeyPair::from_inline_key(
+            pki_kind,
+            private_key_spec,
+          )?,
+          None,
+          false,
+        )
+      }
     };
     Ok(Self {
       keys: ArcSwap::new(Arc::new(keys)),
       pki_kind,
       path,
+      generated,
       rotating: AtomicBool::new(false),
     })
   }
@@ -389,6 +660,18 @@ impl RotatableKeyPair {
   /// The kind the pair was loaded as, which its keys are of.
   pub fn kind(&self) -> PkiKind {
     self.pki_kind
+  }
+
+  /// Whether [Self::from_private_key_spec] generated the key, as
+  /// there was no file at the `file:` path: a key nothing can know
+  /// yet, eg. not registered with the server which has to accept
+  /// it. False for a key file which existed, and for a key given
+  /// inline. Of processes starting at once on the same missing key
+  /// file, true for the one which created it only: the others load
+  /// its key. It tells what the load did: a later rotation doesn't
+  /// change it.
+  pub fn generated(&self) -> bool {
+    self.generated
   }
 
   /// If 'path' is Some, generates, writes, and stores new key pair.
@@ -451,7 +734,10 @@ impl RotatableKeyPair {
     self.path.is_some()
   }
 
-  /// The live private key file, when file backed.
+  /// The live private key file, when file backed: the path of the
+  /// `file:` spec resolved, absolute and with every symlink followed
+  /// (see [Self::from_private_key_spec]). The file rotations replace,
+  /// with the rotation files beside it.
   pub fn path(&self) -> Option<&Path> {
     self.path.as_deref()
   }
@@ -690,9 +976,15 @@ impl Drop for RotationGuard<'_> {
   }
 }
 
+/// Deletes the rotation file at `path`, if there is one. The removal
+/// is synced to disk (see [sync_parent_dir]), so a finished rotation
+/// doesn't offer its retired key again after a power loss.
 fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
   match std::fs::remove_file(path) {
-    Ok(()) => Ok(()),
+    Ok(()) => {
+      sync_parent_dir(path);
+      Ok(())
+    }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
     Err(e) => {
       Err(e).with_context(|| format!("Failed to delete {path:?}"))
@@ -701,26 +993,17 @@ fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Flushes the directory entries beside `path` (a rename into
-/// place) to disk, so a switched key survives a power loss before
-/// the caller acts on it (revokes the previous key). Best effort:
-/// the switch already happened, so a failure is only logged.
+/// place, a removal) to disk, so a switched key survives a power
+/// loss before the caller acts on it (revokes the previous key).
+/// Best effort: the change already happened, so a failure is only
+/// logged. A directory which can't be synced (some filesystems) is
+/// skipped, see `mogh_secret_file::sync_parent_dir`.
 fn sync_parent_dir(path: &Path) {
-  #[cfg(unix)]
-  {
-    let parent = match path.parent() {
-      Some(parent) if !parent.as_os_str().is_empty() => parent,
-      _ => Path::new("."),
-    };
-    if let Err(e) =
-      std::fs::File::open(parent).and_then(|dir| dir.sync_all())
-    {
-      tracing::warn!(
-        "Failed to sync the key directory {parent:?} to disk | {e:#}"
-      );
-    }
+  if let Err(e) = mogh_secret_file::sync_parent_dir(path) {
+    tracing::warn!(
+      "Failed to sync the key directory of {path:?} to disk | {e:#}"
+    );
   }
-  #[cfg(not(unix))]
-  let _ = path;
 }
 
 /// An in-flight rotation, see [RotatableKeyPair::begin_rotation].

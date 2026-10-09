@@ -79,16 +79,17 @@ impl SpkiPublicKey {
 
   /// Supports file or hardcoded spec.
   ///
-  /// - Direct pass: `public_key = "MCow..."`
-  /// - File path: `public_key = "file:/path/to/key.pub"`
+  /// - Direct pass: `public_key = "MCow..."` (base64 der, or pem)
+  /// - File path: `public_key = "file:/path/to/key.pub"`, the path
+  ///   read the way [super::key_spec_path] reads it (whitespace
+  ///   around it is ignored, `file:` without a path is an error)
   pub fn from_spec(
     pki_kind: PkiKind,
     spec: &str,
   ) -> anyhow::Result<Self> {
-    if let Some(path) = spec.strip_prefix("file:") {
-      SpkiPublicKey::from_file(pki_kind, path)
-    } else {
-      SpkiPublicKey::from_maybe_pem(pki_kind, spec)
+    match super::key_spec_path(spec)? {
+      Some(path) => SpkiPublicKey::from_file(pki_kind, path),
+      None => SpkiPublicKey::from_maybe_pem(pki_kind, spec),
     }
   }
 
@@ -102,6 +103,7 @@ impl SpkiPublicKey {
         format!("Failed to read public key at {path:?}")
       })?;
     Self::from_maybe_pem(pki_kind, &contents)
+      .with_context(|| format!("Invalid public key file at {path:?}"))
   }
 
   /// Accepts pem rfc7468 (openssl) or base64 der (second line of

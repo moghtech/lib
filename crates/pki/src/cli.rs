@@ -130,13 +130,14 @@ struct PublicKey<'a> {
   public_key: &'a str,
 }
 
-/// The public key of a private key given as `file:/path` (loaded
-/// like a `file:` private key spec), or as the key itself.
+/// The public key of a private key given as `file:/path` (the path
+/// read like a `file:` private key spec, see
+/// [crate::key_spec_path]), or as the key itself.
 fn compute_public_key(
   pki_kind: crate::PkiKind,
   private_key: &str,
 ) -> anyhow::Result<crate::SpkiPublicKey> {
-  if let Some(path) = private_key.strip_prefix("file:") {
+  if let Some(path) = crate::key_spec_path(private_key)? {
     return Ok(
       crate::EncodedKeyPair::from_file(pki_kind, path)?.public,
     );
@@ -156,6 +157,14 @@ fn compute_public_key(
       "{}: the private key is not pkcs8 encoded, so it is used as the raw key bytes",
       "NOTE".yellow()
     );
+    // What `from_private_key_spec` refuses (an onboarding or recovery
+    // key is still read this way).
+    if private_key.len() < 32 {
+      eprintln!(
+        "{}: shorter than 32 bytes, it can be guessed from its public key, and a node refuses it as its own private key: generate one",
+        "WARN".yellow()
+      );
+    }
   }
   crate::SpkiPublicKey::from_private_key(pki_kind, private_key)
 }
@@ -218,6 +227,16 @@ mod tests {
       super::compute_public_key(PkiKind::Mutual, &spec).unwrap(),
       keys.public
     );
+    // Whitespace around the path is no part of it, as for a
+    // `file:` private key spec.
+    let spec = format!(" file: {} \r\n", path.display());
+    assert_eq!(
+      super::compute_public_key(PkiKind::Mutual, &spec).unwrap(),
+      keys.public
+    );
+    let err = super::compute_public_key(PkiKind::Mutual, "file: ")
+      .unwrap_err();
+    assert!(format!("{err:#}").contains("names no key file"));
     assert_eq!(
       super::compute_public_key(
         PkiKind::Mutual,

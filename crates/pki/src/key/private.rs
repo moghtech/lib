@@ -13,6 +13,21 @@ use crate::{KeyAlgorithm, PkiKind};
 const NOT_A_PRIVATE_KEY: &str =
   "Private key must be 32 characters or less, or pkcs8 encoded.";
 
+/// The forms [Pkcs8PrivateKey::from_inline_key] takes, for its
+/// errors.
+const INLINE_KEY_FORMS: &str = "a private key given inline must be pkcs8 encoded (pem, or base64 der) or exactly 32 raw bytes";
+
+/// The raw keys a parse of private key text takes, see
+/// [Pkcs8PrivateKey::maybe_raw_bytes] and
+/// [Pkcs8PrivateKey::from_inline_key].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RawKeys {
+  /// Input of 32 bytes or fewer, zero padded.
+  UpTo32,
+  /// Input of exactly 32 bytes, the key itself.
+  Exactly32,
+}
+
 /// A private key, stored as base64 pkcs8 (v1) der: an Ed25519 key
 /// for [PkiKind::Signature], an X25519 key for [PkiKind::Mutual].
 /// The encoding names the algorithm, and whatever reads the key
@@ -90,11 +105,15 @@ impl Pkcs8PrivateKey {
     super::encode_pem("PRIVATE KEY", &self.0)
   }
 
+  /// Writes the key as pem to `path` (see `mogh_secret_file::write`:
+  /// an atomic replace, a new file is `0600`). A `path` ending in
+  /// `.pub` is refused: that names a public key file.
   pub fn write_pem_sync(
     &self,
     path: impl AsRef<Path>,
   ) -> anyhow::Result<()> {
     let path = path.as_ref();
+    super::check_private_key_path(path)?;
     // Ensure the parent directory exists
     tracing::info!("Writing private key to {path:?}");
     let pem = Zeroizing::new(self.as_pem());
@@ -103,11 +122,13 @@ impl Pkcs8PrivateKey {
     })
   }
 
+  /// [Self::write_pem_sync], writing with tokio.
   pub async fn write_pem_async(
     &self,
     path: impl AsRef<Path>,
   ) -> anyhow::Result<()> {
     let path = path.as_ref();
+    super::check_private_key_path(path)?;
     // Ensure the parent directory exists
     tracing::info!("Writing private key to {path:?}");
     let pem = Zeroizing::new(self.as_pem());
@@ -116,6 +137,33 @@ impl Pkcs8PrivateKey {
       .with_context(|| {
         format!("Failed to write private key pem to {path:?}")
       })
+  }
+
+  /// Writes the key as pem to a new file at `path`, never over
+  /// anything there (see `mogh_secret_file::write_new`: the file
+  /// appears with all of its contents or not at all, `0600`).
+  /// `Ok(false)`, with nothing written, when something is at `path`
+  /// already: for a key file found missing, which another process
+  /// may create first. A `path` ending in `.pub` is refused, as by
+  /// [Self::write_pem_sync].
+  pub(super) fn write_pem_new_sync(
+    &self,
+    path: &Path,
+  ) -> anyhow::Result<bool> {
+    super::check_private_key_path(path)?;
+    let pem = Zeroizing::new(self.as_pem());
+    match mogh_secret_file::write_new(path, pem.as_bytes()) {
+      Ok(()) => {
+        tracing::info!("Wrote a new private key to {path:?}");
+        Ok(true)
+      }
+      Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+        Ok(false)
+      }
+      Err(e) => Err(e).with_context(|| {
+        format!("Failed to write private key pem to {path:?}")
+      }),
+    }
   }
 
   /// Reads a private key file in any of the forms
@@ -143,6 +191,12 @@ impl Pkcs8PrivateKey {
   ///
   /// The key is stored in the canonical form: base64 pkcs8 v1 der
   /// (a v2 key's embedded public key is dropped).
+  ///
+  /// For keys handed out as raw values on purpose (eg. an onboarding
+  /// or recovery key: random, and exactly 32 characters). A key a
+  /// person writes down (the identity of a node in its config, a
+  /// key somebody chose) takes [Self::from_inline_key], which refuses
+  /// a short raw value.
   pub fn from_maybe_raw_bytes(
     pki_kind: PkiKind,
     maybe_pkcs8_private_key: &str,
@@ -150,6 +204,39 @@ impl Pkcs8PrivateKey {
     let raw = Zeroizing::new(Self::maybe_raw_bytes(
       pki_kind,
       maybe_pkcs8_private_key,
+    )?);
+    Self::from_raw_bytes(pki_kind, &*raw)
+  }
+
+  /// Parses a private key given inline, as a value a person writes
+  /// down: the key of a node's own identity in its config
+  /// ([RotatableKeyPair::from_private_key_spec][super::RotatableKeyPair::from_private_key_spec]),
+  /// or a key somebody chose. It must be one of:
+  /// - pkcs8 encoded: pem (rfc7468, openssl), or base64 der (the pem
+  ///   body), v1 or v2
+  /// - exactly 32 raw bytes: the X25519 key (or Ed25519 seed)
+  ///   itself, used exactly as given
+  ///
+  /// [Self::from_maybe_raw_bytes] also takes a shorter raw value,
+  /// zero padded to 32 bytes. That value is the key itself, with no
+  /// key derivation, so `changeme` or the name of the node is a key
+  /// anybody can find from its public key (which is no secret: a
+  /// server pins it, a UI shows it, every handshake sends it), to
+  /// act as the node. It is refused here, as is a value which reads
+  /// like a path ([looks_like_a_path][super::looks_like_a_path]):
+  /// taken as raw bytes, the path would be the key. Generate a key
+  /// instead (`EncodedKeyPair::generate`, `openssl genpkey -algorithm
+  /// ed25519` for a signature key), or keep it in a key file.
+  ///
+  /// The errors name the accepted forms, never the value.
+  pub fn from_inline_key(
+    pki_kind: PkiKind,
+    private_key: &str,
+  ) -> anyhow::Result<Self> {
+    let raw = Zeroizing::new(Self::parse_raw_bytes(
+      pki_kind,
+      private_key,
+      RawKeys::Exactly32,
     )?);
     Self::from_raw_bytes(pki_kind, &*raw)
   }
@@ -248,10 +335,24 @@ impl Pkcs8PrivateKey {
   /// A raw key is the X25519 scalar (or Ed25519 seed) itself, with
   /// no key derivation, so a short or guessable value can be brute
   /// forced from the public key. Prefer a generated key
-  /// (`EncodedKeyPair::generate`).
+  /// (`EncodedKeyPair::generate`). [Self::from_inline_key] takes a
+  /// raw key of exactly 32 bytes only.
   pub fn maybe_raw_bytes(
     pki_kind: PkiKind,
     maybe_pkcs8_private_key: &str,
+  ) -> anyhow::Result<[u8; 32]> {
+    Self::parse_raw_bytes(
+      pki_kind,
+      maybe_pkcs8_private_key,
+      RawKeys::UpTo32,
+    )
+  }
+
+  /// [Self::maybe_raw_bytes], taking the raw keys `raw_keys` says.
+  fn parse_raw_bytes(
+    pki_kind: PkiKind,
+    maybe_pkcs8_private_key: &str,
+    raw_keys: RawKeys,
   ) -> anyhow::Result<[u8; 32]> {
     let trimmed = maybe_pkcs8_private_key.trim();
     if trimmed.is_empty() {
@@ -269,8 +370,24 @@ impl Pkcs8PrivateKey {
         &private_key_der,
       );
     }
+    if raw_keys == RawKeys::Exactly32
+      && super::looks_like_a_path(maybe_pkcs8_private_key)
+    {
+      return Err(anyhow!(
+        "The private key looks like a file path, which would be taken for the key itself: {INLINE_KEY_FORMS}"
+      ));
+    }
     let len = maybe_pkcs8_private_key.len();
-    if len <= 32 {
+    let raw = match raw_keys {
+      RawKeys::UpTo32 => len <= 32,
+      RawKeys::Exactly32 if len < 32 => {
+        return Err(anyhow!(
+          "The private key is shorter than 32 bytes: {INLINE_KEY_FORMS}. A shorter raw value would be used as the key itself, which anybody can find from the public key: generate a key, or keep it in a key file"
+        ));
+      }
+      RawKeys::Exactly32 => len == 32,
+    };
+    if raw {
       let mut res = [0u8; 32];
       res[..len].copy_from_slice(maybe_pkcs8_private_key.as_bytes());
       check_raw_private_key(pki_kind, &res)?;
@@ -283,7 +400,12 @@ impl Pkcs8PrivateKey {
       if e.is::<crate::WrongKeyAlgorithm>() {
         e
       } else {
-        e.context(NOT_A_PRIVATE_KEY)
+        match raw_keys {
+          RawKeys::UpTo32 => e.context(NOT_A_PRIVATE_KEY),
+          RawKeys::Exactly32 => e.context(format!(
+            "Invalid private key: {INLINE_KEY_FORMS}"
+          )),
+        }
       }
     })
   }

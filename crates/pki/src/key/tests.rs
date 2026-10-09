@@ -646,11 +646,9 @@ fn a_private_key_spec_which_looks_like_a_path_is_refused() {
       "../device.key",
       "~/.config/komodo/core.key",
       " /config/keys/periphery.key",
-      // The prefix, not as it is taken.
-      " file:/k/device.key",
+      // The prefix in another case, not as it is taken.
       "File:/etc/cicada/key",
       "FILE:/k",
-      "\tfile:/k/device.key",
       // Whatever its length.
       "/a/path/which/is/longer/than/a/raw/key/could/be/device.key",
       // Made of what base64 is made of, at a length base64 has: a
@@ -682,28 +680,38 @@ fn a_private_key_spec_which_looks_like_a_path_is_refused() {
         "{spec}: {err}"
       );
     }
-    // A raw key is still one, also with a slash in it, or at its
-    // start where the rest reads as random base64 (as one in 64 of
-    // the keys `openssl rand -base64 24` prints do).
+    // A raw key (exactly 32 bytes) is still one, also with a slash
+    // in it, or at its start where the rest reads as random base64
+    // (as one in 64 of the keys `openssl rand -base64 24` prints
+    // do).
     let random = format!("/{}", "aB3+".repeat(8).split_at(31).0);
-    assert_eq!(random.len(), 32);
+    let raw = |start: &str| format!("{start:-<32}");
     for spec in [
-      "a-raw-key",
-      "pass/word",
-      "file",
-      "files:1",
-      random.as_str(),
-      "/Zk8+Q2xw9Aa",
-      // The name of a file which is there (the tests run in the
-      // directory of the crate): a key is never looked up as one.
-      "Cargo.toml",
-      "key",
-      ".key",
+      raw("a-raw-key"),
+      raw("pass/word"),
+      raw("file"),
+      raw("files:1"),
+      random,
+      "/Zk8+Q2xw9AaQm5vR3hLp0Z7Tw1Yc2Ux".to_string(),
     ] {
+      assert_eq!(spec.len(), 32);
       let pair =
-        RotatableKeyPair::from_private_key_spec(pki_kind, spec)
+        RotatableKeyPair::from_private_key_spec(pki_kind, &spec)
           .unwrap_or_else(|e| panic!("{spec:?}: {e:#}"));
       assert!(pair.path().is_none());
+    }
+    // The name of a file which is there (the tests run in the
+    // directory of the crate) is never looked up as one: as a raw
+    // key, it is too short.
+    for spec in ["Cargo.toml", "key", ".key"] {
+      let err =
+        RotatableKeyPair::from_private_key_spec(pki_kind, spec)
+          .err()
+          .unwrap_or_else(|| panic!("{spec:?} was taken"));
+      assert!(
+        format!("{err:#}").contains("exactly 32 raw bytes"),
+        "{spec}: {err:#}"
+      );
     }
     // And so is a key in either pkcs8 form.
     let keys = EncodedKeyPair::generate(pki_kind).unwrap();
@@ -717,6 +725,753 @@ fn a_private_key_spec_which_looks_like_a_path_is_refused() {
       assert_eq!(pair.load().public, keys.public);
     }
   }
+}
+
+/// A key given inline (the key of a node's own identity in its
+/// config) is pkcs8 (pem, or base64 der) or exactly 32 raw bytes. A
+/// shorter raw value is the key itself, zero padded, with no key
+/// derivation: `changeme` or the node's name is a key anybody can
+/// find from its public key, so it is refused, with an error naming
+/// the accepted forms and never the value. The entry points of keys
+/// given on purpose as raw values (onboarding and recovery keys,
+/// [Pkcs8PrivateKey::from_maybe_raw_bytes]) still take them.
+#[test]
+fn a_short_raw_inline_key_is_refused() {
+  use super::RotatableKeyPair;
+
+  for kind in KINDS {
+    for short in [
+      "changeme",
+      "komodo-periphery-1",
+      "a",
+      // 31 bytes.
+      "0123456789012345678901234567890",
+    ] {
+      for err in [
+        RotatableKeyPair::from_private_key_spec(kind, short)
+          .err()
+          .map(|e| format!("{e:#}")),
+        EncodedKeyPair::from_inline_key(kind, short)
+          .err()
+          .map(|e| format!("{e:#}")),
+        Pkcs8PrivateKey::from_inline_key(kind, short)
+          .err()
+          .map(|e| format!("{e:#}")),
+      ] {
+        let err =
+          err.unwrap_or_else(|| panic!("{short:?} was taken"));
+        assert!(err.contains("shorter than 32 bytes"), "{err}");
+        assert!(
+          err.contains("pkcs8 encoded (pem, or base64 der)")
+            && err.contains("exactly 32 raw bytes"),
+          "{err}"
+        );
+        // (Not checked for a one letter value: messages have letters.)
+        assert!(short.len() < 2 || !err.contains(short), "{err}");
+      }
+      // Onboarding and recovery keys are still read as given.
+      Pkcs8PrivateKey::from_maybe_raw_bytes(kind, short).unwrap();
+      EncodedKeyPair::from_private_key(kind, short).unwrap();
+    }
+
+    // Exactly 32 raw bytes, as given (a trailing line break is a
+    // byte of the key).
+    let raw = "0123456789012345678901234567890\n";
+    assert_eq!(raw.len(), 32);
+    let pair =
+      RotatableKeyPair::from_private_key_spec(kind, raw).unwrap();
+    assert_eq!(
+      pair.load().public,
+      EncodedKeyPair::from_private_key(kind, raw).unwrap().public
+    );
+    assert_eq!(
+      EncodedKeyPair::from_inline_key(kind, raw).unwrap().public,
+      pair.load().public
+    );
+
+    // Pkcs8, in either form, whatever its length.
+    let keys = EncodedKeyPair::generate(kind).unwrap();
+    for key in
+      [keys.private.as_str().to_string(), keys.private.as_pem()]
+    {
+      assert_eq!(
+        Pkcs8PrivateKey::from_inline_key(kind, &key).unwrap(),
+        keys.private
+      );
+      assert_eq!(
+        RotatableKeyPair::from_private_key_spec(kind, &key)
+          .unwrap()
+          .load()
+          .public,
+        keys.public
+      );
+    }
+
+    // Longer, and no pkcs8: the accepted forms, never the value.
+    let long = "this-is-not-a-key-but-a-passphrase-of-some-length";
+    for err in [
+      RotatableKeyPair::from_private_key_spec(kind, long)
+        .err()
+        .map(|e| format!("{e:#}")),
+      Pkcs8PrivateKey::from_inline_key(kind, long)
+        .err()
+        .map(|e| format!("{e:#}")),
+    ] {
+      let err = err.expect("a passphrase was taken");
+      assert!(
+        err.contains("pkcs8 encoded (pem, or base64 der)")
+          && err.contains("exactly 32 raw bytes"),
+        "{err}"
+      );
+      assert!(!err.contains(long), "{err}");
+      assert!(!err.contains("32 characters or less"), "{err}");
+    }
+
+    // A path, whatever its length, also for a chosen key.
+    let path = "/etc/komodo/keys/periphery-01.key";
+    let err = Pkcs8PrivateKey::from_inline_key(kind, path)
+      .err()
+      .map(|e| format!("{e:#}"))
+      .expect("a path was taken");
+    assert!(err.contains("looks like a file path"), "{err}");
+    assert!(!err.contains(path), "{err}");
+    // A key of the other algorithm says so.
+    let other_keys = EncodedKeyPair::generate(other(kind)).unwrap();
+    let err = Pkcs8PrivateKey::from_inline_key(
+      kind,
+      other_keys.private.as_str(),
+    )
+    .unwrap_err();
+    assert_wrong_algorithm(&err, kind);
+  }
+}
+
+/// A `file:` spec as an environment variable or a config line gives
+/// it: whitespace around the spec, or after `file:`, is no part of
+/// the path. Taken with it, the path named another file, where a
+/// new key was generated in place of the configured one.
+#[test]
+fn a_file_spec_is_read_without_surrounding_whitespace() {
+  use super::RotatableKeyPair;
+
+  let dir = scratch_dir("trimmed_spec");
+  for kind in KINDS {
+    let key_path = dir.join(format!("{kind:?}.key"));
+    let keys =
+      EncodedKeyPair::generate_write_sync(kind, &key_path).unwrap();
+    let path = key_path.display();
+    for spec in [
+      format!("file:{path} "),
+      format!("file:{path}\r"),
+      format!("file: {path}"),
+      format!(" file:{path}\r\n"),
+      format!("\tfile:\t{path}\n"),
+    ] {
+      let pair = RotatableKeyPair::from_private_key_spec(kind, &spec)
+        .unwrap_or_else(|e| panic!("{spec:?}: {e:#}"));
+      assert_eq!(pair.load().public, keys.public, "{spec:?}");
+      // Resolved: the same file (temp dirs may sit behind a link).
+      assert_eq!(
+        pair.path(),
+        Some(std::fs::canonicalize(&*key_path).unwrap().as_path())
+      );
+      assert_eq!(
+        super::key_spec_path(&spec)
+          .unwrap()
+          .map(|path| path.display().to_string()),
+        Some(path.to_string())
+      );
+    }
+    let public = dir.join(format!("{kind:?}.pub"));
+    let public = public.display();
+    for spec in
+      [format!("file:{public} "), format!(" file: {public}\n")]
+    {
+      assert_eq!(
+        SpkiPublicKey::from_spec(kind, &spec)
+          .unwrap_or_else(|e| panic!("{spec:?}: {e:#}")),
+        keys.public
+      );
+    }
+  }
+  // No key was generated anywhere else.
+  let mut names = std::fs::read_dir(&dir)
+    .unwrap()
+    .map(|entry| entry.unwrap().file_name())
+    .collect::<Vec<_>>();
+  names.sort();
+  assert_eq!(
+    names,
+    ["Mutual.key", "Mutual.pub", "Signature.key", "Signature.pub"]
+  );
+  // An inline key is not a spec of a file.
+  assert!(super::key_spec_path(" MC4CAQ ").unwrap().is_none());
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// `file:` naming no file is an error saying so, never a key file
+/// at an empty or blank path.
+#[test]
+fn a_file_spec_without_a_path_is_refused() {
+  use super::RotatableKeyPair;
+
+  for spec in ["file:", "file: ", " file:\r\n", "file:\t"] {
+    for kind in KINDS {
+      let err =
+        match RotatableKeyPair::from_private_key_spec(kind, spec) {
+          Ok(_) => panic!("{spec:?} was taken"),
+          Err(e) => format!("{e:#}"),
+        };
+      assert!(err.contains("names no key file"), "{spec:?}: {err}");
+      let err = SpkiPublicKey::from_spec(kind, spec)
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_else(|| panic!("{spec:?} was taken"));
+      assert!(err.contains("names no key file"), "{spec:?}: {err}");
+    }
+    assert!(super::key_spec_path(spec).is_err());
+  }
+}
+
+/// The public key is written beside the private key, at
+/// `path.with_extension("pub")`: for a private key path ending in
+/// `.pub`, the private key file itself, which then held only the
+/// public key. Refused wherever a private key is written, or loaded
+/// to be used (in any case, as case insensitive filesystems take
+/// it), and nothing is written.
+#[tokio::test]
+async fn a_private_key_path_ending_in_pub_is_refused() {
+  use super::RotatableKeyPair;
+
+  let dir = scratch_dir("pub_extension");
+  for kind in KINDS {
+    let keys = EncodedKeyPair::generate(kind).unwrap();
+    for name in ["device.pub", "device.PUB", "device.Pub"] {
+      let path = dir.join(name);
+      let spec = format!("file:{}", path.display());
+      for err in [
+        RotatableKeyPair::from_private_key_spec(kind, &spec)
+          .err()
+          .map(|e| format!("{e:#}")),
+        EncodedKeyPair::load_maybe_generate(kind, &path)
+          .err()
+          .map(|e| format!("{e:#}")),
+        EncodedKeyPair::generate_write_sync(kind, &path)
+          .err()
+          .map(|e| format!("{e:#}")),
+        EncodedKeyPair::generate_write_async(kind, &path)
+          .await
+          .err()
+          .map(|e| format!("{e:#}")),
+        keys
+          .private
+          .write_pem_sync(&path)
+          .err()
+          .map(|e| format!("{e:#}")),
+        keys
+          .private
+          .write_pem_async(&path)
+          .await
+          .err()
+          .map(|e| format!("{e:#}")),
+      ] {
+        let err = err.unwrap_or_else(|| panic!("{name}: taken"));
+        assert!(err.contains("ends in `.pub`"), "{name}: {err}");
+      }
+      assert!(!path.exists(), "{name}");
+      // A key file there already is refused all the same (a
+      // rotation would write its public key over it), and left as
+      // it is.
+      std::fs::write(&path, keys.private.as_pem()).unwrap();
+      for err in [
+        RotatableKeyPair::from_private_key_spec(kind, &spec)
+          .err()
+          .map(|e| format!("{e:#}")),
+        EncodedKeyPair::load_maybe_generate(kind, &path)
+          .err()
+          .map(|e| format!("{e:#}")),
+      ] {
+        let err = err.unwrap_or_else(|| panic!("{name}: taken"));
+        assert!(err.contains("ends in `.pub`"), "{name}: {err}");
+      }
+      assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        keys.private.as_pem()
+      );
+      // Reading it is fine, eg. to compute its public key.
+      assert_eq!(
+        EncodedKeyPair::from_file(kind, &path).unwrap().public,
+        keys.public
+      );
+      std::fs::remove_file(&path).unwrap();
+    }
+    // `.pub` elsewhere in the name is no public key file name.
+    let path = dir.join(format!("{kind:?}.pub.key"));
+    let pair = RotatableKeyPair::from_private_key_spec(
+      kind,
+      &format!("file:{}", path.display()),
+    )
+    .unwrap();
+    assert_eq!(
+      SpkiPublicKey::from_file(kind, path.with_extension("pub"))
+        .unwrap(),
+      pair.load().public
+    );
+  }
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A pair rotates within its algorithm, so a rotation file beside
+/// the key file (`<key>.next`, `<key>.old`) holding a key of the
+/// other algorithm was left by a rotation of an earlier key (one
+/// moved away for a new key of this kind), and no rotation of this
+/// key can resume or finish with it there. Refused at load as a key
+/// of the other algorithm, naming the file, which is left as it is.
+/// Checked before a key is generated, so a refused start writes no
+/// key.
+#[test]
+fn a_rotation_file_of_the_other_algorithm_is_refused() {
+  use super::RotatableKeyPair;
+
+  let dir = scratch_dir("rotation_file_algorithm");
+  for kind in KINDS {
+    let path = dir.join(format!("{kind:?}.key"));
+    let spec = format!("file:{}", path.display());
+    for suffix in [".next", ".old"] {
+      let file = super::sibling(&path, suffix);
+      let left = EncodedKeyPair::generate(other(kind)).unwrap();
+      left.private.write_pem_sync(&file).unwrap();
+      // Without a key file yet, then with one.
+      for live in [false, true] {
+        if live {
+          EncodedKeyPair::generate_write_sync(kind, &path).unwrap();
+        }
+        let err =
+          RotatableKeyPair::from_private_key_spec(kind, &spec)
+            .err()
+            .unwrap_or_else(|| panic!("{suffix}, {live}: taken"));
+        assert_wrong_algorithm(&err, kind);
+        let message = format!("{err:#}");
+        assert!(message.contains("left by a rotation"), "{message}");
+        assert!(
+          message.contains(&format!("{kind:?}.key{suffix}")),
+          "{message}"
+        );
+        assert!(
+          Pkcs8PrivateKey::from_file(other(kind), &file).unwrap()
+            == left.private
+        );
+        assert_eq!(path.exists(), live, "{suffix}");
+      }
+      std::fs::remove_file(&file).unwrap();
+      // Moved away, the key loads.
+      RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
+      std::fs::remove_file(&path).unwrap();
+    }
+    // A rotation file of the same algorithm is one of this key's,
+    // left to the rotation (a candidate to resume), and so is one
+    // which holds no key.
+    let pair =
+      RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
+    let candidate =
+      pair.begin_rotation().unwrap().candidate().clone();
+    std::fs::write(super::sibling(&path, ".old"), "garbage").unwrap();
+    let reloaded =
+      RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
+    assert!(reloaded.rotation_pending());
+    std::fs::remove_file(super::sibling(&path, ".old")).unwrap();
+    assert_eq!(
+      reloaded.begin_rotation().unwrap().candidate().public,
+      candidate.public
+    );
+  }
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Whether the key was generated at load, as nothing can know it
+/// yet (eg. a server it has to be registered with).
+#[tokio::test]
+async fn a_pair_tells_whether_its_key_was_generated() {
+  use super::RotatableKeyPair;
+
+  let dir = scratch_dir("generated");
+  for kind in KINDS {
+    let spec =
+      format!("file:{}", dir.join(format!("{kind:?}.key")).display());
+    let pair =
+      RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
+    assert!(pair.generated());
+    // What the load did, whatever happens to the key after.
+    pair.rotate().await.unwrap();
+    assert!(pair.generated());
+    // The next load finds the key file.
+    let reloaded =
+      RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
+    assert!(!reloaded.generated());
+    assert_eq!(reloaded.load().public, pair.load().public);
+    // A key given inline is never generated.
+    let inline = RotatableKeyPair::from_private_key_spec(
+      kind,
+      reloaded.load().private.as_str(),
+    )
+    .unwrap();
+    assert!(!inline.generated());
+  }
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A key file another process created between the look for one and
+/// the write of a new one (two processes starting at once on the
+/// same missing key file): its key is loaded, never replaced, so no
+/// process runs on a key which is no longer on disk.
+#[test]
+fn a_key_file_created_meanwhile_is_loaded_not_replaced() {
+  let dir = scratch_dir("created_meanwhile");
+  for kind in KINDS {
+    let path = dir.join(format!("{kind:?}.key"));
+    // Found missing ...
+    assert!(
+      EncodedKeyPair::load_existing(kind, &path)
+        .unwrap()
+        .is_none()
+    );
+    // ... then created by the other process, which writes its
+    // public key file next.
+    let winner = EncodedKeyPair::generate(kind).unwrap();
+    winner.private.write_pem_sync(&path).unwrap();
+    let (keys, generated) =
+      EncodedKeyPair::generate_missing(kind, &path).unwrap();
+    assert!(!generated);
+    assert_eq!(keys.public, winner.public);
+    assert!(keys.private == winner.private);
+    assert!(
+      Pkcs8PrivateKey::from_file(kind, &path).unwrap()
+        == winner.private
+    );
+    assert!(!path.with_extension("pub").exists());
+  }
+  // Nothing else was written: no public key file, no temp file.
+  let mut names = std::fs::read_dir(&dir)
+    .unwrap()
+    .map(|entry| entry.unwrap().file_name())
+    .collect::<Vec<_>>();
+  names.sort();
+  assert_eq!(names, ["Mutual.key", "Signature.key"]);
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Processes starting at once on the same missing key file (threads
+/// here, racing on the file system the same way) end up on one key,
+/// the one on disk, and only the start which wrote it tells it
+/// generated it.
+#[test]
+fn starts_racing_on_a_missing_key_file_share_one_key() {
+  use std::sync::{Arc, Barrier};
+
+  use super::RotatableKeyPair;
+
+  const STARTS: usize = 8;
+  /// Runs `start` on `STARTS` threads at once.
+  fn race<T: Send + 'static>(
+    start: impl Fn() -> T + Send + Sync + 'static,
+  ) -> Vec<T> {
+    let start = Arc::new(start);
+    let barrier = Arc::new(Barrier::new(STARTS));
+    let threads = (0..STARTS)
+      .map(|_| {
+        let (start, barrier) = (start.clone(), barrier.clone());
+        std::thread::spawn(move || {
+          barrier.wait();
+          start()
+        })
+      })
+      .collect::<Vec<_>>();
+    threads
+      .into_iter()
+      .map(|thread| thread.join().unwrap())
+      .collect()
+  }
+
+  let dir = scratch_dir("racing_starts");
+  for kind in KINDS {
+    let path = dir.join(format!("{kind:?}.key"));
+    let spec = format!("file:{}", path.display());
+    let started = race(move || {
+      let pair =
+        RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
+      (pair.load().public.clone(), pair.generated())
+    });
+    let on_disk = EncodedKeyPair::from_file(kind, &path).unwrap();
+    for (public, _) in &started {
+      assert_eq!(*public, on_disk.public);
+    }
+    let generated =
+      started.iter().filter(|(_, generated)| *generated).count();
+    assert_eq!(generated, 1);
+    assert_eq!(
+      SpkiPublicKey::from_file(kind, path.with_extension("pub"))
+        .unwrap(),
+      on_disk.public
+    );
+
+    let path = dir.join(format!("{kind:?}-loaded.key"));
+    let loaded = race({
+      let path = path.clone();
+      move || {
+        EncodedKeyPair::load_maybe_generate(kind, &path)
+          .unwrap()
+          .public
+      }
+    });
+    let on_disk = EncodedKeyPair::from_file(kind, &path).unwrap();
+    for public in &loaded {
+      assert_eq!(*public, on_disk.public);
+    }
+  }
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A symlink at the key path to a file which does not exist is
+/// refused, the link and where it points left alone: a new key file
+/// is created, never written over anything at the path (as a race
+/// with another start could have it), nor through a link.
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_missing_key_file_is_refused() {
+  use super::RotatableKeyPair;
+
+  let dir = scratch_dir("dangling_link");
+  for kind in KINDS {
+    let target = dir.join(format!("{kind:?}-target.key"));
+    let path = dir.join(format!("{kind:?}.key"));
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let spec = format!("file:{}", path.display());
+    for err in [
+      RotatableKeyPair::from_private_key_spec(kind, &spec)
+        .err()
+        .map(|e| format!("{e:#}")),
+      EncodedKeyPair::load_maybe_generate(kind, &path)
+        .err()
+        .map(|e| format!("{e:#}")),
+    ] {
+      let err = err.unwrap_or_else(|| panic!("{kind:?}: generated"));
+      assert!(
+        err.contains("is a symlink to a file which does not exist"),
+        "{err}"
+      );
+    }
+    assert!(path.is_symlink());
+    assert!(!target.exists());
+    assert!(!path.with_extension("pub").exists());
+    // With the key file it points to in place, the key loads
+    // through the link, as before.
+    let keys =
+      EncodedKeyPair::generate_write_sync(kind, &target).unwrap();
+    let pair =
+      RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
+    assert_eq!(pair.load().public, keys.public);
+    assert!(!pair.generated());
+  }
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A key file reached through a symlink (eg. a key path in the
+/// config directory pointing into a persistent volume) is rotated
+/// where the link points: the link stays, the file it points to holds
+/// the new key, and the rotation files and the public key file are
+/// written beside that file. A rotation used to replace the link with
+/// a file of its own, leaving the previous key where the link pointed:
+/// recreated (re-provisioning), the link brought the retired key back.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_key_file_is_rotated_where_the_link_points() {
+  use super::RotatableKeyPair;
+
+  let dir = scratch_dir("symlinked_key");
+  let volume = dir.join("volume");
+  let config = dir.join("config");
+  std::fs::create_dir_all(&volume).unwrap();
+  std::fs::create_dir_all(&config).unwrap();
+  let kind = PkiKind::Signature;
+  let target = volume.join("device.key");
+  let original =
+    EncodedKeyPair::generate_write_sync(kind, &target).unwrap();
+  let link = config.join("device.key");
+  // A relative link, as `ln -s` makes them.
+  let points_to = std::path::Path::new("../volume/device.key");
+  std::os::unix::fs::symlink(points_to, &link).unwrap();
+  let link_intact = || {
+    assert!(link.is_symlink(), "the link was replaced");
+    assert_eq!(std::fs::read_link(&link).unwrap(), points_to);
+  };
+  let spec = format!("file:{}", link.display());
+  let pair =
+    RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
+  assert_eq!(pair.load().public, original.public);
+  assert!(!pair.generated());
+  // The file the link points to, absolute.
+  let resolved = std::fs::canonicalize(&target).unwrap();
+  assert_eq!(pair.path(), Some(resolved.as_path()));
+
+  // In one step.
+  let rotated = pair.rotate().await.unwrap();
+  assert_ne!(rotated, original.public);
+  link_intact();
+  assert_eq!(
+    EncodedKeyPair::from_file(kind, &target).unwrap().public,
+    rotated
+  );
+  assert_eq!(
+    SpkiPublicKey::from_file(kind, volume.join("device.pub"))
+      .unwrap(),
+    rotated
+  );
+  // A restart through the link loads it.
+  let reloaded =
+    RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
+  assert_eq!(reloaded.load().public, rotated);
+
+  // In two phases.
+  let rotation = pair.begin_rotation().unwrap();
+  let candidate = rotation.candidate().clone();
+  assert!(volume.join("device.key.next").exists());
+  rotation.commit().unwrap();
+  link_intact();
+  assert_eq!(
+    EncodedKeyPair::from_file(kind, &link).unwrap().public,
+    candidate.public
+  );
+  assert_eq!(pair.retired().unwrap().unwrap().public, rotated);
+  assert!(volume.join("device.key.old").exists());
+  pair.finish_rotation().unwrap();
+  assert!(!volume.join("device.key.old").exists());
+  assert!(!pair.rotation_pending());
+
+  // Nothing was written beside the link.
+  let names = std::fs::read_dir(&config)
+    .unwrap()
+    .map(|entry| entry.unwrap().file_name())
+    .collect::<Vec<_>>();
+  assert_eq!(names, ["device.key"]);
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A symlink to a key file named `*.pub` is refused as such a path
+/// is: the public key file written beside it would be the key file.
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_key_file_named_pub_is_refused() {
+  use super::RotatableKeyPair;
+
+  let dir = scratch_dir("link_to_pub");
+  let kind = PkiKind::Signature;
+  let keys = EncodedKeyPair::generate(kind).unwrap();
+  let target = dir.join("device.pub");
+  std::fs::write(&target, keys.private.as_pem()).unwrap();
+  let link = dir.join("device.key");
+  std::os::unix::fs::symlink(&target, &link).unwrap();
+  let err = RotatableKeyPair::from_private_key_spec(
+    kind,
+    &format!("file:{}", link.display()),
+  )
+  .err()
+  .expect("a key file named .pub was taken");
+  assert!(format!("{err:#}").contains("ends in `.pub`"), "{err:#}");
+  assert_eq!(
+    Pkcs8PrivateKey::from_file(kind, &target).unwrap(),
+    keys.private
+  );
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The rotation files an earlier version left beside a symlinked key
+/// file (it rotated the link's path) are refused, naming where they
+/// belong now: ignored, a candidate the caller registered, or a
+/// retired key waiting to be revoked, would stay registered.
+#[cfg(unix)]
+#[test]
+fn rotation_files_beside_a_symlinked_key_file_are_refused() {
+  use super::RotatableKeyPair;
+
+  let dir = scratch_dir("link_rotation_files");
+  let volume = dir.join("volume");
+  std::fs::create_dir_all(&volume).unwrap();
+  let kind = PkiKind::Signature;
+  let target = volume.join("device.key");
+  EncodedKeyPair::generate_write_sync(kind, &target).unwrap();
+  let link = dir.join("device.key");
+  std::os::unix::fs::symlink(&target, &link).unwrap();
+  let spec = format!("file:{}", link.display());
+  for suffix in [".next", ".old"] {
+    let left = dir.join(format!("device.key{suffix}"));
+    let candidate = EncodedKeyPair::generate(kind).unwrap();
+    candidate.private.write_pem_sync(&left).unwrap();
+    let err = RotatableKeyPair::from_private_key_spec(kind, &spec)
+      .err()
+      .unwrap_or_else(|| panic!("{suffix} beside the link ignored"));
+    let err = format!("{err:#}");
+    let belongs = std::fs::canonicalize(&volume)
+      .unwrap()
+      .join(format!("device.key{suffix}"));
+    assert!(err.contains(&format!("{left:?}")), "{err}");
+    assert!(err.contains(&format!("{belongs:?}")), "{err}");
+    // Moved where it belongs, the pair loads (and sees it).
+    std::fs::rename(&left, &belongs).unwrap();
+    let pair =
+      RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
+    assert!(pair.rotation_pending());
+    std::fs::remove_file(&belongs).unwrap();
+  }
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// [SpkiPublicKey::from_spec] covers what apps read a list of
+/// public key specs for (eg. the Periphery keys Komodo Core
+/// accepts): a key file in pem or base64 der, or the key inline in
+/// either form. An error names the file it is about.
+#[test]
+fn public_key_specs_read_files_and_inline_keys() {
+  let dir = scratch_dir("public_key_spec");
+  for kind in KINDS {
+    let keys = EncodedKeyPair::generate(kind).unwrap();
+    let pem = dir.join(format!("{kind:?}.pem.pub"));
+    std::fs::write(&pem, keys.public.as_pem()).unwrap();
+    let der = dir.join(format!("{kind:?}.der.pub"));
+    std::fs::write(&der, format!("{}\n", keys.public)).unwrap();
+    for spec in [
+      format!("file:{}", pem.display()),
+      format!("file:{}", der.display()),
+      keys.public.to_string(),
+      format!(" {}\n", keys.public),
+      keys.public.as_pem(),
+    ] {
+      assert_eq!(
+        SpkiPublicKey::from_spec(kind, &spec)
+          .unwrap_or_else(|e| panic!("{spec:?}: {e:#}")),
+        keys.public
+      );
+    }
+    let garbage = dir.join("garbage.pub");
+    std::fs::write(&garbage, "not a key").unwrap();
+    let missing = dir.join("missing.pub");
+    for (file, name) in
+      [(&garbage, "garbage.pub"), (&missing, "missing.pub")]
+    {
+      let spec = format!("file:{}", file.display());
+      let err = SpkiPublicKey::from_spec(kind, &spec).unwrap_err();
+      let err = format!("{err:#}");
+      assert!(err.contains(name), "{err}");
+    }
+    assert_wrong_algorithm(
+      &SpkiPublicKey::from_spec(
+        other(kind),
+        &keys.public.to_string(),
+      )
+      .unwrap_err(),
+      other(kind),
+    );
+  }
+  std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
