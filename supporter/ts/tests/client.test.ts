@@ -91,6 +91,8 @@ describe("MoghSupporterClient", () => {
     assert.equal(e.status, 400);
     assert.equal(e.result.error, "Invalid supporter key");
     assert.deepEqual(e.result.trace, ["The key has 2 parts separated by `.`, expected 3"]);
+    // The server's own answer, as mogh_auth_client marks it.
+    assert.equal(e.server, true);
   });
 
   test("rejects with the status for a body of another shape", async () => {
@@ -106,7 +108,8 @@ describe("MoghSupporterClient", () => {
     mockFetch(() => Response.json({ error: { code: 403 } }, { status: 403 }));
     const other = await rejection(client.read("GetSupporterKeyInfo", {}));
     assert.equal(other.status, 403);
-    assert.match(other.result.error ?? "", /status 403/);
+    assert.match(other.result.error, /status 403/);
+    assert.equal(other.server, undefined);
   });
 
   test("rejects with status 1 when the server is unreachable", async () => {

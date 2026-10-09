@@ -7,6 +7,10 @@
  * indefinite lengths, tags, floats, other simple values, duplicate
  * map keys, map keys which are neither text nor integers, and bytes
  * after the item.
+ *
+ * The Rust crate's decoder (`decode_cbor`) is the same, error
+ * messages included: both run the vectors of
+ * `supporter/test_vectors.json`.
  */
 
 /** The most nested arrays / maps `decodeCbor` follows. */
@@ -27,6 +31,13 @@ export type CborValue =
   | null;
 
 export type CborMap = Map<string | number | bigint, CborValue>;
+
+/**
+ * Text strings: utf8, strictly (an invalid sequence is an error), and
+ * a leading byte order mark kept as part of the text, as Rust's
+ * `str::from_utf8` keeps it. A `TextDecoder` drops it by default.
+ */
+const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Why bytes are not an item of the subset. Never echoes them. */
 export class CborError extends Error {
@@ -141,7 +152,7 @@ class Decoder {
       case 3: {
         const text = this.take(this.length(major, info, at));
         try {
-          return new TextDecoder("utf-8", { fatal: true }).decode(text);
+          return UTF8.decode(text);
         } catch {
           throw new CborError("Text is not utf8", at);
         }

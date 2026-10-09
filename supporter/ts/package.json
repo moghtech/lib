@@ -1,6 +1,6 @@
 {
   "name": "mogh_supporter",
-  "version": "1.0.1",
+  "version": "1.2.0",
   "description": "Verifies Mogh supporter keys in the browser, offline.",
   "repository": {
     "url": "https://github.com/moghtech/lib"
@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "default": "./dist/vite.js"
     }
   },
   "files": [
@@ -27,6 +31,11 @@
     "typecheck": "tsc --noEmit",
     "test": "tsc && node --test \"tests/**/*.test.ts\"",
     "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@noble/ed25519": "3.2.0",
+    "@noble/hashes": "2.4.0",
+    "mogh_auth_client": "^8.0.0"
   },
   "devDependencies": {
     "typescript": "^7.0.2"

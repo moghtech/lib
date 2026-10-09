@@ -8,6 +8,7 @@
  */
 
 import { base64Decode, base64Encode } from "./encoding.ts";
+import { trimWhitespace } from "./whitespace.ts";
 import type { SupporterTier } from "./payload.ts";
 import type { SupporterBranding } from "./types.ts";
 import type { Supporter } from "./verify.ts";
@@ -48,6 +49,12 @@ export const ICON_MEDIA_TYPES: readonly string[] = Object.freeze([
   "image/svg+xml",
 ]);
 
+/**
+ * Whitespace and control characters, which an icon or a link never
+ * has: Rust's `char::is_whitespace` and `char::is_control`.
+ */
+const WHITESPACE_OR_CONTROL = /[\p{White_Space}\p{Cc}]/u;
+
 const ICON_FORM =
   "The icon is not an image url (https:// or http://), a path on the app (/...), or an uploaded image";
 
@@ -62,7 +69,7 @@ const ICON_FORM =
  * is only ever the `src` of an `<img>`.
  */
 export function brandingIconProblem(icon: string): string | null {
-  if (/[\s\p{Cc}]/u.test(icon)) return ICON_FORM;
+  if (WHITESPACE_OR_CONTROL.test(icon)) return ICON_FORM;
   if (icon.startsWith("data:")) {
     const rest = icon.slice("data:".length);
     const at = rest.indexOf(";base64,");
@@ -131,7 +138,7 @@ export function brandingSizeProblem(
  */
 export function brandingLinkProblem(link: string): string | null {
   const form = "The link is not a web address (https:// or http://)";
-  if (/[\s\p{Cc}]/u.test(link)) return form;
+  if (WHITESPACE_OR_CONTROL.test(link)) return form;
   const length = new TextEncoder().encode(link).length;
   if (length > MAX_LINK_LENGTH) {
     return `The link is ${length} bytes long, the most is ${MAX_LINK_LENGTH}`;
@@ -144,10 +151,14 @@ export function brandingLinkProblem(link: string): string | null {
   return form;
 }
 
-/** Why the server would refuse the branding, or `null`. */
+/**
+ * Why the server would refuse the branding, or `null`. The icon and
+ * the link are trimmed first, as the server trims them (Rust's
+ * `str::trim`).
+ */
 export function brandingProblem(branding: SupporterBranding): string | null {
-  const icon = branding.icon?.trim();
-  const link = branding.link?.trim();
+  const icon = branding.icon && trimWhitespace(branding.icon);
+  const link = branding.link && trimWhitespace(branding.link);
   return (
     (icon ? brandingIconProblem(icon) : null) ??
     brandingSizeProblem("width", branding.icon_width) ??
@@ -163,7 +174,7 @@ export function brandingProblem(branding: SupporterBranding): string | null {
 export function normalizeBranding(
   branding: Partial<SupporterBranding> | null | undefined,
 ): SupporterBranding {
-  const icon = branding?.icon?.trim();
+  const icon = branding?.icon && trimWhitespace(branding.icon);
   const normalized: SupporterBranding = {
     replace_home: !!branding?.replace_home,
     // Without an icon there is nothing to stand for the name.
@@ -177,7 +188,7 @@ export function normalizeBranding(
   if (typeof branding?.icon_height === "number") {
     normalized.icon_height = branding.icon_height;
   }
-  const link = branding?.link?.trim();
+  const link = branding?.link && trimWhitespace(branding.link);
   if (link) normalized.link = link;
   return normalized;
 }
@@ -242,9 +253,11 @@ export function supporterBrand(
     hideName: false,
     uppercaseName: branding?.uppercase_name === true,
   };
-  const link = typeof branding?.link === "string" ? branding.link.trim() : "";
+  const link =
+    typeof branding?.link === "string" ? trimWhitespace(branding.link) : "";
   if (link && brandingLinkProblem(link) === null) brand.link = link;
-  const icon = typeof branding?.icon === "string" ? branding.icon.trim() : "";
+  const icon =
+    typeof branding?.icon === "string" ? trimWhitespace(branding.icon) : "";
   // The size is the icon's: without one there is nothing to size.
   if (!icon || brandingIconProblem(icon) !== null) return brand;
   brand.icon = icon;

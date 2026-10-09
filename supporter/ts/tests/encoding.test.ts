@@ -44,9 +44,26 @@ test("base64 decodes a root key", () => {
   const der = base64Decode(fixture.ROOT_SPKI);
   assert.equal(der.length, 44);
   assert.equal(hex(der.subarray(0, 12)), "302a300506032b6570032100");
-  assert.throws(() => base64Decode(fixture.ROOT_SPKI.replace("+", "-")), /invalid text/);
-  assert.throws(() => base64Decode(fixture.ROOT_SPKI.slice(0, -1)), /invalid text/);
-  assert.throws(() => base64Decode(" " + fixture.ROOT_SPKI), /invalid text/);
+  assert.throws(() => base64Decode(fixture.ROOT_SPKI.replace("+", "-")), /invalid character at 21/);
+  assert.throws(() => base64Decode(fixture.ROOT_SPKI.slice(0, -1)), /invalid length/);
+  assert.throws(() => base64Decode(" " + fixture.ROOT_SPKI), /invalid length/);
+});
+
+test("base64 is strict, like the Rust crate's", () => {
+  // `AB==` decodes to 0x00 with trailing bits set: what `atob` takes.
+  assert.throws(() => base64Decode("AB=="), /non canonical trailing bits/);
+  assert.throws(() => base64Decode(fixture.ROOT_SPKI.replace("iw=", "ix=")), /non canonical trailing bits/);
+  assert.throws(() => base64Decode("A==="), /invalid padding at 1/);
+  assert.throws(() => base64Decode("AQ=A"), /invalid character at 2/);
+  assert.deepEqual(base64Decode("AQ=="), new Uint8Array([1]));
+  // Padded blocks one after the other, as data_encoding decodes them.
+  assert.deepEqual(base64Decode("AQ==AQ=="), new Uint8Array([1, 1]));
+  // Round trips, like node's.
+  for (const length of [0, 1, 2, 3, 4, 44, 100]) {
+    const bytes = crypto.getRandomValues(new Uint8Array(length));
+    const encoded = Buffer.from(bytes).toString("base64");
+    assert.deepEqual(base64Decode(encoded), bytes);
+  }
 });
 
 test("hex, concat, utf8", () => {

@@ -13,7 +13,12 @@ test("relative imports in dist have a .js extension", () => {
   const files = readdirSync(dist).filter((file) => file.endsWith(".js"));
   assert.ok(files.includes("index.js"), "build first (npm run build)");
   for (const file of files) {
-    const contents = readFileSync(path.join(dist, file), "utf8");
+    // Without the comments, whose examples import too (eg. the app's
+    // package.json in the vite helper's).
+    const contents = readFileSync(path.join(dist, file), "utf8").replace(
+      /\/\*[\s\S]*?\*\//g,
+      "",
+    );
     for (const [, specifier] of contents.matchAll(
       /(?:from|import)\s*\(?\s*"(\.{1,2}\/[^"]*)"/g,
     )) {
@@ -50,6 +55,20 @@ test("the source maps resolve in the published package", () => {
   }
 });
 
+test("vite configs import the release date helper on its own", async () => {
+  // `mogh_supporter/vite`, by the package's own exports: the built
+  // helper, without the browser code of the package root and its
+  // dependencies.
+  const exports = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).exports;
+  assert.deepEqual(exports["./vite"], { types: "./dist/vite.d.ts", default: "./dist/vite.js" });
+  for (const file of Object.values(exports["./vite"]) as string[]) {
+    assert.ok(existsSync(path.join(root, file)), `build first (npm run build): ${file}`);
+  }
+  const vite = await import("mogh_supporter/vite");
+  assert.equal(typeof vite.releaseDate, "function");
+  assert.doesNotMatch(readFileSync(path.join(root, "dist/vite.js"), "utf8"), /^import /m);
+});
+
 test("the package ships no root keys, and the revocation list a release has", async () => {
   const index = await import("../src/index.ts");
   // Each app hardcodes its own root keys.
@@ -83,7 +102,13 @@ test("an app's root keys are checked", async () => {
     checkRootKeys([spki, "MCowBQYDK2VwAyEA"]),
     /The root key at position 2 is not valid \| .*not the SPKI DER of an Ed25519 key/,
   );
-  await assert.rejects(checkRootKeys(["not base64!"]), /The root key at position 1 is not valid/);
+  await assert.rejects(checkRootKeys(["not base64!"]), /The root key at position 1 is not valid \| The root key is not base64/);
+  // What the Rust crate's `check_root_keys` refuses too: the identity
+  // point, of small order, has signatures which verify for anything.
+  await assert.rejects(
+    checkRootKeys([spki, "MCowBQYDK2VwAyEAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]),
+    /The root key at position 2 is not valid \| The root key is not a canonical Ed25519 public key/,
+  );
   // Listed twice, also when written another way.
   await assert.rejects(checkRootKeys([spki, ` ${spki}\n`]), new RegExp(`The root key ${kid} is listed twice`));
 });

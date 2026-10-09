@@ -150,35 +150,124 @@ Rust crate's, which checks again.
   `supporter_root_keys`) and serves a key only when it verifies under
   them: keep the two in step.
   `checkRootKeys` checks a list in a test of the app: every entry is
-  a key, listed once, and none is the fixture's test root. It
-  resolves to their ids.
+  a key (a canonical point of the curve, not of small order, as the
+  Rust crate's `check_root_keys` checks), listed once, and none is
+  the fixture's test root. It resolves to their ids.
 - `REVOKED`, the default `revoked`: key ids as lowercase hyphenated
   UUIDs.
-- `releaseDate`: the `YYYY-MM-DD` the build was released, set at
-  build time (eg. a Vite `define`). Never the current date: a key
-  keeps working on every release it covered, forever, so the
-  comparison is against the build, not the clock.
+- `releaseDate`: the `YYYY-MM-DD` the release was published. Never
+  the current date, nor the day of the build: a key keeps working on
+  every release it covered, forever, so the comparison is against the
+  release, not the clock. It is part of the source, the `releaseDate`
+  of the app's package.json, read with `mogh_supporter/vite` (below).
 - `app`: `komodo` or `cicada`.
 
 The revocation list ships with this package, so a revocation is a
 release of it, picked up by the apps with the bump. A root key
 rotation is a change of the app.
 
+## The release date
+
+The app keeps its release date next to its version, in its
+package.json (`"releaseDate": "2026-10-09"`), and its vite config
+hands it to the UI with `mogh_supporter/vite`, which loads nothing of
+the browser side:
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+import { releaseDate } from "mogh_supporter/vite";
+import packageJson from "./package.json";
+
+export default defineConfig(({ mode }) => ({
+  define: {
+    __RELEASE_DATE__: JSON.stringify(releaseDate({ mode, packageJson })),
+  },
+}));
+```
+
+The UI declares the constant (`declare const __RELEASE_DATE__:
+string;`) and passes it as `releaseDate`. `releaseDate({ mode,
+packageJson })` is the package.json's `releaseDate` in every mode,
+and throws for one which is no `YYYY-MM-DD` date of the calendar.
+Without one a production build (`vite build`) fails, rather than
+take the day of the build; the dev server and tests (any other mode)
+fall back to today.
+
+Releasing: bump `version` and `releaseDate` together, in the same
+commit, to the day the release is published. As the date is in the
+source, a rebuild of a release (a refreshed base image, an image a
+user builds for their architecture, a pipeline run again) keeps it,
+and a key which covered the release keeps its badge there. The build
+environment sets nothing.
+
 ## Browser support
 
-The two verifications use WebCrypto Ed25519, which needs Chrome 137,
-Safari 17 or Firefox 130. On an older browser the key import throws,
-which is no badge. There is no fallback implementation.
+The signatures and hashes (Ed25519 and SHA-256) are checked with the
+page's WebCrypto (`crypto.subtle`) where it does Ed25519, and
+otherwise in JavaScript, with
+[`@noble/ed25519`](https://github.com/paulmillr/noble-ed25519) and
+[`@noble/hashes`](https://github.com/paulmillr/noble-hashes). Both
+give the same verdict, so the badge shows wherever the server serves
+the key:
+
+- Browsers give WebCrypto to a secure context only: a page served
+  over https, or from localhost. An install reached over plain http
+  from another host, eg. `http://192.168.1.10:9120` (a LAN install
+  without TLS, which Komodo and Cicada allow by default), has none.
+  `crypto.getRandomValues`, which draws the nonce, works anywhere.
+- Browsers before Chrome 137, Safari 17 and Firefox 130 have
+  WebCrypto without Ed25519.
+
+One function makes the choice, once per page: a WebCrypto which
+verifies RFC 8032's first test vector is used, anything else leaves
+the work to JavaScript. The `subtle` option of `checkSupporterKey` /
+`verifySupporterKey` (and of `rootKeyId`, `findRootKey`,
+`checkRootKeys`) overrides it: a WebCrypto to use as given, or `null`
+for the JavaScript implementation. The tests run every verdict
+through both, and crafted signatures too.
+
+The JavaScript verification follows RFC 8032's rules rather than
+noble's default ZIP-215 ones (`zip215: false`): it refuses non
+canonical encodings, small order public keys and an `S` of the group
+order or more, close to the Rust crate's `verify_strict`. Under
+ZIP-215 a signature of a small order key verifies for any message,
+which the WebCrypto specification refuses too (`tests/crypto.test.ts`
+checks both implementations, WebCrypto as Node has it).
+
+## Dependencies
+
+- `@noble/ed25519` and `@noble/hashes`: the JavaScript Ed25519,
+  SHA-256 and SHA-512 above, for pages without WebCrypto Ed25519.
+  Small, without dependencies of their own, and widely used:
+  `@noble/hashes` was audited (Cure53, 2022); `@noble/ed25519` 3 is a
+  rewrite of the audited version 1, tested against the audited
+  `@noble/curves`. Only Ed25519 verification and SHA-2 are used:
+  about 9 KB gzipped (17 KB minified) in the example app's bundle.
+  Both are pinned to exact versions, because they decide what the
+  badge shows: an update is a change of this package, made on purpose
+  (read the release, bump the pin, run the tests), never one a fresh
+  install picks up on its own.
+- `mogh_auth_client`: `fetchJson` sends the client's requests, so a
+  failed one rejects with its `RequestError`, as auth and app
+  requests do.
 
 ## The payload
 
 The payload is a CBOR map (RFC 8949), read with the small decoder of
 this package (`decodeCbor`): definite length integers, byte and text
 strings, arrays and maps, `false`, `true` and `null`. Indefinite
-lengths, tags, floats, other simple values, duplicate map keys and
-trailing bytes are refused. Keys of the map this version does not
-know are ignored, which is what lets a field be added later without
-a new version.
+lengths, tags, floats, other simple values, duplicate map keys, map
+keys which are neither text nor integers, and trailing bytes are
+refused. Text keeps a leading byte order mark. Keys of the map this
+version does not know are ignored, which is what lets a field be
+added later without a new version.
+
+The decoders and checks here are the Rust crate's, to the error
+message: the server and the browser give the same verdict on the
+same key, and the branding form refuses what the server refuses
+(base64 with non zero trailing bits, whitespace as Rust's `str::trim`
+has it). Both run the vectors of `../test_vectors.json`.
 
 ## Rendering
 
@@ -209,4 +298,6 @@ npm test        # tsc, then the unit tests (node --test)
 The tests use the fixture the platform's minting code produced with a
 test root key (`tests/fixture.ts`, the same as
 `mogh_supporter::fixture` in Rust). Never embed that root in a
-release: `checkRootKeys` refuses it.
+release: `checkRootKeys` refuses it. `tests/vectors.test.ts` runs the
+vectors of `../test_vectors.json`, which the Rust crate's tests run
+too: add a case there, not to one side.

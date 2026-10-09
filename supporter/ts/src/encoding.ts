@@ -4,30 +4,42 @@ const BASE64URL =
 const BASE64 =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-const BASE64URL_INDEX = new Int8Array(128).fill(-1);
-for (let i = 0; i < BASE64URL.length; i++) {
-  BASE64URL_INDEX[BASE64URL.charCodeAt(i)] = i;
+/** The value of each ascii character in `alphabet`, `-1` for none. */
+function alphabetIndex(alphabet: string): Int8Array {
+  const index = new Int8Array(128).fill(-1);
+  for (let i = 0; i < alphabet.length; i++) {
+    index[alphabet.charCodeAt(i)] = i;
+  }
+  return index;
 }
 
+const BASE64URL_INDEX = alphabetIndex(BASE64URL);
+
+const BASE64_INDEX = alphabetIndex(BASE64);
+
 /**
- * Decodes base64url without padding (RFC 4648 §5), strictly: padding,
- * any other character, a length of 1 mod 4 and non zero trailing bits
- * (another text for the same bytes) are errors. Every value of a
- * supporter key is encoded this way.
+ * Decodes the symbols `text[start..end)`, 6 bits each, into `out` from
+ * `at`. Any other character is an error, and so are non zero bits left
+ * after the last whole byte (another text for the same bytes). Returns
+ * where the next byte goes.
  */
-export function base64urlDecode(text: string): Uint8Array<ArrayBuffer> {
-  if (text.length % 4 === 1) {
-    throw new Error("base64url: invalid length");
-  }
-  const out = new Uint8Array(Math.floor((text.length * 3) / 4));
+function decodeSymbols(
+  text: string,
+  start: number,
+  end: number,
+  index: Int8Array,
+  name: string,
+  out: Uint8Array,
+  at: number,
+): number {
   let acc = 0;
   let bits = 0;
-  let o = 0;
-  for (let i = 0; i < text.length; i++) {
+  let o = at;
+  for (let i = start; i < end; i++) {
     const code = text.charCodeAt(i);
-    const value = code < 128 ? BASE64URL_INDEX[code] : -1;
+    const value = code < 128 ? index[code] : -1;
     if (value < 0) {
-      throw new Error(`base64url: invalid character at ${i}`);
+      throw new Error(`${name}: invalid character at ${i}`);
     }
     acc = (acc << 6) | value;
     bits += 6;
@@ -38,8 +50,24 @@ export function base64urlDecode(text: string): Uint8Array<ArrayBuffer> {
     }
   }
   if (acc !== 0) {
-    throw new Error("base64url: non canonical trailing bits");
+    throw new Error(`${name}: non canonical trailing bits`);
   }
+  return o;
+}
+
+/**
+ * Decodes base64url without padding (RFC 4648 §5), strictly: padding,
+ * any other character, a length of 1 mod 4 and non zero trailing bits
+ * (another text for the same bytes) are errors, as for the Rust
+ * crate's `BASE64URL_NOPAD` of data_encoding. Every value of a
+ * supporter key is encoded this way.
+ */
+export function base64urlDecode(text: string): Uint8Array<ArrayBuffer> {
+  if (text.length % 4 === 1) {
+    throw new Error("base64url: invalid length");
+  }
+  const out = new Uint8Array(Math.floor((text.length * 3) / 4));
+  decodeSymbols(text, 0, text.length, BASE64URL_INDEX, "base64url", out, 0);
   return out;
 }
 
@@ -81,18 +109,28 @@ export function base64Encode(bytes: Uint8Array): string {
 
 /**
  * Decodes standard base64 with padding (RFC 4648 §4), the form of a
- * root key's SPKI DER. Other characters are an error.
+ * root key's SPKI DER and of an uploaded icon, strictly, as the Rust
+ * crate's `BASE64` of data_encoding does: a length which is no
+ * multiple of 4, padding anywhere but at the end of a block of 4 (2
+ * or 3 symbols, then `==` or `=`), any other character, and non zero
+ * trailing bits (another text for the same bytes) are errors. Padded
+ * blocks can follow each other (`AQ==AQ==`), as in Rust.
  */
 export function base64Decode(text: string): Uint8Array<ArrayBuffer> {
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 !== 0) {
-    throw new Error("base64: invalid text");
+  if (text.length % 4 !== 0) {
+    throw new Error("base64: invalid length");
   }
-  const binary = atob(text);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    out[i] = binary.charCodeAt(i);
+  const out = new Uint8Array((text.length / 4) * 3);
+  let o = 0;
+  for (let block = 0; block < text.length; block += 4) {
+    let end = block + 4;
+    while (end > block && text[end - 1] === "=") end--;
+    if (end - block < 2) {
+      throw new Error(`base64: invalid padding at ${end}`);
+    }
+    o = decodeSymbols(text, block, end, BASE64_INDEX, "base64", out, o);
   }
-  return out;
+  return out.slice(0, o);
 }
 
 /** Lowercase hex. */

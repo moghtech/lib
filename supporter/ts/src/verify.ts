@@ -1,3 +1,4 @@
+import { chooseWebCrypto, supporterCrypto } from "./crypto.ts";
 import { base64urlDecode, base64urlEncode, concatBytes, utf8 } from "./encoding.ts";
 import {
   FORMAT_VERSION,
@@ -42,9 +43,11 @@ export interface VerifySupporterKeyOptions {
   /** This app: `komodo` or `cicada`. The key has to be for it. */
   app: string;
   /**
-   * The `YYYY-MM-DD` this build was released, set at build time. Never
-   * the current date: a key keeps working on every release it covered,
-   * forever, so the comparison is against the build, not the clock.
+   * The `YYYY-MM-DD` this release was published: the `releaseDate` of
+   * the app's package.json, which its vite config defines with
+   * `mogh_supporter/vite`. Never the current date, nor the day of the
+   * build: a key keeps working on every release it covered, forever,
+   * so the comparison is against the release, not the clock.
    */
   releaseDate: string;
   /** The nonce the request was made with. */
@@ -59,8 +62,17 @@ export interface VerifySupporterKeyOptions {
   rootKeys: RootKeys;
   /** The revoked key ids. Default: `REVOKED`. */
   revoked?: readonly string[];
-  /** Default: `crypto.subtle`. */
-  subtle?: SubtleCrypto;
+  /**
+   * The WebCrypto to verify with, used as given. By default the page's
+   * `crypto.subtle` where it does Ed25519, else the JavaScript
+   * implementation this package ships (`@noble/ed25519` and
+   * `@noble/hashes`), with the same verdicts: a page which is not a
+   * secure context (plain http from another host than localhost) has
+   * no WebCrypto, and browsers before Chrome 137, Safari 17 and
+   * Firefox 130 have it without Ed25519. `null` takes the JavaScript
+   * implementation whatever the page has.
+   */
+  subtle?: SubtleCrypto | null;
 }
 
 /** Why a response shows no badge. */
@@ -70,8 +82,6 @@ export class SupporterKeyError extends Error {
     this.name = "SupporterKeyError";
   }
 }
-
-const ED25519 = { name: "Ed25519" };
 
 function decodeField(
   response: SignedSupporterKey,
@@ -103,8 +113,13 @@ function decodeField(
 /**
  * Verifies a `GetSupporterKey` response offline, and throws with the
  * reason when it shows no badge (a `SupporterKeyError`, or whatever
- * decoding or WebCrypto threw). `verifySupporterKey` is this with the
- * reason logged instead. In order:
+ * decoding or a WebCrypto given threw). `verifySupporterKey` is this
+ * with the reason logged instead.
+ *
+ * The signatures and hashes are checked with the page's WebCrypto
+ * where it does Ed25519, else in JavaScript (see `subtle`): a page
+ * which is not a secure context, eg. `http://192.168.1.10:9120`,
+ * verifies all the same. In order:
  *
  * 1. The response is decoded: `payload_sig` 64 bytes,
  *    `instance_public_key` 32, `nonce_sig` 64, `payload` at most 4 KiB.
@@ -118,9 +133,6 @@ function decodeField(
  *    instance private key, verifies for no other nonce.
  * 6. `releaseDate` is at most `c`.
  * 7. `i` is not in `revoked`.
- *
- * Ed25519 in WebCrypto needs Chrome 137, Safari 17 or Firefox 130; on
- * an older browser the import throws, which is no badge.
  */
 export async function checkSupporterKey(
   options: VerifySupporterKeyOptions,
@@ -131,8 +143,10 @@ export async function checkSupporterKey(
     response,
     rootKeys,
     revoked = REVOKED,
-    subtle = crypto.subtle,
   } = options;
+  // Chosen once: the root lookup gets the choice, not the option.
+  const subtle = await chooseWebCrypto(options.subtle);
+  const { sha256, verifyEd25519 } = supporterCrypto(subtle);
   const nonce =
     options.nonce instanceof Uint8Array ? options.nonce : options.nonce.bytes;
   if (nonce.length !== NONCE_BYTES) {
@@ -175,12 +189,10 @@ export async function checkSupporterKey(
     throw new SupporterKeyError(`No root key with the id ${kid} is trusted`);
   }
 
-  // 3
-  const root = await subtle.importKey("spki", rootDer, ED25519, false, [
-    "verify",
-  ]);
+  // 3: the root key's raw 32 bytes end its SPKI DER.
+  const root = rootDer.slice(rootDer.length - 32);
   const signed = concatBytes(payload, instancePublicKey);
-  if (!(await subtle.verify(ED25519, root, payloadSig, signed))) {
+  if (!(await verifyEd25519(root, payloadSig, signed))) {
     throw new SupporterKeyError("The root signature does not verify");
   }
 
@@ -198,15 +210,12 @@ export async function checkSupporterKey(
   }
 
   // 5
-  const instance = await subtle.importKey("raw", instancePublicKey, ED25519, false, [
-    "verify",
-  ]);
   const message = concatBytes(
     utf8(`${app}-supporter-v1`),
     nonce,
-    new Uint8Array(await subtle.digest("SHA-256", payload)),
+    await sha256(payload),
   );
-  if (!(await subtle.verify(ED25519, instance, nonceSig, message))) {
+  if (!(await verifyEd25519(instancePublicKey, nonceSig, message))) {
     throw new SupporterKeyError("The nonce signature does not verify");
   }
 
