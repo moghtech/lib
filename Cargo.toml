@@ -26,9 +26,6 @@ mogh_cache = "2.0.0"
 mogh_config = "4.1.0"
 mogh_encryption = "3.0.0"
 mogh_error = "2.1.0"
-# Without `init` (the logger itself, and OpenTelemetry): the crates
-# which only need its config types or `redact_url_credentials` (the
-# auth server) don't pull it in. The example server adds it.
 mogh_logger = { version = "2.1.1", default-features = false }
 mogh_pki = "4.0.0"
 mogh_rate_limit = "3.1.0"
@@ -69,11 +66,10 @@ serde_yaml_ng = "0.10.0"
 serde_json = "1.0.151"
 serde_path_to_error = "0.1.20"
 serde_qs = "1.0.0"
-toml = "1.1.7"
+toml = "1.1.8"
 url = "2.5.8"
 
 # CRYPTO
-# 'zeroize' wipes the cipher key schedules on drop.
 chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
 aes-gcm = { version = "0.11.1", features = ["zeroize"] }
 data-encoding = "2.11.1"
@@ -81,16 +77,10 @@ rand = "0.10.3"
 zeroize = { version = "1.9.0", features = ["derive"] }
 sha2 = "0.11.0"
 subtle = "2.6.1"
-# Same version / features as axum-server 'tls-rustls'. mogh_server
-# picks the crypto provider itself (see 'serve_app'), and its tests
-# add 'ring' next to aws-lc-rs.
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std"] }
 
 # AUTH
 webauthn-rs = { version = "0.5.5", features = ["danger-allow-state-serialisation"] }
-# The passkey types of the client, without webauthn-rs (and its
-# OpenSSL). Same version as webauthn-rs's: the server builds them
-# with it.
 webauthn-rs-proto = "0.5.5"
 openidconnect = { version = "4.0.1", features = ["accept-rfc3339-timestamps"] }
 # Only to mint test tokens, openidconnect uses it for token timestamps.
@@ -120,13 +110,7 @@ thiserror = "2.0.21"
 # LOGGING
 # tracing-opentelemetry 0.34 is tied to opentelemetry 0.33
 tracing-opentelemetry = "0.34.0"
-# OTLP/HTTP (protobuf) over reqwest's blocking client only: the
-# default features add the gRPC (tonic) exporter, which mogh_logger
-# doesn't support, and the logs signal. 'internal-logs' carries the
-# export errors mogh_logger lets through.
 opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace", "internal-logs"] }
-# The batch span processor runs on its own thread, no async runtime
-# feature needed.
 opentelemetry_sdk = "0.33.0"
 tracing-subscriber = { version = "0.3.23", features = ["json"] }
 opentelemetry-semantic-conventions = "0.33.0"
