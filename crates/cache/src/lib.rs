@@ -2,56 +2,171 @@ use std::{
   collections::{HashMap, HashSet},
   hash::Hash,
   sync::Arc,
+  time::Duration,
 };
 
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+  sync::{Mutex, RwLock},
+  time::Instant,
+};
 
-/// Prevents simultaneous / rapid fire access to an action,
-/// returning the cached result instead in these situations.
+mod load_cache;
+
+pub use load_cache::LoadCache;
+
+/// Lets concurrent / rapid fire calls of an action share one run
+/// and its result, which is reused for `timeout` after it is set.
 ///
 /// A caller takes the entry for its key with
-/// [get_lock](TimeoutCache::get_lock), locks it for the length of
-/// the action, and reuses [CacheEntry::res] while
-/// [CacheEntry::last_ts] is recent enough.
+/// [get_lock](TimeoutCache::get_lock) and locks it for the length of
+/// the action. Concurrent callers for the same key wait on that
+/// lock, then find the result in [CacheEntry::fresh_res]:
 ///
-/// Entries stay until removed. When keys come from request input
-/// (eg an image name), call [prune](TimeoutCache::prune) from a
-/// periodic task to keep the map bounded. An entry a caller still
-/// holds is never removed, so eviction cannot let a second caller
-/// run the same action at the same time.
-#[derive(Default)]
-pub struct TimeoutCache<K, Res>(
-  Mutex<HashMap<K, Arc<Mutex<CacheEntry<Res>>>>>,
-);
+/// ```
+/// # use std::time::Duration;
+/// # use mogh_cache::TimeoutCache;
+/// # async fn pull(image: &str) -> anyhow::Result<String> {
+/// #   Ok(image.to_string())
+/// # }
+/// # async fn cached_pull(
+/// #   cache: &TimeoutCache<String, String>,
+/// #   image: String,
+/// # ) -> anyhow::Result<String> {
+/// let lock = cache.get_lock(image.clone()).await;
+/// let mut entry = lock.lock().await;
+/// if let Some(res) = entry.fresh_res() {
+///   return res;
+/// }
+/// let res = pull(&image).await;
+/// entry.set(&res);
+/// res
+/// # }
+/// ```
+///
+/// The cache prunes itself, so keys taken from request input (an
+/// image name, a repo path) don't grow it for the life of the
+/// process: when [get_lock](TimeoutCache::get_lock) has grown the
+/// map to twice the entries it kept at its last prune (and to at
+/// least 64), it drops the entries whose result is no longer fresh.
+/// The map therefore stays within twice the most entries in use at
+/// once, at an amortized constant cost per new key.
+///
+/// An entry a caller still holds (between
+/// [get_lock](TimeoutCache::get_lock) and dropping the handle) is
+/// never removed, by the pruning or by
+/// [remove](TimeoutCache::remove), [retain](TimeoutCache::retain)
+/// and [prune](TimeoutCache::prune). So eviction can't let a second
+/// caller run the same action at the same time.
+pub struct TimeoutCache<K, Res> {
+  timeout: Duration,
+  entries: Mutex<Entries<K, Res>>,
+}
 
-impl<K: Eq + Hash, Res: Default> TimeoutCache<K, Res> {
-  pub async fn get_lock(
-    &self,
-    key: K,
-  ) -> Arc<Mutex<CacheEntry<Res>>> {
-    let mut lock = self.0.lock().await;
-    lock.entry(key).or_default().clone()
+/// The map grows to at least this many entries
+/// before [TimeoutCache::get_lock] prunes it.
+const PRUNE_MIN_LEN: usize = 64;
+
+struct Entries<K, Res> {
+  map: HashMap<K, Arc<Mutex<CacheEntry<Res>>>>,
+  /// [TimeoutCache::get_lock] prunes once the map has this many
+  /// entries: twice what the last prune kept, so the cost of a
+  /// prune is spread over as many new keys as it kept.
+  prune_at: usize,
+}
+
+impl<K, Res> Entries<K, Res> {
+  /// Keeps the entries a caller holds and those `keep` returns
+  /// true for, then moves the next automatic prune to twice what
+  /// is left.
+  fn retain(
+    &mut self,
+    mut keep: impl FnMut(&K, &CacheEntry<Res>) -> bool,
+  ) {
+    self.map.retain(|key, entry| {
+      if is_held(entry) {
+        return true;
+      }
+      // Nobody else can reach an unheld entry, the lock is free.
+      match entry.try_lock() {
+        Ok(entry) => keep(key, &entry),
+        Err(_) => true,
+      }
+    });
+    self.prune_at = (self.map.len() * 2).max(PRUNE_MIN_LEN);
+  }
+
+  /// Drops the unheld entries without a fresh result,
+  /// returning how many it dropped.
+  fn prune(&mut self) -> usize {
+    let len = self.map.len();
+    let now = Instant::now();
+    self.retain(|_, entry| entry.is_fresh_at(now));
+    len - self.map.len()
   }
 }
 
 impl<K: Eq + Hash, Res> TimeoutCache<K, Res> {
+  /// A cache whose results are reused for `timeout` after they
+  /// are set.
+  pub fn new(timeout: Duration) -> Self {
+    Self {
+      timeout,
+      entries: Mutex::new(Entries {
+        map: HashMap::new(),
+        prune_at: PRUNE_MIN_LEN,
+      }),
+    }
+  }
+
+  /// How long a result is reused after it is set.
+  pub fn timeout(&self) -> Duration {
+    self.timeout
+  }
+
+  /// The entry for `key`, created without a result if there is
+  /// none. Lock it for the length of the action, see
+  /// [TimeoutCache].
+  ///
+  /// When this adds a key and the map has reached twice the
+  /// entries the last prune kept (and at least 64), it also prunes
+  /// the entries without a fresh result which no caller holds.
+  pub async fn get_lock(
+    &self,
+    key: K,
+  ) -> Arc<Mutex<CacheEntry<Res>>> {
+    let mut entries = self.entries.lock().await;
+    let timeout = self.timeout;
+    let entry = entries
+      .map
+      .entry(key)
+      .or_insert_with(|| {
+        Arc::new(Mutex::new(CacheEntry::new(timeout)))
+      })
+      .clone();
+    if entries.map.len() >= entries.prune_at {
+      // The entry just taken is held, so it stays.
+      entries.prune();
+    }
+    entry
+  }
+
   /// The number of cached keys.
   pub async fn len(&self) -> usize {
-    self.0.lock().await.len()
+    self.entries.lock().await.map.len()
   }
 
   pub async fn is_empty(&self) -> bool {
-    self.0.lock().await.is_empty()
+    self.entries.lock().await.map.is_empty()
   }
 
   /// Removes the entry for `key`, unless a caller still holds it
   /// (between [get_lock](TimeoutCache::get_lock) and dropping the
   /// handle). Returns whether an entry was removed.
   pub async fn remove(&self, key: &K) -> bool {
-    let mut map = self.0.lock().await;
-    match map.get(key) {
+    let mut entries = self.entries.lock().await;
+    match entries.map.get(key) {
       Some(entry) if !is_held(entry) => {
-        map.remove(key);
+        entries.map.remove(key);
         true
       }
       _ => false,
@@ -62,36 +177,18 @@ impl<K: Eq + Hash, Res> TimeoutCache<K, Res> {
   /// caller still holds are always kept, without calling `keep`.
   pub async fn retain(
     &self,
-    mut keep: impl FnMut(&K, &CacheEntry<Res>) -> bool,
+    keep: impl FnMut(&K, &CacheEntry<Res>) -> bool,
   ) {
-    self.0.lock().await.retain(|key, entry| {
-      if is_held(entry) {
-        return true;
-      }
-      // Nobody else can reach an unheld entry, the lock is free.
-      match entry.try_lock() {
-        Ok(entry) => keep(key, &entry),
-        Err(_) => true,
-      }
-    });
+    self.entries.lock().await.retain(keep);
   }
 
-  /// Removes the entries no caller holds whose
-  /// [last_ts](CacheEntry::last_ts) is before `older_than` (same
-  /// unit, eg `now - timeout` in unix ms). Returns how many were
-  /// removed.
-  pub async fn prune(&self, older_than: i64) -> usize {
-    let mut removed = 0;
-    self
-      .retain(|_, entry| {
-        let keep = entry.last_ts >= older_than;
-        if !keep {
-          removed += 1;
-        }
-        keep
-      })
-      .await;
-    removed
+  /// Removes the entries without a fresh result (see
+  /// [CacheEntry::is_fresh]) which no caller holds, returning how
+  /// many were removed. [get_lock](TimeoutCache::get_lock) already
+  /// does this as the map grows, so calling it is only needed to
+  /// free the results of a cache which stopped growing sooner.
+  pub async fn prune(&self) -> usize {
+    self.entries.lock().await.prune()
   }
 }
 
@@ -102,31 +199,60 @@ fn is_held<Res>(entry: &Arc<Mutex<CacheEntry<Res>>>) -> bool {
   Arc::strong_count(entry) > 1 || Arc::weak_count(entry) > 0
 }
 
+/// The result of the last run of an action of a [TimeoutCache],
+/// see [fresh_res](CacheEntry::fresh_res) and
+/// [set](CacheEntry::set).
 pub struct CacheEntry<Res> {
-  /// The last cached ts, in the unit the caller passes to
-  /// [set](CacheEntry::set) (0 until the first set).
-  pub last_ts: i64,
-  /// The last cached result
-  pub res: anyhow::Result<Res>,
+  /// The cache's timeout.
+  timeout: Duration,
+  /// The last result and when it was set, None until the first set.
+  last: Option<(Instant, anyhow::Result<Res>)>,
 }
 
-impl<Res: Default> Default for CacheEntry<Res> {
-  fn default() -> Self {
+impl<Res> CacheEntry<Res> {
+  fn new(timeout: Duration) -> Self {
     CacheEntry {
-      last_ts: 0,
-      res: Ok(Res::default()),
+      timeout,
+      last: None,
     }
+  }
+
+  /// When the result was last [set](CacheEntry::set),
+  /// None until the first set.
+  pub fn last_set(&self) -> Option<Instant> {
+    self.last.as_ref().map(|(set_at, _)| *set_at)
+  }
+
+  /// Whether the entry has a result set less than the cache's
+  /// timeout ago, which [fresh_res](CacheEntry::fresh_res) returns.
+  pub fn is_fresh(&self) -> bool {
+    self.is_fresh_at(Instant::now())
+  }
+
+  fn is_fresh_at(&self, now: Instant) -> bool {
+    self.last.as_ref().is_some_and(|(set_at, _)| {
+      now.saturating_duration_since(*set_at) < self.timeout
+    })
   }
 }
 
 impl<Res: Clone> CacheEntry<Res> {
-  pub fn set(&mut self, res: &anyhow::Result<Res>, timestamp: i64) {
-    self.res = res.as_ref().map_err(clone_anyhow_error).cloned();
-    self.last_ts = timestamp;
+  /// A copy of the result set less than the cache's timeout ago,
+  /// errors included, or None when the action has to run (again).
+  pub fn fresh_res(&self) -> Option<anyhow::Result<Res>> {
+    if !self.is_fresh() {
+      return None;
+    }
+    let (_, res) = self.last.as_ref()?;
+    Some(res.as_ref().map_err(clone_anyhow_error).cloned())
   }
 
-  pub fn clone_res(&self) -> anyhow::Result<Res> {
-    self.res.as_ref().map_err(clone_anyhow_error).cloned()
+  /// Stores a copy of the action's result, reused for the cache's
+  /// timeout from now. Set it after the action finished, so waiting
+  /// callers get the whole timeout.
+  pub fn set(&mut self, res: &anyhow::Result<Res>) {
+    let res = res.as_ref().map_err(clone_anyhow_error).cloned();
+    self.last = Some((Instant::now(), res));
   }
 }
 
@@ -269,58 +395,6 @@ impl<T: Clone> CloneVecCache<T> {
   pub async fn retain(&self, keep: impl FnMut(&T) -> bool) {
     self.0.write().await.retain(keep);
   }
-
-  /// Returns the first item matching `find`, or inserts and returns
-  /// `make()` when none does. Both happen under one write lock, so
-  /// concurrent callers insert at most once.
-  ///
-  /// `make` must build an item `find` matches (eg one carrying the
-  /// id `find` compares), otherwise the next call misses again and
-  /// inserts another item. Debug builds assert this.
-  pub async fn find_or_insert_with(
-    &self,
-    mut find: impl FnMut(&T) -> bool,
-    make: impl FnOnce() -> T,
-  ) -> T {
-    let mut cache = self.0.write().await;
-    if let Some(item) = cache.iter().find(|item| find(item)) {
-      return item.clone();
-    }
-    let item = make();
-    debug_assert!(
-      find(&item),
-      "CloneVecCache::find_or_insert_with: the inserted item does not match 'find'"
-    );
-    cache.push(item.clone());
-    item
-  }
-}
-
-impl<T: Clone + Default> CloneVecCache<T> {
-  /// Returns the first item matching `find`, or inserts and returns
-  /// `T::default()` when none does.
-  ///
-  /// Only idempotent when `T::default()` itself matches `find`.
-  /// A keyed `find` (eg `|t| t.id == id`) never matches the default,
-  /// so every call inserts another default and returns it instead
-  /// of an item with that key.
-  #[deprecated(
-    note = "T::default() rarely matches a keyed 'find', so every miss inserts another default: use 'find_or_insert_with'"
-  )]
-  pub async fn find_or_insert_default(
-    &self,
-    find: impl FnMut(&&T) -> bool,
-  ) -> T {
-    let mut cache = self.0.write().await;
-    match cache.iter().find(find).cloned() {
-      Some(item) => item,
-      None => {
-        let item: T = Default::default();
-        cache.push(item.clone());
-        item
-      }
-    }
-  }
 }
 
 pub struct SetCache<K>(Mutex<HashSet<K>>);
@@ -405,9 +479,12 @@ mod tests {
     assert_eq!(cloned.to_string(), "only reason");
   }
 
+  const TIMEOUT: Duration = Duration::from_secs(5);
+
   #[tokio::test]
   async fn timeout_cache_returns_same_entry_for_same_key() {
-    let cache = TimeoutCache::<&str, u64>::default();
+    let cache = TimeoutCache::<&str, u64>::new(TIMEOUT);
+    assert_eq!(cache.timeout(), TIMEOUT);
     let a = cache.get_lock("key").await;
     let b = cache.get_lock("key").await;
     assert!(Arc::ptr_eq(&a, &b));
@@ -415,45 +492,62 @@ mod tests {
     assert!(!Arc::ptr_eq(&a, &c));
   }
 
-  #[tokio::test]
-  async fn timeout_cache_entry_set_and_clone_res() {
-    let cache = TimeoutCache::<&str, u64>::default();
+  #[tokio::test(start_paused = true)]
+  async fn timeout_cache_reuses_result_until_timeout() {
+    let cache = TimeoutCache::<&str, u64>::new(TIMEOUT);
     let entry = cache.get_lock("key").await;
     {
       let mut entry = entry.lock().await;
-      assert_eq!(entry.last_ts, 0);
-      assert_eq!(entry.clone_res().unwrap(), 0);
-      entry.set(&Ok(42), 100);
+      // No result yet: the action has to run.
+      assert!(entry.last_set().is_none());
+      assert!(!entry.is_fresh());
+      assert!(entry.fresh_res().is_none());
+      entry.set(&Ok(42));
     }
     // The cached result is visible through another handle.
     let entry = cache.get_lock("key").await;
     let mut entry = entry.lock().await;
-    assert_eq!(entry.last_ts, 100);
-    assert_eq!(entry.clone_res().unwrap(), 42);
-    // Errors are cloned with context intact.
+    assert_eq!(entry.last_set(), Some(Instant::now()));
+    assert_eq!(entry.fresh_res().unwrap().unwrap(), 42);
+    tokio::time::advance(TIMEOUT - Duration::from_millis(1)).await;
+    assert_eq!(entry.fresh_res().unwrap().unwrap(), 42);
+    // Stale from the timeout on.
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(!entry.is_fresh());
+    assert!(entry.fresh_res().is_none());
+    // Errors are cached too, cloned with context intact.
     let err: anyhow::Result<u64> =
       Err(anyhow::anyhow!("inner").context("outer"));
-    entry.set(&err, 200);
-    let cloned = entry.clone_res().unwrap_err();
+    entry.set(&err);
+    let cloned = entry.fresh_res().unwrap().unwrap_err();
     assert_eq!(format!("{cloned:#}"), "outer: inner");
   }
 
-  /// Sets the entry for `key` to a result cached at `ts`.
-  async fn set_at(
-    cache: &TimeoutCache<&str, u64>,
-    key: &'static str,
-    ts: i64,
-  ) {
-    cache.get_lock(key).await.lock().await.set(&Ok(1), ts);
+  #[tokio::test(start_paused = true)]
+  async fn timeout_cache_zero_timeout_never_reuses() {
+    let cache = TimeoutCache::<&str, u64>::new(Duration::ZERO);
+    let entry = cache.get_lock("key").await;
+    let mut entry = entry.lock().await;
+    entry.set(&Ok(1));
+    assert!(entry.fresh_res().is_none());
   }
 
-  #[tokio::test]
+  /// Sets the entry for `key` to a result, now.
+  async fn set_now(
+    cache: &TimeoutCache<&str, u64>,
+    key: &'static str,
+  ) {
+    cache.get_lock(key).await.lock().await.set(&Ok(1));
+  }
+
+  #[tokio::test(start_paused = true)]
   async fn timeout_cache_prune_drops_stale_unheld_entries() {
-    let cache = TimeoutCache::<&str, u64>::default();
-    set_at(&cache, "stale", 100).await;
-    set_at(&cache, "fresh", 300).await;
-    set_at(&cache, "held", 100).await;
-    set_at(&cache, "locked", 100).await;
+    let cache = TimeoutCache::<&str, u64>::new(TIMEOUT);
+    set_now(&cache, "stale").await;
+    set_now(&cache, "held").await;
+    set_now(&cache, "locked").await;
+    tokio::time::advance(TIMEOUT).await;
+    set_now(&cache, "fresh").await;
     // A caller between get_lock and dropping the handle.
     let held = cache.get_lock("held").await;
     // A caller mid action, holding the entry lock.
@@ -461,11 +555,11 @@ mod tests {
     let guard = locked.lock().await;
     assert_eq!(cache.len().await, 4);
 
-    assert_eq!(cache.prune(200).await, 1);
+    assert_eq!(cache.prune().await, 1);
     assert_eq!(cache.len().await, 3);
     // The stale entry is gone: the next caller starts over.
     let entry = cache.get_lock("stale").await;
-    assert_eq!(entry.lock().await.last_ts, 0);
+    assert!(entry.lock().await.last_set().is_none());
     drop(entry);
     // Held entries survive, so a second caller still waits on the
     // same one instead of running the action alongside.
@@ -475,18 +569,62 @@ mod tests {
     drop(guard);
     drop(locked);
     drop(held);
-    // "stale" (recreated at 0) + "held" + "locked".
-    assert_eq!(cache.prune(200).await, 3);
+    // "stale" (recreated without a result) + "held" + "locked".
+    assert_eq!(cache.prune().await, 3);
     assert_eq!(cache.len().await, 1);
     assert!(!cache.is_empty().await);
+    tokio::time::advance(TIMEOUT).await;
+    assert_eq!(cache.prune().await, 1);
+    assert!(cache.is_empty().await);
+  }
+
+  /// Every key is used once, as when keys come from request input:
+  /// the cache drops the stale ones by itself as it grows.
+  #[tokio::test(start_paused = true)]
+  async fn timeout_cache_prunes_itself_as_it_grows() {
+    let cache = TimeoutCache::<u64, u64>::new(TIMEOUT);
+    // Held throughout, and long stale: never dropped.
+    let held = cache.get_lock(u64::MAX).await;
+    for i in 0..1_000 {
+      cache.get_lock(i).await.lock().await.set(&Ok(i));
+      // At most 10 results are fresh at once, so with the held
+      // entries, a prune keeps few enough for the floor to apply.
+      tokio::time::advance(TIMEOUT / 10).await;
+      assert!(cache.len().await <= PRUNE_MIN_LEN, "{i}");
+    }
+    assert!(Arc::ptr_eq(&held, &cache.get_lock(u64::MAX).await));
+    // The last results are still there to be reused.
+    let entry = cache.get_lock(999).await;
+    assert_eq!(entry.lock().await.fresh_res().unwrap().unwrap(), 999);
+  }
+
+  /// Fresh results are never pruned: the map grows to hold all of
+  /// them, pruning again at twice what it kept.
+  #[tokio::test(start_paused = true)]
+  async fn timeout_cache_keeps_fresh_entries_when_it_grows() {
+    let cache = TimeoutCache::<u64, u64>::new(TIMEOUT);
+    for i in 0..200 {
+      cache.get_lock(i).await.lock().await.set(&Ok(i));
+    }
+    assert_eq!(cache.len().await, 200);
+    tokio::time::advance(TIMEOUT).await;
+    // Nothing is pruned until the map doubles what the last
+    // prune kept (128 at the 128th key) ...
+    for i in 200..255 {
+      cache.get_lock(i).await.lock().await.set(&Ok(i));
+    }
+    assert_eq!(cache.len().await, 255);
+    // ... then the 256th key drops the 200 stale ones.
+    cache.get_lock(255).await.lock().await.set(&Ok(255));
+    assert_eq!(cache.len().await, 56);
   }
 
   #[tokio::test]
   async fn timeout_cache_remove_skips_held_entry() {
-    let cache = TimeoutCache::<&str, u64>::default();
+    let cache = TimeoutCache::<&str, u64>::new(TIMEOUT);
     assert!(!cache.remove(&"missing").await);
     let held = cache.get_lock("key").await;
-    held.lock().await.set(&Ok(7), 100);
+    held.lock().await.set(&Ok(7));
     assert!(!cache.remove(&"key").await);
     assert!(Arc::ptr_eq(&held, &cache.get_lock("key").await));
     // A weak handle can come back, it counts as held too.
@@ -496,20 +634,21 @@ mod tests {
     drop(weak);
     assert!(cache.remove(&"key").await);
     assert!(cache.is_empty().await);
-    assert_eq!(cache.get_lock("key").await.lock().await.last_ts, 0);
+    let entry = cache.get_lock("key").await;
+    assert!(entry.lock().await.fresh_res().is_none());
   }
 
   #[tokio::test]
   async fn timeout_cache_retain() {
-    let cache = TimeoutCache::<&str, u64>::default();
-    set_at(&cache, "a", 1).await;
-    set_at(&cache, "b", 2).await;
+    let cache = TimeoutCache::<&str, u64>::new(TIMEOUT);
+    cache.get_lock("a").await.lock().await.set(&Ok(1));
+    cache.get_lock("b").await.lock().await.set(&Ok(2));
     let held = cache.get_lock("c").await;
     let mut seen = Vec::new();
     cache
       .retain(|key, entry| {
         seen.push(*key);
-        entry.last_ts == 2
+        matches!(entry.fresh_res(), Some(Ok(2)))
       })
       .await;
     seen.sort();
@@ -613,96 +752,6 @@ mod tests {
     let mut list = cache.list().await;
     list.sort();
     assert_eq!(list, vec![0, 1]);
-  }
-
-  #[tokio::test]
-  #[allow(deprecated)]
-  async fn clone_vec_cache_find_or_insert_default() {
-    let cache = CloneVecCache::<u64>::default();
-    assert_eq!(cache.find_or_insert_default(|&&v| v == 0).await, 0);
-    // Did not insert twice
-    assert_eq!(cache.list().await, vec![0]);
-    cache.insert(|&v| v == 9, 9).await;
-    assert_eq!(cache.find_or_insert_default(|&&v| v == 9).await, 9);
-    assert_eq!(cache.list().await.len(), 2);
-  }
-
-  #[derive(Clone, Debug, Default, PartialEq)]
-  struct Named {
-    name: &'static str,
-    hits: u64,
-  }
-
-  /// With a keyed `find`, the item `make` builds carries the key,
-  /// so repeat calls find it rather than inserting again (unlike
-  /// `find_or_insert_default`, whose default has no name).
-  #[tokio::test]
-  async fn clone_vec_cache_find_or_insert_with_keyed() {
-    let cache = CloneVecCache::<Named>::default();
-    let make = || Named { name: "a", hits: 0 };
-    for _ in 0..3 {
-      let item =
-        cache.find_or_insert_with(|t| t.name == "a", make).await;
-      assert_eq!(item.name, "a");
-    }
-    assert_eq!(cache.list().await.len(), 1);
-    // An existing match is returned as is, make isn't called.
-    cache
-      .insert(|t| t.name == "a", Named { name: "a", hits: 5 })
-      .await;
-    let item = cache
-      .find_or_insert_with(
-        |t| t.name == "a",
-        || unreachable!("the item exists"),
-      )
-      .await;
-    assert_eq!(item.hits, 5);
-    // Another key inserts its own item.
-    let item = cache
-      .find_or_insert_with(
-        |t| t.name == "b",
-        || Named { name: "b", hits: 1 },
-      )
-      .await;
-    assert_eq!(item, Named { name: "b", hits: 1 });
-    assert_eq!(cache.list().await.len(), 2);
-  }
-
-  #[tokio::test]
-  async fn clone_vec_cache_find_or_insert_with_only_inserts_once() {
-    let cache = Arc::new(CloneVecCache::<Named>::default());
-    let calls = Arc::new(AtomicUsize::new(0));
-    let mut handles = Vec::new();
-    for _ in 0..32 {
-      let cache = cache.clone();
-      let calls = calls.clone();
-      handles.push(tokio::spawn(async move {
-        cache
-          .find_or_insert_with(
-            |t| t.name == "a",
-            || {
-              calls.fetch_add(1, Ordering::SeqCst);
-              Named { name: "a", hits: 0 }
-            },
-          )
-          .await
-      }));
-    }
-    for handle in handles {
-      assert_eq!(handle.await.unwrap().name, "a");
-    }
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(cache.list().await.len(), 1);
-  }
-
-  #[cfg(debug_assertions)]
-  #[tokio::test]
-  #[should_panic(expected = "does not match 'find'")]
-  async fn clone_vec_cache_find_or_insert_with_asserts_match() {
-    let cache = CloneVecCache::<Named>::default();
-    cache
-      .find_or_insert_with(|t| t.name == "a", Named::default)
-      .await;
   }
 
   #[tokio::test]
