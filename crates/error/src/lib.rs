@@ -2,8 +2,10 @@ pub use anyhow;
 
 use anyhow::Context;
 
+mod not_an_attempt;
 mod serror;
 
+pub use not_an_attempt::NotAnAttempt;
 pub use serror::Serror;
 
 #[cfg(feature = "axum")]
@@ -11,41 +13,60 @@ mod axum;
 #[cfg(feature = "axum")]
 pub use crate::axum::*;
 
+// Dev dependencies used by the integration tests only.
+#[cfg(test)]
+use tokio as _;
+#[cfg(test)]
+use tracing_subscriber as _;
+
+/// The kinds of serde messages which name the unexpected value:
+/// `invalid type: string "hunter2", expected u64`,
+/// `unknown variant `hunter2`, expected one of ...`.
+const NAMING_A_VALUE: [&str; 3] =
+  ["invalid type", "invalid value", "unknown variant"];
+
+/// A serde error message without the unexpected value it may name,
+/// keeping what was expected: `invalid type: string "hunter2",
+/// expected u64` becomes `invalid type, expected u64`. The other
+/// messages (`missing field `name``, `unknown field `x``, the custom
+/// ones of Deserialize impls) stay as they are.
+///
+/// For a parse error of input which can carry secrets (request
+/// params, websocket frames), before it is answered or logged.
+/// `variant_request` (feature `axum`) applies it. A position the
+/// message ends with (`at line 1 column 5`) stays: it names no value.
+///
+/// ```
+/// let e = serde_json::from_str::<u64>(r#""hunter2""#).unwrap_err();
+/// assert_eq!(
+///   mogh_error::without_values(&e.to_string()),
+///   "invalid type, expected u64 at line 1 column 9"
+/// );
+/// ```
+pub fn without_values(message: &str) -> String {
+  for kind in NAMING_A_VALUE {
+    if message.starts_with(kind) {
+      // The expectation comes last, after the value (which may
+      // itself contain ", expected ").
+      return match message.rfind(", expected ") {
+        Some(start) => format!("{kind}{}", &message[start..]),
+        None => kind.to_string(),
+      };
+    }
+  }
+  message.to_string()
+}
+
+/// Serializes the error as a [Serror] (`{ "error", "trace" }`) json.
 pub fn serialize_error(e: &anyhow::Error) -> String {
-  try_serialize_error(e).unwrap_or_else(|_| format!("{e:#?}"))
+  serde_json::to_string(&Serror::from(e))
+    .unwrap_or_else(|_| format!("{e:#?}"))
 }
 
-pub fn try_serialize_error(
-  e: &anyhow::Error,
-) -> anyhow::Result<String> {
-  let serror: Serror = e.into();
-  let res = serde_json::to_string(&serror)?;
-  anyhow::Ok(res)
-}
-
-pub fn serialize_error_pretty(e: &anyhow::Error) -> String {
-  try_serialize_error_pretty(e).unwrap_or_else(|_| format!("{e:#?}"))
-}
-
-pub fn try_serialize_error_pretty(
-  e: &anyhow::Error,
-) -> anyhow::Result<String> {
-  let serror: Serror = e.into();
-  let res = serde_json::to_string_pretty(&serror)?;
-  anyhow::Ok(res)
-}
-
+/// [serialize_error], as bytes.
 pub fn serialize_error_bytes(e: &anyhow::Error) -> Vec<u8> {
-  try_serialize_error_bytes(e)
+  serde_json::to_vec(&Serror::from(e))
     .unwrap_or_else(|_| format!("{e:#?}").into_bytes())
-}
-
-pub fn try_serialize_error_bytes(
-  e: &anyhow::Error,
-) -> anyhow::Result<Vec<u8>> {
-  let serror: Serror = e.into();
-  let res = serde_json::to_vec(&serror)?;
-  anyhow::Ok(res)
 }
 
 /// Parses a serialized error (see [deserialize_serror]) and
@@ -150,6 +171,33 @@ pub fn serror_into_anyhow_error(serror: Serror) -> anyhow::Error {
 mod tests {
   use super::*;
 
+  #[test]
+  fn without_values_keeps_messages_naming_no_value() {
+    for message in [
+      "missing field `limit`",
+      "unknown field `x`, expected `a` or `b`",
+      "invalid length 3, expected a tuple of size 2",
+      "relative URL without a base",
+    ] {
+      assert_eq!(without_values(message), message);
+    }
+    assert_eq!(
+      without_values("invalid type: map, expected a string"),
+      "invalid type, expected a string"
+    );
+    assert_eq!(
+      without_values("unknown variant `x`, there are no variants"),
+      "unknown variant"
+    );
+    // The value can't fake the end of the message.
+    assert_eq!(
+      without_values(
+        r#"invalid value: string "a, expected b", expected u8"#
+      ),
+      "invalid value, expected u8"
+    );
+  }
+
   fn chain(e: &anyhow::Error) -> Vec<String> {
     e.chain().map(|e| e.to_string()).collect()
   }
@@ -202,15 +250,6 @@ mod tests {
     let deserialized =
       deserialize_error_bytes(&serialize_error_bytes(&e));
     assert_eq!(chain(&deserialized), chain(&e));
-  }
-
-  #[test]
-  fn serialize_error_pretty_parses_to_same_serror() {
-    let e = example_error();
-    let pretty: Serror =
-      serde_json::from_str(&serialize_error_pretty(&e)).unwrap();
-    assert_eq!(pretty.error, "top level");
-    assert_eq!(pretty.trace, vec!["middle context", "root cause"]);
   }
 
   #[test]

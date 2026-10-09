@@ -1,14 +1,21 @@
 [package]
 name = "mogh_error"
 description = "De/serialize errors into json format with customizable http status code."
-version = "1.1.0"
+version = "2.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [features]
 default = []
-axum = ["dep:axum"]
+axum = [
+  "dep:axum",
+  "dep:serde_path_to_error",
+  "dep:tower",
+  "dep:tracing",
+  # variant_request_raw takes the params as a RawValue.
+  "serde_json/raw_value",
+]
 utoipa = ["dep:utoipa"]
 
 [dependencies]
@@ -17,5 +24,14 @@ serde_json.workspace = true
 anyhow.workspace = true
 # axum feature
 axum = { workspace = true, optional = true }
+# The Layer / Service traits, axum depends on it already.
+tower = { workspace = true, optional = true }
+# Field paths of variant_request errors, axum's Json uses it too.
+serde_path_to_error = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 # utoipa feature
 utoipa = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+tracing-subscriber.workspace = true
