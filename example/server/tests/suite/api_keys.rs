@@ -1002,3 +1002,75 @@ async fn signature_works_over_http2() {
     .await
     .unwrap();
 }
+
+/// A tcp proxy on `listener` to `to` (`host:port`), whose first
+/// connection is slow to get going: what the client sends over it
+/// first is passed on `delay` late, as over a link which takes long
+/// to set up a connection (DNS, TCP, TLS). Later connections are
+/// fast.
+fn slow_first_connection_proxy(
+  listener: tokio::net::TcpListener,
+  to: String,
+  delay: std::time::Duration,
+) {
+  tokio::spawn(async move {
+    let mut delay = Some(delay);
+    while let Ok((mut inbound, _)) = listener.accept().await {
+      let delay = delay.take();
+      let to = to.clone();
+      tokio::spawn(async move {
+        if let Some(delay) = delay {
+          tokio::time::sleep(delay).await;
+        }
+        let Ok(mut outbound) =
+          tokio::net::TcpStream::connect(&to).await
+        else {
+          return;
+        };
+        let _ =
+          tokio::io::copy_bidirectional(&mut inbound, &mut outbound)
+            .await;
+      });
+    }
+  });
+}
+
+/// A request is signed before it goes out, so the time to set up a
+/// connection counts against the timestamp tolerance of the server
+/// (1 second). The first request over a slow new connection is
+/// refused for its timestamp, and the client sends it once more,
+/// signed anew, over a connection it opened before
+/// (mogh_auth_client's `signed_post`).
+#[tokio::test]
+async fn signed_request_is_sent_anew_when_its_timestamp_aged() {
+  let listener =
+    tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let proxy = format!("http://{}", listener.local_addr().unwrap());
+  // The app is reached through the proxy too.
+  let app = TestApp::spawn_with(TestAppOptions {
+    config: json!({ "extra_hosts": [proxy] }),
+    ..Default::default()
+  })
+  .await;
+  let admin = app.sign_up("admin").await;
+  let private_key = generated_signing_key(&admin, "slow link").await;
+  let delay = std::time::Duration::from_millis(1500);
+  slow_first_connection_proxy(
+    listener,
+    app.address.trim_start_matches("http://").to_string(),
+    delay,
+  );
+
+  let mut api = signing_key_client(&admin, &private_key);
+  api.address = proxy;
+  let started = std::time::Instant::now();
+  let info = api.read(GetRequestInfo {}).await.unwrap();
+  assert_eq!(info.auth_method, AuthMethod::PublicKey);
+  // The first attempt was held past the tolerance.
+  assert!(started.elapsed() >= delay);
+  // Later requests go out over the open connection.
+  api
+    .manage(example_client::auth::api::manage::GetUserId {})
+    .await
+    .unwrap();
+}

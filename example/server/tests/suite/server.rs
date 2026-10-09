@@ -237,6 +237,91 @@ fn invalid_config_fails_the_startup() {
   }
 }
 
+/// A value of the environment its config field can't take stops the
+/// startup naming the variable and the field, never the value, and
+/// so does a `_FILE` variable naming a file which isn't there
+/// (mogh_config's `EnvSource`).
+#[test]
+fn a_bad_environment_value_fails_the_startup_naming_the_variable() {
+  let output =
+    refused_startup(&[("EXAMPLE_JWT_TTL_SECONDS", "hunter2")]);
+  assert!(output.contains("EXAMPLE_JWT_TTL_SECONDS"), "{output}");
+  assert!(output.contains("'jwt_ttl_seconds'"), "{output}");
+  assert!(!output.contains("hunter2"), "{output}");
+
+  let dir = tempfile::tempdir().unwrap();
+  let missing =
+    dir.path().join("supporter_key").display().to_string();
+  let output =
+    refused_startup(&[("EXAMPLE_SUPPORTER_KEY_FILE", &missing)]);
+  assert!(output.contains("EXAMPLE_SUPPORTER_KEY_FILE"), "{output}");
+  assert!(output.contains(&missing), "{output}");
+}
+
+/// Every variable takes a file (`_FILE`), not only the secrets, and a
+/// blank variable counts as unset (a compose `${VAR:-}`).
+#[tokio::test]
+async fn any_variable_can_be_given_as_a_file() {
+  let dir = tempfile::tempdir().unwrap();
+  let title = dir.path().join("title");
+  std::fs::write(&title, "From a file\n").unwrap();
+  let app = TestApp::spawn_with(TestAppOptions {
+    env: vec![
+      ("EXAMPLE_TITLE_FILE".into(), title.display().to_string()),
+      ("EXAMPLE_TITLE".into(), "Shadowed by the file".into()),
+      ("EXAMPLE_BCRYPT_COST".into(), " ".into()),
+    ],
+    ..Default::default()
+  })
+  .await;
+  let admin = app.sign_up("admin").await;
+  let info = admin.read(GetCoreInfo {}).await.unwrap();
+  assert_eq!(info.app_name, "From a file");
+}
+
+/// A configured jwt secret under 32 bytes stops the startup, as the
+/// auth server asks of apps (`JwtProvider::try_new`, forced before
+/// serving): `[FATAL] Invalid 'jwt_secret'`, naming the minimum and
+/// the length, never the secret. Without one the example uses a
+/// random secret (users are logged out on restart).
+#[test]
+fn a_short_jwt_secret_fails_the_startup() {
+  let output =
+    refused_startup(&[("EXAMPLE_JWT_SECRET", "hunter2-is-short")]);
+  assert!(
+    output.contains("[FATAL] Invalid 'jwt_secret'"),
+    "{output}"
+  );
+  assert!(output.contains("at least 32 random bytes"), "{output}");
+  assert!(output.contains("16 bytes"), "{output}");
+  assert!(!output.contains("hunter2"), "{output}");
+}
+
+/// A config file which exists but doesn't parse stops the startup,
+/// naming the file and never a value in it. mogh_config used to skip
+/// it with a warning, and the server started without its settings
+/// (here registration left open).
+#[test]
+fn a_config_file_which_does_not_parse_fails_the_startup() {
+  let dir = tempfile::tempdir().unwrap();
+  // A key duplicated by an edit, in a file found by a directory
+  // scan, next to one which parses.
+  std::fs::write(
+    dir.path().join("base.config.toml"),
+    "title = \"Example\"\n",
+  )
+  .unwrap();
+  std::fs::write(
+    dir.path().join("local.config.toml"),
+    "disable_user_registration = true\ndisable_user_registration = \"hunter2\"\n",
+  )
+  .unwrap();
+  let paths = dir.path().display().to_string();
+  let output = refused_startup(&[("EXAMPLE_CONFIG_PATHS", &paths)]);
+  assert!(output.contains("local.config.toml"), "{output}");
+  assert!(!output.contains("hunter2"), "{output}");
+}
+
 #[tokio::test]
 async fn app_tokens_are_bound_to_the_secret_and_expire() {
   let app = TestApp::spawn_with(TestAppOptions {
@@ -282,7 +367,7 @@ async fn app_tokens_are_bound_to_the_secret_and_expire() {
 #[tokio::test]
 async fn logs_as_json_when_configured() {
   let app = TestApp::spawn_with(TestAppOptions {
-    config: json!({ "logging": { "stdio": "Json", "level": "info" } }),
+    config: json!({ "logging": { "stdio": "json", "level": "info" } }),
     ..Default::default()
   })
   .await;

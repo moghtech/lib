@@ -4,7 +4,17 @@
 //! api, which is used over the key of the config.
 
 use example_client::{
-  ExampleClient,
+  ClientAuth, ExampleClient,
+  api::{read::ListUsers, write::UpdateUserAccess},
+  auth::{
+    api::{
+      manage::{CreateApiKey, CreateSigningKey, CreateTrustedIssuer},
+      token::TOKEN_TYPE_JWT,
+    },
+    config::{
+      TrustedIssuer, TrustedIssuerKeys, WorkloadClaim, WorkloadRule,
+    },
+  },
   supporter::{
     MAX_ICON_BYTES, SignedSupporterKey, SupporterBranding, Tier,
     api::{
@@ -15,6 +25,7 @@ use example_client::{
     fixture,
   },
 };
+use example_mock_idp::MintToken;
 use reqwest::StatusCode;
 use serde_json::json;
 
@@ -870,4 +881,323 @@ async fn the_largest_uploaded_icon_fits_the_api() {
   assert_eq!(branding(&user).await, largest);
   // Nothing of the image is logged.
   assert!(!app.logs().contains("AAAAAAAA"));
+}
+
+/// The audience of the tokens [admin_issuer] takes.
+const AUDIENCE: &str = "https://example-app.test";
+
+/// A trusted issuer whose rule makes the workloads of the repository
+/// `12345` admins of the app.
+fn admin_issuer(app: &TestApp) -> CreateTrustedIssuer {
+  CreateTrustedIssuer {
+    issuer: TrustedIssuer {
+      id: String::new(),
+      name: "Infra CI".into(),
+      enabled: true,
+      issuer: app.idp.issuer.clone(),
+      keys: TrustedIssuerKeys::Discovery {},
+      audiences: vec![AUDIENCE.into()],
+      max_token_age_secs: 300,
+      rules: vec![WorkloadRule {
+        id: String::new(),
+        name: "Infra".into(),
+        enabled: true,
+        claims: vec![WorkloadClaim {
+          claim: "repository_id".into(),
+          pattern: "12345".into(),
+        }],
+        groups: Vec::new(),
+        admin: true,
+        token_ttl_secs: 900,
+      }],
+    },
+  }
+}
+
+/// A workload of the rule of [admin_issuer], authenticated with the
+/// token it exchanged its platform's token for.
+async fn admin_workload(app: &TestApp) -> ExampleClient {
+  let token = app.idp.mint(MintToken {
+    sub: "repo:my-org/infra:ref:refs/heads/main".into(),
+    aud: vec![AUDIENCE.into()],
+    claims: json!({ "repository_id": "12345" })
+      .as_object()
+      .unwrap()
+      .clone(),
+    ..Default::default()
+  });
+  let res = app.token_exchange(&token, TOKEN_TYPE_JWT).await.unwrap();
+  app.client().with_auth(ClientAuth::Jwt(res.access_token))
+}
+
+async fn set_access(
+  admin: &ExampleClient,
+  user_id: &str,
+  enabled: bool,
+  is_admin: bool,
+) {
+  admin
+    .write(UpdateUserAccess {
+      user_id: user_id.into(),
+      enabled: Some(enabled),
+      admin: Some(is_admin),
+      groups: None,
+    })
+    .await
+    .unwrap();
+}
+
+/// `POST /supporter/{api}/{variant}`, the type in the path and the
+/// params alone as the body, authenticated as `client`.
+async fn supporter_variant(
+  client: &ExampleClient,
+  api: &str,
+  variant: &str,
+  params: serde_json::Value,
+) -> reqwest::Response {
+  client
+    .authenticate(
+      client
+        .reqwest
+        .post(format!("{}/supporter/{api}/{variant}", client.address))
+        .json(&params),
+    )
+    .unwrap()
+    .send()
+    .await
+    .unwrap()
+}
+
+/// A workload whose rule makes it an admin of the app reads what
+/// every user reads, and manages nothing of the supporter key: a CI
+/// identity can't replace the key or the branding of the instance.
+#[tokio::test]
+async fn admin_workloads_can_not_manage_the_key() {
+  let app = spawn_with_key().await;
+  let admin = app.sign_up("admin").await;
+  admin.manage(admin_issuer(&app)).await.unwrap();
+  let workload = admin_workload(&app).await;
+  // An admin of the app, as its rule says.
+  workload.read(ListUsers {}).await.unwrap();
+
+  // What every user reads: the badge and its branding.
+  assert_eq!(signed_key(&workload).await, Some(fixture::response()));
+  assert_eq!(branding(&workload).await, SupporterBranding::default());
+
+  // The management requests, refused. The key it tries to set
+  // verifies, so only the refusal keeps it out.
+  let res = workload.supporter_read(GetSupporterKeyInfo {}).await;
+  assert_eq!(status_of(res), StatusCode::FORBIDDEN);
+  let other_key =
+    fixture::mint(fixture::APP, "Other Corp", Tier::Sponsor);
+  let res = workload
+    .supporter_write(SetSupporterKey { key: other_key })
+    .await;
+  assert_eq!(status_of(res), StatusCode::FORBIDDEN);
+  let res = workload.supporter_write(DeleteSupporterKey {}).await;
+  assert_eq!(status_of(res), StatusCode::FORBIDDEN);
+  let res = workload
+    .supporter_write(SetSupporterBranding {
+      branding: acme_branding(),
+    })
+    .await;
+  assert_eq!(status_of(res), StatusCode::FORBIDDEN);
+  assert_eq!(
+    supporter_variant(
+      &workload,
+      "read",
+      "GetSupporterKeyInfo",
+      json!({})
+    )
+    .await
+    .status(),
+    StatusCode::FORBIDDEN
+  );
+
+  // Nothing changed.
+  let info = info(&admin).await;
+  assert_eq!(info.source, SupporterKeySource::Config);
+  assert_acme(&info);
+  assert_eq!(branding(&admin).await, SupporterBranding::default());
+}
+
+/// A disabled user is refused the whole supporter api, also what
+/// every user reads (the auth management api still tells them who
+/// they are): a disabled admin keeps no control of the key, whatever
+/// credential they use.
+#[tokio::test]
+async fn disabled_users_are_refused_the_supporter_api() {
+  let app = spawn_with_key().await;
+  let admin = app.sign_up("admin").await;
+  let other = app.sign_up("other").await;
+  let other_id = get_user(&other).await.id;
+  set_access(&admin, &other_id, true, true).await;
+  // An api key made while enabled.
+  let key = other
+    .manage(CreateApiKey {
+      name: "ci".into(),
+      expires: 0,
+      cidr_whitelist: Vec::new(),
+    })
+    .await
+    .unwrap();
+  let api = other.with_auth(ClientAuth::ApiKey {
+    key: key.key,
+    secret: key.secret,
+  });
+  // An admin while enabled.
+  assert_acme(&info(&api).await);
+
+  set_access(&admin, &other_id, false, true).await;
+  // Logging in again, or the api key made before.
+  let relogged = app.log_in("other").await;
+  for (name, client) in [("jwt", &relogged), ("api key", &api)] {
+    let res = client
+      .supporter_read(GetSupporterKey {
+        nonce: fixture::NONCE.into(),
+      })
+      .await;
+    assert_eq!(status_of(res), StatusCode::FORBIDDEN, "{name}");
+    let res = client.supporter_read(GetSupporterBranding {}).await;
+    assert_eq!(status_of(res), StatusCode::FORBIDDEN, "{name}");
+    let res = client.supporter_read(GetSupporterKeyInfo {}).await;
+    assert_eq!(status_of(res), StatusCode::FORBIDDEN, "{name}");
+    let res = client.supporter_write(DeleteSupporterKey {}).await;
+    assert_eq!(status_of(res), StatusCode::FORBIDDEN, "{name}");
+    let res = client
+      .supporter_write(SetSupporterBranding {
+        branding: acme_branding(),
+      })
+      .await;
+    assert_eq!(status_of(res), StatusCode::FORBIDDEN, "{name}");
+    assert_eq!(
+      supporter_variant(
+        client,
+        "read",
+        "GetSupporterKey",
+        json!({ "nonce": fixture::NONCE }),
+      )
+      .await
+      .status(),
+      StatusCode::FORBIDDEN,
+      "{name}"
+    );
+  }
+  // The others still get the key, and nothing changed.
+  assert_eq!(signed_key(&admin).await, Some(fixture::response()));
+  assert_eq!(branding(&admin).await, SupporterBranding::default());
+
+  // Enabled again, they can.
+  set_access(&admin, &other_id, true, true).await;
+  let relogged = app.log_in("other").await;
+  assert_eq!(signed_key(&relogged).await, Some(fixture::response()));
+  assert_acme(&info(&api).await);
+}
+
+/// The `/{variant}` routes build the request from the path and the
+/// params, like every api of the app: an unknown request, or params
+/// of the wrong shape, is the client's error (422). The error names
+/// the field and what was expected, never the value sent.
+#[tokio::test]
+async fn malformed_variant_requests_are_unprocessable() {
+  let app = spawn_with_key().await;
+  let admin = app.sign_up("admin").await;
+  let res = supporter_variant(
+    &admin,
+    "read",
+    "GetSupporterKey",
+    json!({ "nonce": fixture::NONCE }),
+  )
+  .await;
+  assert_eq!(res.status(), StatusCode::OK);
+  assert_eq!(
+    res.json::<SignedSupporterKey>().await.unwrap(),
+    fixture::response()
+  );
+
+  for (api, variant, params, says) in [
+    (
+      "read",
+      "GetSupporterKeys",
+      json!({}),
+      "Unknown request type",
+    ),
+    // A read request is no write request.
+    (
+      "write",
+      "GetSupporterKey",
+      json!({ "nonce": fixture::NONCE }),
+      "Unknown request type",
+    ),
+    (
+      "read",
+      "GetSupporterKey",
+      json!({}),
+      "missing field `nonce`",
+    ),
+    (
+      "write",
+      "SetSupporterBranding",
+      json!({ "branding": { "icon_width": "hunter2" } }),
+      "branding.icon_width: invalid type, expected u32",
+    ),
+  ] {
+    let res = supporter_variant(&admin, api, variant, params).await;
+    assert_eq!(
+      res.status(),
+      StatusCode::UNPROCESSABLE_ENTITY,
+      "{api}/{variant}"
+    );
+    let body = res.text().await.unwrap();
+    assert!(body.contains(says), "{api}/{variant}: {body}");
+    assert!(!body.contains("hunter2"), "{api}/{variant}: {body}");
+  }
+  // Nothing changed.
+  assert_eq!(branding(&admin).await, SupporterBranding::default());
+}
+
+/// A request signed with a signing key authenticates as on the auth
+/// api: the body, which the signature covers, is read to verify it,
+/// and handed on to the request.
+#[tokio::test]
+async fn signed_requests_manage_the_key() {
+  let app = TestApp::spawn().await;
+  let admin = app.sign_up("admin").await;
+  let private_key = admin
+    .manage(CreateSigningKey {
+      name: "ci".into(),
+      expires: 0,
+      cidr_whitelist: Vec::new(),
+      public_key: String::new(),
+    })
+    .await
+    .unwrap()
+    .private_key
+    .expect("No private key for a generated pair");
+  let signed =
+    admin.with_auth(ClientAuth::PrivateKey { private_key });
+
+  let set = signed
+    .supporter_write(SetSupporterKey { key: wrapped_key() })
+    .await
+    .unwrap();
+  assert_eq!(set.source, SupporterKeySource::Stored);
+  assert_acme(&set);
+  assert_eq!(signed_key(&signed).await, Some(fixture::response()));
+  let res = supporter_variant(
+    &signed,
+    "read",
+    "GetSupporterKey",
+    json!({ "nonce": fixture::NONCE }),
+  )
+  .await;
+  assert_eq!(res.status(), StatusCode::OK);
+  assert_eq!(
+    res.json::<SignedSupporterKey>().await.unwrap(),
+    fixture::response()
+  );
+  let removed =
+    signed.supporter_write(DeleteSupporterKey {}).await.unwrap();
+  assert_eq!(removed.source, SupporterKeySource::None);
+  assert_eq!(signed_key(&admin).await, None);
 }

@@ -1,6 +1,6 @@
 //! Encrypts secrets before they are stored in the database.
 
-use std::{path::Path, sync::OnceLock};
+use std::{io::ErrorKind, sync::OnceLock};
 
 use anyhow::Context as _;
 use mogh_encryption::{Cipher, EnvelopeEncryptedData, Key, aead};
@@ -20,27 +20,34 @@ pub fn encryption_key() -> &'static Key {
 fn load_encryption_key() -> anyhow::Result<Key> {
   let config = core_config();
   if !config.encryption_key.is_empty() {
-    return Key::from_base64url(config.encryption_key.as_bytes())
+    return Key::decode(&config.encryption_key)
       .context("Invalid 'encryption_key' config");
   }
   let path = config.database_path.with_extension("encryption.key");
   if path.exists() {
-    let encoded = std::fs::read_to_string(&path)
-      .with_context(|| format!("Failed to read {path:?}"))?;
-    return Key::from_base64url(encoded.trim().as_bytes())
-      .with_context(|| {
-        format!("Invalid encryption key at {path:?}")
-      });
+    // Read into a wiped buffer, errors naming the path.
+    return Key::read_file(&path);
   }
   let key = Key::try_generate()?;
-  write_key(&path, &key)?;
-  tracing::info!("Generated database encryption key at {path:?}");
-  Ok(key)
-}
-
-fn write_key(path: &Path, key: &Key) -> anyhow::Result<()> {
-  mogh_secret_file::write(path, key.to_base64url().as_bytes())
-    .with_context(|| format!("Failed to write {path:?}"))
+  // Never over an existing file: a key replaced by another would
+  // leave everything sealed under it unreadable.
+  match mogh_secret_file::write_new(
+    &path,
+    key.to_base64url().as_bytes(),
+  ) {
+    Ok(()) => {
+      tracing::info!("Generated database encryption key at {path:?}");
+      Ok(key)
+    }
+    // Created by another process since the check: its key is the
+    // one in use.
+    Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+      Key::read_file(&path)
+    }
+    Err(e) => {
+      Err(e).with_context(|| format!("Failed to write {path:?}"))
+    }
+  }
 }
 
 /// Envelope encrypts `data`, bound to `associated_data`
@@ -59,15 +66,19 @@ pub fn seal(
   Ok(sealed.to_string())
 }
 
+/// The text [seal] sealed with the same `associated_data`.
+/// Decrypted into a buffer wiped on drop (also when the text turns
+/// out not to be UTF-8), then moved out of it, not copied: the
+/// caller keeps the plaintext from here (eg. in an api response).
 pub fn open(
   sealed: &str,
   associated_data: &str,
 ) -> anyhow::Result<String> {
   let sealed: EnvelopeEncryptedData = sealed.parse()?;
-  let data = aead::envelope_decrypt(
+  let mut text = aead::envelope_decrypt_string(
     &sealed,
     encryption_key(),
     &associated_data,
   )?;
-  String::from_utf8(data.to_vec()).context("Data is not valid UTF-8")
+  Ok(std::mem::take(&mut *text))
 }

@@ -7,7 +7,7 @@ use example_client::{
   ClientAuth, ExampleClient,
   api::{
     read::{GetRequestInfo, ListApiKeys},
-    write::CreateNote,
+    write::{CreateNote, UpdateCidrWhitelist, UpdateUserAccess},
   },
   auth::api::manage::{
     BeginExternalLoginLink, BeginPasskeyEnrollment,
@@ -109,7 +109,11 @@ async fn assert_all_sensitive_requests_refused(
     "BeginPasskeyEnrollment",
   );
   assert_reauthentication_required(
-    client.manage(BeginExternalLoginLink {}).await,
+    client
+      .manage(BeginExternalLoginLink {
+        slug: "oidc".into(),
+      })
+      .await,
     "BeginExternalLoginLink",
   );
   assert_reauthentication_required(
@@ -230,4 +234,92 @@ async fn the_check_can_be_disabled_but_not_for_api_keys() {
   tokio::time::sleep(Duration::from_secs(2)).await;
   admin.manage(new_key("another")).await.unwrap();
   assert_eq!(admin.read(ListApiKeys {}).await.unwrap().len(), 2);
+}
+
+/// The app's own writes which grant access (another user's rights,
+/// a wider cidr whitelist) need a recent login of a session too
+/// (`mogh_auth_server::middleware::require_recent_login`), with the
+/// refusal clients recognize. Taking access away doesn't, and api
+/// keys, the automation credentials, pass.
+#[tokio::test]
+async fn app_writes_which_grant_access_need_a_recent_login() {
+  let app = spawn_with_window(WINDOW_SECS).await;
+  let admin = app.sign_up("admin").await;
+  let bob = app.sign_up("bob").await;
+  let bob_id = get_user(&bob).await.id;
+  let res = admin.manage(new_key("automation")).await.unwrap();
+  let api = admin.with_auth(ClientAuth::ApiKey {
+    key: res.key,
+    secret: res.secret,
+  });
+  let access =
+    |enabled: Option<bool>,
+     admin: Option<bool>,
+     groups: Option<Vec<String>>| UpdateUserAccess {
+      user_id: bob_id.clone(),
+      enabled,
+      admin,
+      groups,
+    };
+  let whitelist = |cidrs: &[&str]| UpdateCidrWhitelist {
+    cidr_whitelist: cidrs
+      .iter()
+      .map(|cidr| cidr.to_string())
+      .collect(),
+  };
+
+  // Right after logging in.
+  admin.write(access(None, Some(true), None)).await.unwrap();
+  admin
+    .write(whitelist(&["127.0.0.1", "10.0.0.0/8"]))
+    .await
+    .unwrap();
+
+  tokio::time::sleep(Duration::from_secs(WINDOW_SECS + 2)).await;
+
+  // Taking access away still works.
+  admin.write(access(None, Some(false), None)).await.unwrap();
+  admin.write(access(Some(false), None, None)).await.unwrap();
+  admin.write(whitelist(&["127.0.0.1"])).await.unwrap();
+  // Granting it needs a recent login.
+  assert_reauthentication_required(
+    admin.write(access(None, Some(true), None)).await,
+    "UpdateUserAccess admin",
+  );
+  assert_reauthentication_required(
+    admin.write(access(Some(true), None, None)).await,
+    "UpdateUserAccess enabled",
+  );
+  assert_reauthentication_required(
+    admin
+      .write(access(None, None, Some(vec!["ops".into()])))
+      .await,
+    "UpdateUserAccess groups",
+  );
+  assert_reauthentication_required(
+    admin
+      .write(whitelist(&["127.0.0.1", "192.168.0.0/16"]))
+      .await,
+    "UpdateCidrWhitelist with a new entry",
+  );
+  assert_reauthentication_required(
+    admin.write(whitelist(&[])).await,
+    "UpdateCidrWhitelist emptied (every ip)",
+  );
+  let user = get_user(&admin).await;
+  assert_eq!(user.cidr_whitelist, vec!["127.0.0.1".to_string()]);
+
+  // An api key has no login to be recent.
+  let bob_user = api
+    .write(access(Some(true), Some(true), Some(vec!["ops".into()])))
+    .await
+    .unwrap();
+  assert!(bob_user.enabled && bob_user.admin);
+  assert_eq!(bob_user.groups, vec!["ops".to_string()]);
+
+  // Logging in again.
+  let fresh = app.log_in("admin").await;
+  fresh.write(whitelist(&[])).await.unwrap();
+  fresh.write(access(None, Some(false), None)).await.unwrap();
+  fresh.write(access(None, Some(true), None)).await.unwrap();
 }

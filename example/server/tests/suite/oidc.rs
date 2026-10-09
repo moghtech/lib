@@ -7,11 +7,13 @@ use example_client::{
     login::{CompleteTotpLogin, ExchangeForJwt, GetLoginOptions},
     manage::{
       BeginExternalLoginLink, BeginTotpEnrollment,
-      ConfirmTotpEnrollment, UnlinkExternalLogin, UnlinkLocalLogin,
-      UpdateExternalSkip2fa,
+      ConfirmTotpEnrollment, CreateExternalLoginProvider,
+      UnlinkExternalLogin, UnlinkLocalLogin, UpdateExternalSkip2fa,
     },
   },
-  auth::config::ExternalLoginKind,
+  auth::config::{
+    ExternalLoginKind, ExternalLoginProviderConfig, OidcConfig,
+  },
 };
 use example_mock_idp::IdpUser;
 use reqwest::StatusCode;
@@ -337,7 +339,12 @@ async fn link_and_unlink_a_login() {
   assert!(error.contains("not been initiated"), "{error}");
 
   app.idp.set_auto_user(Some("alice-sub"));
-  admin.manage(BeginExternalLoginLink {}).await.unwrap();
+  admin
+    .manage(BeginExternalLoginLink {
+      slug: "oidc".into(),
+    })
+    .await
+    .unwrap();
   let landed = follow_external_flow(&admin, &link_url).await;
   assert_eq!(landed.path(), "/profile");
   let user = get_user(&admin).await;
@@ -350,7 +357,12 @@ async fn link_and_unlink_a_login() {
 
   // The same login can't be linked to somebody else.
   let other = app.sign_up("other").await;
-  other.manage(BeginExternalLoginLink {}).await.unwrap();
+  other
+    .manage(BeginExternalLoginLink {
+      slug: "oidc".into(),
+    })
+    .await
+    .unwrap();
   // Back where logins are linked, with the reason.
   let landed = follow_external_flow(&other, &link_url).await;
   assert_eq!(landed.path(), "/profile");
@@ -378,9 +390,18 @@ async fn link_and_unlink_a_login() {
     .await;
   assert_eq!(status_of(res), StatusCode::BAD_REQUEST);
 
-  // A user who signed up with OIDC can set a password and drop it again.
-  admin.manage(UnlinkLocalLogin {}).await.unwrap();
-  assert!(!get_user(&admin).await.has_password);
+  // The last way to log in can't be removed: the admin's password,
+  // alice's only linked login (she has no password).
+  let res = admin.manage(UnlinkLocalLogin {}).await;
+  assert_eq!(status_of(res), StatusCode::BAD_REQUEST);
+  assert!(get_user(&admin).await.has_password);
+  let res = alice
+    .manage(UnlinkExternalLogin {
+      provider_id: "oidc".into(),
+    })
+    .await;
+  assert_eq!(status_of(res), StatusCode::BAD_REQUEST);
+  assert_eq!(get_user(&alice).await.linked_logins.len(), 1);
 }
 
 #[tokio::test]
@@ -491,29 +512,72 @@ async fn callback_is_bound_to_the_session_which_started_the_login() {
   );
 }
 
+/// Starts a login (or link) at `url` up to the provider's page, and
+/// returns the state the provider answers it with.
+async fn state_at_provider(
+  client: &ExampleClient,
+  url: &str,
+) -> String {
+  let res = client.reqwest.get(url).send().await.unwrap();
+  let authorize =
+    reqwest::Url::parse(res.headers()["location"].to_str().unwrap())
+      .unwrap();
+  authorize
+    .query_pairs()
+    .find(|(key, _)| key == "state")
+    .map(|(_, state)| state.to_string())
+    .expect("No state on the authorize url")
+}
+
 #[tokio::test]
 async fn denied_login_and_unknown_providers() {
   let app = TestApp::spawn_with(oidc_app_options(json!({}))).await;
   let client = app.client();
+  let login_url = format!("{}/auth/oidc/login", app.address);
 
-  // The user denies the login at the provider.
-  client
-    .reqwest
-    .get(format!("{}/auth/oidc/login", app.address))
-    .send()
-    .await
-    .unwrap();
+  // The user denies the login at the provider, which answers with
+  // the error and the state of the login.
+  let state = state_at_provider(&client, &login_url).await;
   let landed = follow_external_flow(
     &client,
     &format!(
-      "{}/auth/oidc/callback?error=access_denied&state=x",
+      "{}/auth/oidc/callback?error=access_denied&state={state}",
       app.address
     ),
   )
   .await;
   assert_eq!(landed.path(), "/login");
   let error = external_error(&landed, "login_error");
-  assert!(error.contains("access_denied"), "{error}");
+  assert_eq!(error, "Login was denied at the provider");
+
+  // Anybody can send the browser to the callback with an error of
+  // their choosing, shown as the server's reason. Without the state
+  // of the login it is no answer of the provider.
+  state_at_provider(&client, &login_url).await;
+  let landed = follow_external_flow(
+    &client,
+    &format!(
+      "{}/auth/oidc/callback?error=Your%20account%20is%20locked&state=forged",
+      app.address
+    ),
+  )
+  .await;
+  let error = external_error(&landed, "login_error");
+  assert!(error.contains("State mismatch"), "{error}");
+  assert!(!error.contains("locked"), "{error}");
+  // Whatever the provider's error says, the user is told only
+  // that the login didn't complete.
+  let state = state_at_provider(&client, &login_url).await;
+  let landed = follow_external_flow(
+    &client,
+    &format!(
+      "{}/auth/oidc/callback?error=Your%20account%20is%20locked&state={state}",
+      app.address
+    ),
+  )
+  .await;
+  let error = external_error(&landed, "login_error");
+  assert_eq!(error, "Login was not completed at the provider");
 
   for path in [
     "/auth/external/unknown/login",
@@ -613,7 +677,12 @@ async fn a_failed_link_uses_up_the_begun_link() {
   app.idp.set_auto_user(Some("alice-sub"));
   let admin = app.sign_up("admin").await;
 
-  admin.manage(BeginExternalLoginLink {}).await.unwrap();
+  admin
+    .manage(BeginExternalLoginLink {
+      slug: "oidc".into(),
+    })
+    .await
+    .unwrap();
   let landed = follow_external_flow(
     &admin,
     &format!("{}/auth/external/unknown/link", app.address),
@@ -630,6 +699,77 @@ async fn a_failed_link_uses_up_the_begun_link() {
   let error = external_error(&landed, "login_error");
   assert!(error.contains("not been initiated"), "{error}");
   assert!(get_user(&admin).await.linked_logins.is_empty());
+}
+
+/// A link is begun for the provider the user chose: `/link` of
+/// another provider refuses it, and uses it up. A page the user visits
+/// in the meantime can't start it at a provider of its choosing (where
+/// the browser may be logged in as somebody else).
+#[tokio::test]
+async fn a_link_is_bound_to_the_provider_it_was_begun_for() {
+  let app = TestApp::spawn_with(oidc_app_options(json!({}))).await;
+  app.add_idp_user("alice", &[]);
+  app.idp.set_auto_user(Some("alice-sub"));
+  let admin = app.sign_up("admin").await;
+  // The same identity provider, a second time.
+  admin
+    .manage(CreateExternalLoginProvider {
+      slug: "second".into(),
+      name: "Second".into(),
+      registration_disabled: false,
+      token_exchange: Default::default(),
+      config: ExternalLoginProviderConfig::Oidc(OidcConfig {
+        enabled: true,
+        provider: app.idp.issuer.clone(),
+        client_id: app.idp.client_id.clone(),
+        client_secret: app.idp.client_secret.clone(),
+        ..Default::default()
+      }),
+    })
+    .await
+    .unwrap();
+  let link_url =
+    |slug: &str| format!("{}/auth/external/{slug}/link", app.address);
+
+  // Begun for `oidc`, started at `second`.
+  admin
+    .manage(BeginExternalLoginLink {
+      slug: "oidc".into(),
+    })
+    .await
+    .unwrap();
+  let landed =
+    follow_external_flow(&admin, &link_url("second")).await;
+  assert_eq!(landed.path(), "/profile", "{landed}");
+  let error = external_error(&landed, "link_error");
+  assert!(error.contains("another login provider"), "{error}");
+  // Used up: not even `oidc` takes it anymore.
+  let landed = follow_external_flow(&admin, &link_url("oidc")).await;
+  let error = external_error(&landed, "login_error");
+  assert!(error.contains("not been initiated"), "{error}");
+  assert!(get_user(&admin).await.linked_logins.is_empty());
+
+  // Begun for `second`, it links there.
+  admin
+    .manage(BeginExternalLoginLink {
+      slug: "second".into(),
+    })
+    .await
+    .unwrap();
+  let landed =
+    follow_external_flow(&admin, &link_url("second")).await;
+  assert_eq!(landed.path(), "/profile", "{landed}");
+  let user = get_user(&admin).await;
+  assert_eq!(user.linked_logins.len(), 1);
+  assert_eq!(user.linked_logins[0].external_id, "alice-sub");
+
+  // There is no link to begin for a provider which doesn't exist.
+  let res = admin
+    .manage(BeginExternalLoginLink {
+      slug: "unknown".into(),
+    })
+    .await;
+  assert_eq!(status_of(res), StatusCode::NOT_FOUND);
 }
 
 /// Beginning a link gives the session a new id, like the first
@@ -674,7 +814,7 @@ async fn beginning_a_link_gets_a_new_session_id() {
       reqwest
         .post(format!("{}{path}", app.address))
         .header("cookie", &planted)
-        .json(&json!({})),
+        .json(&json!({ "slug": "oidc" })),
     )
     .unwrap()
     .send()
@@ -711,24 +851,27 @@ async fn beginning_a_link_gets_a_new_session_id() {
 async fn denied_link_goes_back_to_the_link_page() {
   let app = TestApp::spawn_with(oidc_app_options(json!({}))).await;
   let admin = app.sign_up("admin").await;
-  admin.manage(BeginExternalLoginLink {}).await.unwrap();
-  // Up to the provider's login page.
-  let res = admin
-    .reqwest
-    .get(format!("{}/auth/oidc/link", app.address))
-    .send()
+  admin
+    .manage(BeginExternalLoginLink {
+      slug: "oidc".into(),
+    })
     .await
     .unwrap();
-  assert!(res.status().is_redirection());
+  // Up to the provider's login page.
+  let state = state_at_provider(
+    &admin,
+    &format!("{}/auth/oidc/link", app.address),
+  )
+  .await;
 
   let callback = format!(
-    "{}/auth/oidc/callback?error=access_denied&state=x",
+    "{}/auth/oidc/callback?error=access_denied&state={state}",
     app.address
   );
   let landed = follow_external_flow(&admin, &callback).await;
   assert_eq!(landed.path(), "/profile");
   let error = external_error(&landed, "link_error");
-  assert!(error.contains("access_denied"), "{error}");
+  assert_eq!(error, "Login was denied at the provider");
 
   let landed = follow_external_flow(&admin, &callback).await;
   assert_eq!(landed.path(), "/login");
@@ -739,7 +882,9 @@ async fn denied_link_goes_back_to_the_link_page() {
 /// The external routes are plain GETs, which any web page the user
 /// visits can send from their browser. Requests which name an unknown
 /// provider, or a flow never started on the session, are refused
-/// without counting against the ip: they can't lock it out.
+/// without counting against the ip: they can't lock it out. Nor can
+/// the token exchange, a form any page can make a browser post: a
+/// browser's request from another site is refused before it counts.
 #[tokio::test]
 async fn cross_site_requests_do_not_lock_out_the_ip() {
   let app = TestApp::spawn_with(TestAppOptions {
@@ -766,6 +911,36 @@ async fn cross_site_requests_do_not_lock_out_the_ip() {
       .await;
       let error = external_error(&landed, "login_error");
       assert!(!error.contains("Too many"), "{path}: {error}");
+    }
+    // What an auto-submitted form of another site sends: a browser
+    // with fetch metadata, and one with only the `Origin`.
+    for (header, value) in [
+      ("sec-fetch-site", "cross-site"),
+      ("origin", "https://evil.example"),
+    ] {
+      let res = client
+        .reqwest
+        .post(format!("{}/auth/token", app.address))
+        .header(header, value)
+        .form(&[
+          (
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+          ),
+          ("subject_token", "a.b.c"),
+          (
+            "subject_token_type",
+            "urn:ietf:params:oauth:token-type:id_token",
+          ),
+        ])
+        .send()
+        .await
+        .unwrap();
+      assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{header}");
+      let body: serde_json::Value = res.json().await.unwrap();
+      assert_eq!(body["error"], "invalid_request", "{body}");
+      let description = body["error_description"].as_str().unwrap();
+      assert!(!description.contains("attempts"), "{description}");
     }
   }
   // Credentials from the same ip are still accepted.

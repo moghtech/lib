@@ -229,7 +229,12 @@ async fn disabled_users_can_not_complete_a_link() {
   let link_url = format!("{}/auth/oidc/link", app.address);
 
   // Disabled before the link is started.
-  bob.manage(BeginExternalLoginLink {}).await.unwrap();
+  bob
+    .manage(BeginExternalLoginLink {
+      slug: "oidc".into(),
+    })
+    .await
+    .unwrap();
   set_access(&admin, &bob_id, false, false).await;
   let landed = follow_external_flow(&bob, &link_url).await;
   assert_eq!(landed.path(), "/profile", "{landed}");
@@ -238,7 +243,12 @@ async fn disabled_users_can_not_complete_a_link() {
 
   // Disabled while at the provider.
   set_access(&admin, &bob_id, true, false).await;
-  bob.manage(BeginExternalLoginLink {}).await.unwrap();
+  bob
+    .manage(BeginExternalLoginLink {
+      slug: "oidc".into(),
+    })
+    .await
+    .unwrap();
   let location = |res: reqwest::Response| {
     res.headers()["location"].to_str().unwrap().to_string()
   };

@@ -170,6 +170,8 @@ async fn both_request_forms_are_accepted() {
     assert_eq!(body["version"], version);
   }
 
+  // An unknown request or params of the wrong shape: 422 on both
+  // forms, as axum's Json answers for the tagged body.
   for (path, body) in [
     ("/read/Nope", json!({})),
     ("/read", json!({ "type": "Nope", "params": {} })),
@@ -188,13 +190,53 @@ async fn both_request_forms_are_accepted() {
       .send()
       .await
       .unwrap();
-    assert!(
-      res.status().is_client_error(),
+    assert_eq!(
+      res.status(),
+      StatusCode::UNPROCESSABLE_ENTITY,
       "{path}: {}",
       res.status()
     );
     let body: serde_json::Value = res.json().await.unwrap();
     assert!(body["error"].is_string(), "{path}: {body}");
+  }
+
+  // The params' values are never echoed (they can be secrets), the
+  // error says where and what was expected.
+  for (path, body, secret, expected) in [
+    (
+      "/execute/ValidateString",
+      json!({ "kind": "hunter2-secret", "input": "" }),
+      "hunter2",
+      "kind: unknown variant, expected one of",
+    ),
+    (
+      "/write/UpdateUserAccess",
+      json!({ "user_id": "x", "enabled": "hunter2-secret" }),
+      "hunter2",
+      "enabled: invalid type, expected a boolean",
+    ),
+    (
+      "/execute/SealText",
+      json!({ "text": 20231122 }),
+      "20231122",
+      "text: invalid type, expected a string",
+    ),
+  ] {
+    let res = reqwest
+      .post(format!("{}{path}", app.address))
+      .header("authorization", &jwt)
+      .json(&body)
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(
+      res.status(),
+      StatusCode::UNPROCESSABLE_ENTITY,
+      "{path}"
+    );
+    let text = res.text().await.unwrap();
+    assert!(!text.contains(secret), "{path}: {text}");
+    assert!(text.contains(expected), "{path}: {text}");
   }
 }
 
@@ -377,6 +419,12 @@ async fn string_validation_rules() {
     (ValidateStringKind::HttpUrl, "ftp://example.com", false),
     (ValidateStringKind::HttpUrl, "javascript:alert(1)", false),
     (ValidateStringKind::HttpUrl, "https://", false),
+    // The auth server's rule: no credentials in a public url.
+    (
+      ValidateStringKind::HttpUrl,
+      "https://user:hunter2@example.com",
+      false,
+    ),
     (ValidateStringKind::NoteTitle, "A title", true),
     (ValidateStringKind::NoteTitle, "line\nbreak", false),
   ] {
@@ -393,6 +441,10 @@ async fn string_validation_rules() {
       res.error
     );
     assert_eq!(res.error.is_none(), valid);
+    // The input is never echoed.
+    if let Some(error) = res.error {
+      assert!(!error.contains("hunter2"), "{error}");
+    }
   }
 }
 

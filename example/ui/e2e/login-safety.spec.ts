@@ -421,7 +421,9 @@ test("auto redirect to a provider stops when the login fails", async ({
     await page.getByTestId("idp-deny").click();
 
     // Back on the login page with the reason, which stays.
-    await expect(notification(page, /access_denied/)).toBeVisible();
+    await expect(
+      notification(page, /Login was denied at the provider/),
+    ).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Username" })).toBeVisible();
     await page.waitForTimeout(2_000);
     await expect(page).toHaveURL(new RegExp(`^${APP_URL}/login`));

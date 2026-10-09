@@ -139,7 +139,12 @@ impl TestApp {
     let jwt_secret_path = dir.path().join("secrets/jwt_secret");
     std::fs::create_dir_all(jwt_secret_path.parent().unwrap())
       .unwrap();
-    std::fs::write(&jwt_secret_path, "test-jwt-secret\n").unwrap();
+    // 32 bytes at least, or the server refuses to start.
+    std::fs::write(
+      &jwt_secret_path,
+      "test-jwt-secret-of-the-example-api-suite\n",
+    )
+    .unwrap();
 
     let mut config = json!({
       "title": "Example Test",
@@ -147,7 +152,8 @@ impl TestApp {
       "database_path": dir.path().join("data/example.db"),
       "bcrypt_cost": 4,
       "auth_rate_limit_disabled": options.rate_limit.is_none(),
-      "logging": { "level": "debug" },
+      // Plain text, the tests read the logs back.
+      "logging": { "level": "debug", "ansi": false },
     });
     if let Some((max_attempts, window)) = options.rate_limit {
       merge(

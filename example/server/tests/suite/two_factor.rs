@@ -21,6 +21,8 @@ use crate::common::*;
 
 struct Enrolled {
   totp: totp_rs::Totp,
+  /// The code the enrollment was confirmed with: used once.
+  code: String,
   recovery_codes: Vec<String>,
 }
 
@@ -30,15 +32,15 @@ async fn enroll(client: &ExampleClient) -> Enrolled {
   assert!(enrollment.uri.starts_with("otpauth://totp/"));
   assert!(!enrollment.png.is_empty());
   let totp = totp_from_uri(&enrollment.uri);
+  let code = totp.generate_current().to_string();
   let recovery_codes = client
-    .manage(ConfirmTotpEnrollment {
-      code: totp.generate_current().to_string(),
-    })
+    .manage(ConfirmTotpEnrollment { code: code.clone() })
     .await
     .unwrap()
     .recovery_codes;
   Enrolled {
     totp,
+    code,
     recovery_codes,
   }
 }
@@ -87,11 +89,11 @@ async fn enroll_and_log_in_with_totp() {
 
   // The password alone doesn't give a token anymore.
   let client = begin_login(&app, "admin").await;
-  // The code used for enrollment can't be replayed as a login,
-  // the next one works.
+  // The code used for enrollment can't be replayed as a login (the
+  // very code: a step may have passed since), the next one works.
   let replayed = client
     .login(CompleteTotpLogin {
-      code: enrolled.totp.generate_current().to_string(),
+      code: enrolled.code.clone(),
     })
     .await;
   assert_eq!(status_of(replayed), StatusCode::UNAUTHORIZED);
@@ -569,6 +571,34 @@ async fn other_flows_do_not_keep_a_pending_login_alive() {
     })
     .await
     .unwrap();
+}
+
+/// A pending second factor has its whole
+/// `Session::MAX_SECOND_FACTOR_LOGIN_AGE` (10 minutes), whatever the
+/// idle expiry of sessions: a code typed after the session would have
+/// idled out still completes the login (the auth server keeps the
+/// session for the step).
+#[tokio::test]
+async fn a_pending_login_outlives_the_session_idle_expiry() {
+  let app = TestApp::spawn_with(TestAppOptions {
+    config: json!({ "session_expiry_seconds": 1 }),
+    ..Default::default()
+  })
+  .await;
+  let admin = app.sign_up("admin").await;
+  let enrolled = enroll(&admin).await;
+  let client = begin_login(&app, "admin").await;
+  // Past the idle expiry of the session.
+  tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+  let jwt = client
+    .login(CompleteTotpLogin {
+      code: next_code(&enrolled.totp),
+    })
+    .await
+    .unwrap()
+    .jwt;
+  let user = get_user(&client.with_auth(ClientAuth::Jwt(jwt))).await;
+  assert_eq!(user.username, "admin");
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {

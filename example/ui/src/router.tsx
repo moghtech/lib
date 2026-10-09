@@ -9,15 +9,18 @@ import {
   Routes,
   useLocation,
 } from "react-router-dom";
-import { loginTokens, useUser } from "@/lib/hooks";
+import { MoghAuth } from "example_client";
+import { useUser } from "@/lib/hooks";
 import App from "@/app";
 import Login from "@/pages/login";
 
 const Home = lazy(() => import("@/pages/home"));
+const LoginProvider = lazy(() => import("@/pages/login-provider"));
 const Notes = lazy(() => import("@/pages/notes"));
 const Profile = lazy(() => import("@/pages/profile"));
 const Settings = lazy(() => import("@/pages/settings"));
 const Tools = lazy(() => import("@/pages/tools"));
+const TrustedIssuer = lazy(() => import("@/pages/trusted-issuer"));
 
 export const Router = () => {
   // Handles what an external login redirects back with:
@@ -46,6 +49,8 @@ export const Router = () => {
             <Route path="notes" element={<Notes />} />
             <Route path="profile" element={<Profile />} />
             <Route path="settings" element={<Settings />} />
+            <Route path="login-providers/:id" element={<LoginProvider />} />
+            <Route path="trusted-issuers/:id" element={<TrustedIssuer />} />
             <Route path="tools" element={<Tools />} />
             <Route path="*" element={<Title order={3}>Page not found</Title>} />
           </Route>
@@ -69,7 +74,7 @@ const RequireAuth = () => {
     );
   }
 
-  if (!loginTokens().jwt() || error) {
+  if (!MoghAuth.LOGIN_TOKENS.jwt() || error) {
     if (location.pathname === "/") {
       return <Navigate to="/login" replace />;
     }

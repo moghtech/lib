@@ -1,8 +1,9 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import {
   expectLoggedInAs,
   logIn,
   logOut,
+  notification,
   signUp,
   uniqueName,
 } from "./helpers";
@@ -69,27 +70,46 @@ test("admin adds a login provider, which users can use to log in", async ({
     .fill(providerName);
   await page.getByRole("dialog").getByRole("button", { name: "Create" }).click();
 
-  // Continues with the full configuration of the new provider.
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("Provider created.")).toBeVisible();
-  await expect(dialog.getByText(/\/auth\/external\/.+\/callback/)).toBeVisible();
-  await dialog.getByRole("textbox", { name: "Provider URL" }).fill(IDP_URL);
-  await dialog.getByRole("textbox", { name: "Client ID" }).fill("example-client-id");
-  await dialog
+  // Continues on the page of the new provider, with its configuration.
+  await expect(page).toHaveURL(/\/login-providers\/[^/]+$/);
+  const providerUrl = page.url();
+  await expect(page.getByText("Provider created.")).toBeVisible();
+  await expect(
+    page.getByText(/\/auth\/external\/.+\/callback/).first(),
+  ).toBeVisible();
+  await page.getByRole("textbox", { name: "Provider URL" }).fill(IDP_URL);
+  await page.getByRole("textbox", { name: "Client ID" }).fill("example-client-id");
+  await page
     .getByRole("textbox", { name: "Client Secret" })
     .fill("example-client-secret");
-  await dialog.getByRole("switch").first().check({ force: true });
-  await dialog.getByRole("button", { name: "Save" }).click();
-  await expect(dialog).toHaveCount(0);
+  await page
+    .getByRole("switch", { name: "Enabled", exact: true })
+    .check({ force: true });
+  await saveConfig(page);
+  await expect(notification(page, "Saved login provider.")).toBeVisible();
 
   // The secret is never sent back to the browser.
-  await page.getByText(providerName, { exact: true }).click();
-  await expect(
-    page.getByRole("dialog").getByRole("textbox", { name: "Client Secret" }),
-  ).toHaveValue("");
+  await page.goto(providerUrl);
+  const secret = page.getByRole("textbox", { name: "Client Secret" });
+  await expect(secret).toHaveValue("");
   await expect(page.locator("body")).not.toContainText("example-client-secret");
+  // Replacing it: the confirm dialog says one is stored (not "None"),
+  // and shows neither value.
+  await secret.fill("another-secret");
+  await page.getByRole("button", { name: "Save", exact: true }).first().click();
+  const confirm = page.getByRole("dialog");
+  await expect(confirm).toContainText("•••••••• -> ••••••••");
+  await expect(confirm).not.toContainText("another-secret");
   await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Reset" }).first().click();
 
+  // A provider's row opens its page from the keyboard too.
+  await page.goto("/settings");
+  await page.getByRole("row", { name: new RegExp(providerName) }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(providerUrl);
+
+  await page.goto("/settings");
   await logOut(page);
   await page.getByRole("button", { name: new RegExp(providerName) }).click();
   await page.getByTestId(`idp-user-${idpUser}-sub`).click();
@@ -110,17 +130,39 @@ test("admin adds a workload identity issuer, a job exchanges its token", async (
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("textbox", { name: "Name", exact: true }).fill(issuerName);
   await dialog.getByRole("textbox", { name: "Issuer", exact: true }).fill(IDP_URL);
-  const audiences = dialog.getByPlaceholder(/audience/i).first();
-  await audiences.fill(audience);
-  await audiences.press("Enter");
+  // One audience: the app's origin by default, replaced by this test's.
+  await dialog.getByRole("textbox", { name: "Audience" }).fill(audience);
+  await dialog.getByRole("button", { name: "Create" }).click();
 
-  await dialog.getByRole("button", { name: /Add Rule/i }).click();
-  await dialog.getByRole("textbox", { name: "Rule Name" }).fill("Deploy");
-  await dialog.getByPlaceholder(/claim/i).first().fill("repository_id");
-  await dialog.getByPlaceholder(/pattern|value/i).first().fill("12345");
-  await dialog.getByRole("button", { name: /Save|Create/ }).click();
-  await expect(dialog).toHaveCount(0);
-  await expect(page.getByRole("row", { name: new RegExp(issuerName) })).toBeVisible();
+  // Created disabled, without rules: the page continues with them.
+  await expect(page).toHaveURL(/\/trusted-issuers\/[^/]+$/);
+  const issuerUrl = page.url();
+
+  await page
+    .getByRole("switch", { name: "Enabled", exact: true })
+    .check({ force: true });
+  await page.getByRole("button", { name: "Add rule" }).click();
+  await page.getByRole("textbox", { name: "Rule Name" }).fill("Deploy");
+  await page.getByRole("textbox", { name: "Claim", exact: true }).fill("repository_id");
+  await page.getByRole("textbox", { name: "Claim Value" }).fill("12345");
+  await saveConfig(page);
+  await expect(notification(page, "Saved trusted issuer.")).toBeVisible();
+
+  // An emptied number is refused, not saved as 0 (no age limit).
+  await page.goto(issuerUrl);
+  const maxAge = page.getByRole("textbox", { name: "Maximum Token Age" });
+  await expect(maxAge).toHaveValue("300 seconds");
+  await maxAge.fill("");
+  await saveConfig(page);
+  await expect(
+    notification(page, "Maximum token age: must be a whole number of seconds"),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.goto("/settings");
+  await expect(
+    page.getByRole("row", { name: new RegExp(issuerName) }),
+  ).toContainText("Enabled");
 
   // The job gets a token from its platform (the mock idp) ...
   const minted = await request.post(`${IDP_URL}/control/mint`, {
@@ -153,3 +195,12 @@ test("admin adds a workload identity issuer, a job exchanges its token", async (
     page.getByTestId("user-row-workload-deploy").first(),
   ).toContainText("Workload");
 });
+
+/** Saves a page's Config: its Save button, then the confirm dialog's. */
+async function saveConfig(page: Page) {
+  await page.getByRole("button", { name: "Save", exact: true }).first().click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Save", exact: true })
+    .click();
+}

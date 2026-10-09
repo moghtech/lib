@@ -33,13 +33,9 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
 /// The key the provider publishes.
-const KEY_A: &str = include_str!(
-  "../../../auth/server/src/provider/test_keys/rsa_a.pem"
-);
+const KEY_A: &str = include_str!("../../../auth/test_keys/rsa_a.pem");
 /// A key the provider doesn't publish, to test rejected signatures.
-const KEY_B: &str = include_str!(
-  "../../../auth/server/src/provider/test_keys/rsa_b.pem"
-);
+const KEY_B: &str = include_str!("../../../auth/test_keys/rsa_b.pem");
 const KEY_ID: &str = "test-key";
 
 pub const DEFAULT_CLIENT_ID: &str = "example-client-id";

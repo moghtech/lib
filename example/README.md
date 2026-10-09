@@ -55,16 +55,25 @@ EXAMPLE_OIDC_CLIENT_SECRET=example-client-secret \
 
 The first user to sign up is the admin. Everything in `CoreConfig`
 (`server/src/config.rs`) can be set in a config file (`EXAMPLE_CONFIG_PATHS`,
-toml / yaml / json) or with `EXAMPLE_*` environment variables, which win.
-Secrets also take a `_FILE` variant, eg. `EXAMPLE_JWT_SECRET_FILE`.
+toml / yaml / json) or with `EXAMPLE_*` environment variables, which win: one
+per field, named after its path (`EXAMPLE_PORT`, `EXAMPLE_OIDC_CLIENT_ID` for
+`oidc.client_id`, `EXAMPLE_LOGGING_LEVEL`), each also taking a file with a
+`_FILE` variant, eg. `EXAMPLE_JWT_SECRET_FILE`. A blank variable counts as
+unset (`mogh_config::EnvSource`, which `server/src/config.rs` builds with
+`fields_of`: a field added to `CoreConfig` gets its variable). A
+`jwt_secret` must be at least 32 random bytes (`openssl rand -base64 48`), the
+server refuses to start with a shorter one (`[FATAL] Invalid 'jwt_secret'`);
+without one it uses a random secret, which logs everybody out on restart.
 
 To see the supporter badge, paste the key of `mogh_supporter::fixture`
 (`supporter/rs/src/fixture.rs`) into the settings page as the admin, or
 set it as `EXAMPLE_SUPPORTER_KEY`. The key is an organization's, so the
 settings then also offer its branding: an icon (eg. `/mogh-512x512.png`,
 or an uploaded image), its size, hiding the name next to it, and showing
-it in place of the "Mogh Example" home button. The UI compares the key against the date of
-its build (`EXAMPLE_RELEASE_DATE` at build time, else the current date).
+it in place of the "Mogh Example" home button. The UI compares the key
+with its release date, the `releaseDate` of `ui/package.json`
+(`vite.config.ts` reads it with `mogh_supporter/vite`): a production
+build fails without one, the dev server falls back to today.
 
 UI, either with the dev server against the running api:
 
@@ -141,11 +150,15 @@ database in `ui/.e2e`) by itself. Covered: local signup / login, the react-query
 read / write / execute hooks (notes, tools), api keys, logging in again for
 credential changes, TOTP (retry, recovery code, cancel), passkeys with the virtual authenticator of the browser, OIDC login
 / linking / second factor through the provider's pages, the admin settings
-(`LoginProvidersTable`, `TrustedIssuersTable`, users), and the supporter key
+(`LoginProvidersTable`, `TrustedIssuersTable`, users) and the provider / issuer
+pages they lead to (`/login-providers/:id`, `/trusted-issuers/:id`: mogh_ui's
+`LoginProviderPage` / `TrustedIssuerPage`, as Komodo and Cicada mount them),
+and the supporter key
 (set and removed in the settings, the badge following without a reload; not
-shown for an answer changed on the way or signed for another nonce; an
-organization's branding: icon url and upload, size, the icon alone without
-the name, and the home button).
+shown for an answer changed on the way or signed for another nonce; verified
+in JavaScript on a page without WebCrypto, as over plain http from another
+host, or whose WebCrypto lacks Ed25519; an organization's branding: icon url
+and upload, size, the icon alone without the name, and the home button).
 
 ## Adding to it
 

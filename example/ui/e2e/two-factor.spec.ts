@@ -103,28 +103,54 @@ test("passkey: enroll and log in with a virtual authenticator", async ({
   // answers webauthn requests without any user interaction.
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      transport: "internal",
-      hasResidentKey: true,
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
+  const { authenticatorId } = await cdp.send(
+    "WebAuthn.addVirtualAuthenticator",
+    {
+      options: {
+        protocol: "ctap2",
+        transport: "internal",
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true,
+      },
     },
-  });
+  );
 
   const username = uniqueName("passkey");
   await signUp(page, username);
   await page.goto("/profile");
-  await page.getByRole("button", { name: "Enroll Passkey 2FA" }).click();
+  // A double click begins one enrollment: a second begin would replace
+  // the first one's challenge, and its passkey would fail to confirm.
+  await page.getByRole("button", { name: "Enroll Passkey 2FA" }).dblclick();
   await expect(
     page.getByRole("button", { name: "Unenroll Passkey 2FA" }),
   ).toBeVisible();
+  await expect(notification(page, /failed/i)).toHaveCount(0);
+  const { credentials } = await cdp.send("WebAuthn.getCredentials", {
+    authenticatorId,
+  });
+  expect(credentials).toHaveLength(1);
 
   await logOut(page);
   await logIn(page, username);
   // The password asks for the passkey, which the authenticator provides.
+  await expectLoggedInAs(page, username);
+
+  // A prompt which failed (here: no user verification) can be tried
+  // again, without starting the login over.
+  await logOut(page);
+  await cdp.send("WebAuthn.setUserVerified", {
+    authenticatorId,
+    isUserVerified: false,
+  });
+  await logIn(page, username);
+  await expect(notification(page, "Failed to select passkey")).toBeVisible();
+  await cdp.send("WebAuthn.setUserVerified", {
+    authenticatorId,
+    isUserVerified: true,
+  });
+  await page.getByRole("button", { name: "Try Again" }).click();
   await expectLoggedInAs(page, username);
 
   // Without the authenticator the password isn't enough.

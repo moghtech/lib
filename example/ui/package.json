@@ -2,6 +2,7 @@
   "name": "example_ui",
   "private": true,
   "version": "0.1.0",
+  "releaseDate": "2026-10-09",
   "type": "module",
   "scripts": {
     "dev": "vite --host",
@@ -11,20 +12,21 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@mantine/core": "^9.6.2",
-    "@mantine/form": "^9.6.2",
-    "@mantine/hooks": "^9.6.2",
-    "@mantine/notifications": "^9.6.2",
+    "@mantine/core": "^9.7.1",
+    "@mantine/form": "^9.7.1",
+    "@mantine/hooks": "^9.7.1",
+    "@mantine/notifications": "^9.7.1",
     "@monaco-editor/react": "^4.7.0",
-    "@tanstack/react-query": "^5.103.2",
-    "@tanstack/react-table": "^9.2.4",
+    "@tanstack/react-query": "^5.104.1",
+    "@tanstack/react-table": "^9.2.6",
     "example_client": "file:../client/ts",
-    "lucide-react": "^1.47.0",
+    "lucide-react": "^1.53.0",
     "mogh_auth_client": "file:../../auth/client/ts",
     "mogh_supporter": "file:../../supporter/ts",
     "mogh_ui": "file:../../ui",
-    "monaco-editor": "^0.56.0",
+    "monaco-editor": "^0.57.0",
     "monaco-yaml": "^5.5.1",
+    "prettier": "^3.9.9",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-router-dom": "^7.18.4"
@@ -39,7 +41,7 @@
     "postcss": "^8.5.28",
     "postcss-preset-mantine": "^1.18.0",
     "postcss-simple-vars": "^7.0.1",
-    "sass-embedded": "^1.104.0",
+    "sass-embedded": "^1.105.1",
     "typescript": "^7.0.2",
     "vite": "^8.2.2"
   }

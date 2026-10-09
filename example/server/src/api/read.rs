@@ -6,21 +6,23 @@ use axum::{
 };
 use example_client::api::read::*;
 use mogh_auth_server::middleware::authenticate_request;
-use mogh_error::{AddStatusCode as _, AddStatusCodeError as _, Json};
+use mogh_error::{
+  AddStatusCode as _, AddStatusCodeError as _, Json, Variant,
+  variant_request,
+};
 use mogh_request_ip::RequestIp;
 use mogh_resolver::Resolve;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use strum::{Display, EnumDiscriminants};
 use tracing::debug;
 use typeshare::typeshare;
 
 use crate::{
-  api::{Variant, admin_only},
+  api::admin_only,
   auth::{ExampleAuthImpl, RequestUser},
   config::core_config,
   db,
-  state::{STATS_VALID_FOR_MS, stats_cache},
+  state::stats_cache,
 };
 
 pub struct ReadArgs {
@@ -69,11 +71,7 @@ async fn variant_handler(
   Path(Variant { variant }): Path<Variant>,
   Json(params): Json<serde_json::Value>,
 ) -> mogh_error::Result<axum::response::Response> {
-  let req: ReadRequest = serde_json::from_value(json!({
-    "type": variant,
-    "params": params,
-  }))
-  .status_code(StatusCode::BAD_REQUEST)?;
+  let req: ReadRequest = variant_request(&variant, params)?;
   handler(user, ip, Json(req)).await
 }
 
@@ -136,10 +134,10 @@ impl Resolve<ReadArgs> for GetStats {
     // Concurrent / rapid requests share one count of the tables.
     let lock = stats_cache().get_lock(()).await;
     let mut entry = lock.lock().await;
-    let now = db::unix_timestamp_ms();
-    if entry.last_ts + STATS_VALID_FOR_MS > now {
-      return entry.clone_res().map_err(Into::into);
+    if let Some(res) = entry.fresh_res() {
+      return res.map_err(Into::into);
     }
+    let now = db::unix_timestamp_ms();
     let res = db::counts().await.map(|(users, notes, api_keys)| {
       GetStatsResponse {
         users,
@@ -148,7 +146,7 @@ impl Resolve<ReadArgs> for GetStats {
         computed_at: now,
       }
     });
-    entry.set(&res, now);
+    entry.set(&res);
     res.map_err(Into::into)
   }
 }

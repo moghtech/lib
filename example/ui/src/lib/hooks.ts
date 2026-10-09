@@ -1,3 +1,4 @@
+import { handleReauthenticationRequired } from "mogh_ui";
 import { EXAMPLE_BASE_URL } from "@/main";
 import {
   useMutation,
@@ -15,48 +16,51 @@ import {
   type WriteResponses,
 } from "example_client";
 import { notifications } from "@mantine/notifications";
-
-/**
- * The login tokens kept in the browser (`localStorage`).
- * The auth client leaves them unset where that is unavailable.
- */
-export function loginTokens() {
-  const tokens = MoghAuth.LOGIN_TOKENS;
-  if (!tokens) {
-    throw new Error(
-      "MoghAuth.LOGIN_TOKENS is unset: localStorage is unavailable.",
-    );
-  }
-  return tokens;
-}
+import { useSyncExternalStore } from "react";
 
 /** A fresh client per call, so it always uses the current token. */
 export function example_client() {
   return ExampleClient(EXAMPLE_BASE_URL, {
     type: "jwt",
-    params: { jwt: loginTokens().jwt() },
+    params: { jwt: MoghAuth.LOGIN_TOKENS.jwt() },
   });
 }
 
-// A token the server already rejected isn't sent again:
-// every rejected request counts against the auth rate limit.
-let rejectedJwt: string | undefined;
-
+/**
+ * The signed in user. A token the server refused isn't sent again:
+ * every refused request counts against the auth rate limit. The
+ * refusal is noted in the login tokens store (`LOGIN_TOKENS.refuse`),
+ * which mogh_ui's auth and supporter queries read too, so they stop
+ * sending the token as well (and the reverse).
+ */
 export function useUser() {
-  const jwt = loginTokens().jwt();
+  const jwt = useSyncExternalStore(
+    MoghAuth.LOGIN_TOKENS.subscribe,
+    MoghAuth.LOGIN_TOKENS.sendableJwt,
+  );
   return useQuery({
     queryKey: ["GetUser"],
     queryFn: async () => {
+      // The token actually sent, which is the one to latch.
+      const sent = MoghAuth.LOGIN_TOKENS.sendableJwt();
       try {
-        return await example_client().getUser();
+        return await ExampleClient(EXAMPLE_BASE_URL, {
+          type: "jwt",
+          params: { jwt: sent },
+        }).getUser();
       } catch (e) {
+        // The example client marks no answer as the server's own
+        // (`RequestError.server`), which `MoghAuth.isTokenRefusal`
+        // checks: any 401 / 403 is taken for a refusal here.
         const status = (e as { status?: number }).status;
-        if (status === 401 || status === 403) rejectedJwt = jwt;
+        if (sent && (status === 401 || status === 403)) {
+          MoghAuth.LOGIN_TOKENS.refuse(sent);
+        }
         throw e;
       }
     },
     refetchInterval: 30_000,
-    enabled: !!jwt && jwt !== rejectedJwt,
+    enabled: !!jwt,
   });
 }
 
@@ -83,7 +87,7 @@ export function useRead<
     "queryFn" | "queryKey"
   >,
 >(type: T, params: P, config?: C) {
-  const hasJwt = !!loginTokens().jwt();
+  const hasJwt = !!MoghAuth.LOGIN_TOKENS.jwt();
   return useQuery({
     queryKey: [type, params],
     queryFn: () => example_client().read<T, R>(type, params),
@@ -143,7 +147,11 @@ export function useWrite<
     mutationFn: (params: P) => example_client().write<T, R>(type, params),
     // After the spread, so a caller's `onError` extends the notification.
     onError: (e: ApiError, ...args) => {
-      notifyError("Write", type, e);
+      // Some writes are only accepted shortly after logging in: the
+      // user is sent to log in again, not shown a failure.
+      if (!handleReauthenticationRequired(e)) {
+        notifyError("Write", type, e);
+      }
       config?.onError && config.onError(e, ...args);
     },
   });

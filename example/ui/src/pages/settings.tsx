@@ -19,9 +19,10 @@ export default function Settings() {
       <UsersTable ownId={user.id} />
       {/* Manages itself over the supporter api (admin only). */}
       <SupporterKeyConfig />
-      {/* Both manage themselves over the auth api (admin only). */}
-      <LoginProvidersTable />
-      <TrustedIssuersTable groupOptions={["deployers", "readers"]} />
+      {/* Both manage themselves over the auth api (admin only), each
+          provider / issuer on its page. */}
+      <LoginProvidersTable link={(id) => `/login-providers/${id}`} />
+      <TrustedIssuersTable link={(id) => `/trusted-issuers/${id}`} />
     </Page>
   );
 }

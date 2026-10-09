@@ -7,7 +7,11 @@ import type { RootKeys } from "mogh_supporter";
  */
 export const SUPPORTER_APP = "komodo";
 
-/** The `YYYY-MM-DD` of this build (vite.config.ts), never the current date. */
+/**
+ * The release date of this build, never the current date: the
+ * `releaseDate` of package.json, which vite.config.ts defines with
+ * `mogh_supporter/vite`.
+ */
 export const RELEASE_DATE: string = __RELEASE_DATE__;
 
 /**

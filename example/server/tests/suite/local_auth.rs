@@ -230,6 +230,49 @@ async fn registration_disabled_still_allows_the_first_user() {
   assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+/// Sign ups sent at the same time all pass the server's "no users
+/// yet" check, which lets the first user sign up while registration is
+/// disabled. The app decides again as it stores the user: one of them
+/// is the first user (the admin), the others are refused.
+#[tokio::test]
+async fn simultaneous_first_sign_ups_make_one_user() {
+  let app = TestApp::spawn_with(TestAppOptions {
+    config: json!({ "disable_user_registration": true }),
+    ..Default::default()
+  })
+  .await;
+  let mut sign_ups = tokio::task::JoinSet::new();
+  for i in 0..5 {
+    let client = app.client();
+    sign_ups.spawn(async move {
+      client
+        .login(SignUpLocalUser {
+          username: format!("first-{i}"),
+          password: PASSWORD.into(),
+        })
+        .await
+        .map(|res| client.with_auth(ClientAuth::Jwt(res.jwt)))
+    });
+  }
+  let mut users = Vec::new();
+  for res in sign_ups.join_all().await {
+    match res {
+      Ok(client) => users.push(client),
+      Err(e) => {
+        let status = status_of::<()>(Err(e));
+        assert!(
+          [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN]
+            .contains(&status),
+          "{status}"
+        );
+      }
+    }
+  }
+  assert_eq!(users.len(), 1);
+  let user = get_user(&users[0]).await;
+  assert!(user.admin && user.enabled);
+}
+
 #[tokio::test]
 async fn new_users_can_require_an_admin_to_enable_them() {
   let app = TestApp::spawn_with(TestAppOptions {
@@ -535,4 +578,50 @@ async fn concurrent_wrong_passwords_are_bounded_by_the_rate_limit() {
     })
     .await;
   assert_eq!(status_of(res), StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// Changing the password ends the user's other sessions: a token which
+/// leaked stops working once the user changes the password because of
+/// it, on the app's api and the auth api. The session which made the
+/// change goes on.
+#[tokio::test]
+async fn changing_the_password_ends_the_other_sessions() {
+  let app = TestApp::spawn().await;
+  let other = app.sign_up("admin").await;
+  // Tokens carry whole seconds: the other session is from a second
+  // before the change (and so another token than the one making it).
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  let changing = app.log_in("admin").await;
+  assert_eq!(get_user(&other).await.username, "admin");
+
+  changing
+    .manage(UpdatePassword {
+      password: "another-password-1".into(),
+    })
+    .await
+    .unwrap();
+  assert_eq!(
+    status_of(other.read(GetUser {}).await),
+    StatusCode::UNAUTHORIZED
+  );
+  assert_eq!(
+    status_of(other.manage(GetUserId {}).await),
+    StatusCode::UNAUTHORIZED
+  );
+  assert_eq!(get_user(&changing).await.username, "admin");
+
+  // A new login right after the change works.
+  let client = app.client();
+  let res = client
+    .login(LoginLocalUser {
+      username: "admin".into(),
+      password: "another-password-1".into(),
+    })
+    .await
+    .unwrap();
+  let JwtOrTwoFactor::Jwt(jwt) = res else {
+    panic!("Expected a jwt, got {res:?}");
+  };
+  let relogged = client.with_auth(ClientAuth::Jwt(jwt.jwt));
+  assert_eq!(get_user(&relogged).await.username, "admin");
 }

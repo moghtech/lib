@@ -1,3 +1,5 @@
+import { readFileSync } from "fs";
+import path from "path";
 import { expect, test, type Page } from "@playwright/test";
 import {
   expectLoggedInAs,
@@ -16,11 +18,15 @@ test.describe.configure({ mode: "serial" });
 
 /**
  * The key covers releases up to this date, and the ui is built with
- * the date of the build: on a later build the badge rightly stays
- * away, while the settings still show the key.
+ * the release date of its package.json (vite.config.ts), whatever the
+ * day of the build: with a later one the badge rightly stays away,
+ * while the settings still show the key.
  */
 const COVERS = "2027-09-30";
-const covered = new Date().toISOString().slice(0, 10) <= COVERS;
+const RELEASE_DATE: string = JSON.parse(
+  readFileSync(path.join(import.meta.dirname, "../package.json"), "utf8"),
+).releaseDate;
+const covered = RELEASE_DATE <= COVERS;
 
 /** The instance private key: the only secret in the key. */
 const SECRET = SUPPORTER_KEY.replace(/\s/g, "").split(".")[2];
@@ -125,9 +131,7 @@ test("an admin sets the key in the settings, the badge appears", async ({
   await expect(status).toContainText("Acme Corp");
   await expect(status).toContainText("organization");
   await expect(status).toContainText("Stored");
-  await expect(status).toContainText(
-    "Covers the releases published up to 2027-09-30",
-  );
+  await expect(status).toContainText("Covers releases until 2027-09-30.");
   // The key itself never comes back.
   await expect(input).toHaveValue("");
   await expect(page.locator("body")).not.toContainText(SECRET);
@@ -205,6 +209,8 @@ test("an admin gives the badge the organization's icon and size", async ({
   if (covered) {
     const image = page.getByTestId("supporter-badge").locator("img");
     await expect(image).toHaveAttribute("src", "/mogh-512x512.png");
+    // An admin set url on any host learns nothing of the instance.
+    await expect(image).toHaveAttribute("referrerpolicy", "no-referrer");
     await expect(image).toHaveCSS("width", "40px");
     await expect(image).toHaveCSS("height", "24px");
   }
@@ -376,6 +382,90 @@ test("the topbar shows the badge for the stored key", async ({ page }) => {
   await expect(page.getByTestId("welcome")).toBeVisible();
   await expect(badge).toBeVisible();
   expect(requests).toBe(0);
+});
+
+test("a page without WebCrypto verifies the key in JavaScript", async ({
+  page,
+}) => {
+  // A page served over plain http from another host than localhost,
+  // eg. a LAN install reached at http://192.168.1.10:9120, has no
+  // `crypto.subtle` and is no secure context. The suite runs on
+  // localhost, which is one: the page is made one which isn't.
+  await page.addInitScript(() => {
+    Object.defineProperty(Crypto.prototype, "subtle", {
+      get: () => undefined,
+    });
+    Object.defineProperty(globalThis, "isSecureContext", { value: false });
+  });
+  const section = await openSettings(page);
+  expect(
+    await page.evaluate(() => [typeof crypto.subtle, isSecureContext]),
+  ).toEqual(["undefined", false]);
+  const status = section.getByTestId("supporter-key-status");
+  await expect(status).toContainText("Acme Corp");
+  const browserProblem = section.getByTestId("supporter-key-browser-problem");
+  if (!covered) {
+    await expect(page.getByTestId("become-supporter")).toBeVisible();
+    return;
+  }
+  // The badge as on a secure page, and no word of the browser refusing
+  // the key.
+  await expect(page.getByTestId("supporter-badge")).toHaveText("Acme Corp");
+  await expect(browserProblem).toHaveCount(0);
+
+  // It verifies, so it refuses too: an answer changed on the way is no
+  // badge, and the admin reads why next to the server's verdict.
+  await tamperWithTheKey(page);
+  await page.reload();
+  await expect(page.getByTestId("become-supporter")).toBeVisible();
+  await expect(page.getByTestId("supporter-badge")).toHaveCount(0);
+  await expect(browserProblem).toContainText(
+    "The root signature does not verify",
+  );
+});
+
+test("a WebCrypto without Ed25519 leaves the key to JavaScript", async ({
+  page,
+}) => {
+  // Browsers before Chrome 137, Safari 17 and Firefox 130 have
+  // WebCrypto, and refuse Ed25519 keys.
+  await page.addInitScript(() => {
+    const importKey = SubtleCrypto.prototype.importKey;
+    Object.defineProperty(SubtleCrypto.prototype, "importKey", {
+      value(this: SubtleCrypto, ...args: unknown[]) {
+        const algorithm = args[2] as string | { name?: string };
+        const name =
+          typeof algorithm === "string" ? algorithm : algorithm?.name;
+        if (name === "Ed25519") {
+          return Promise.reject(
+            new DOMException(
+              "Algorithm: Unrecognized name",
+              "NotSupportedError",
+            ),
+          );
+        }
+        return Reflect.apply(importKey, this, args);
+      },
+    });
+  });
+  await signUp(page, uniqueName("ed25519less"));
+  expect(
+    await page.evaluate(() =>
+      crypto.subtle
+        .importKey("raw", new Uint8Array(32), { name: "Ed25519" }, false, [
+          "verify",
+        ])
+        .then(
+          () => "imported",
+          (e: DOMException) => e.name,
+        ),
+    ),
+  ).toBe("NotSupportedError");
+  if (!covered) {
+    await expect(page.getByTestId("become-supporter")).toBeVisible();
+    return;
+  }
+  await expect(page.getByTestId("supporter-badge")).toHaveText("Acme Corp");
 });
 
 test("an answer changed on the way shows no badge", async ({ page }) => {

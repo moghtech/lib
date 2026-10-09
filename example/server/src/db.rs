@@ -11,11 +11,13 @@ use example_client::entities::{
   ApiKey, ApiKeyKind, LinkedLogin, Note, NoteListItem, User,
   WorkloadLink,
 };
-use mogh_auth_client::{
-  config::{ExternalLoginProvider, TrustedIssuer},
-  passkey::Passkey,
+use mogh_auth_client::config::{
+  ExternalLoginProvider, TrustedIssuer,
 };
-use mogh_auth_server::provider::workload::WorkloadAccess;
+use mogh_auth_server::provider::workload::LiveIssuer;
+use mogh_auth_server::{
+  passkey::Passkey, provider::workload::WorkloadAccess,
+};
 use mogh_supporter::SupporterBranding;
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{
@@ -102,6 +104,8 @@ struct UserRow {
   workload_issuer_id: Option<String>,
   workload_rule_id: Option<String>,
   workload_last_subject: String,
+  sessions_valid_after: i64,
+  sessions_kept: String,
   created_at: i64,
   updated_at: i64,
 }
@@ -136,6 +140,12 @@ pub struct DbUser {
   pub linked_logins: Vec<LinkedLogin>,
   /// The groups synced from the linked providers.
   pub provider_groups: Vec<String>,
+  /// The session tokens issued before this (unix seconds) are
+  /// refused, see [UserUpdate::EndSessions].
+  pub sessions_valid_after: i64,
+  /// The SHA-256 (hex) of the session token kept valid when the
+  /// sessions were ended, empty for none.
+  pub sessions_kept: String,
   pub created_at: i64,
   pub updated_at: i64,
 }
@@ -228,6 +238,8 @@ async fn hydrate_user(row: UserRow) -> anyhow::Result<DbUser> {
     workload,
     linked_logins,
     provider_groups,
+    sessions_valid_after: row.sessions_valid_after,
+    sessions_kept: row.sessions_kept,
     created_at: row.created_at,
     updated_at: row.updated_at,
     id: row.id,
@@ -417,6 +429,12 @@ pub enum UserUpdate {
   ExternalSkip2fa(bool),
   CidrWhitelist(Vec<String>),
   WorkloadLastSubject(String),
+  /// Ends the user's session tokens issued before `valid_after` (unix
+  /// seconds), except the one whose SHA-256 (hex) is `kept`.
+  EndSessions {
+    valid_after: i64,
+    kept: String,
+  },
 }
 
 pub async fn update_user(
@@ -527,6 +545,19 @@ pub async fn update_user(
         .execute(db())
         .await
     }
+    UserUpdate::EndSessions { valid_after, kept } => {
+      sqlx::query(
+        "UPDATE users
+         SET sessions_valid_after = ?, sessions_kept = ?, updated_at = ?
+         WHERE id = ?",
+      )
+      .bind(valid_after)
+      .bind(kept)
+      .bind(now)
+      .bind(id)
+      .execute(db())
+      .await
+    }
   }
   .context("Failed to update user")?;
   if res.rows_affected() == 0 {
@@ -596,21 +627,28 @@ pub async fn sync_workload_users(
   tx.commit().await.context("Failed to commit transaction")
 }
 
-/// Removes the workload users of issuers which aren't among
-/// `issuer_ids`, eg. of an issuer removed from the config file.
-pub async fn delete_workload_users_of_other_issuers(
-  issuer_ids: &[String],
+/// Removes the workload users of issuers which aren't `live`, eg. of
+/// an issuer removed from the config file, and of the rules of live
+/// issuers which aren't among their `rule_ids`.
+pub async fn delete_workload_users_except(
+  live: &[LiveIssuer],
 ) -> anyhow::Result<u64> {
   let mut deleted = 0;
-  let users = sqlx::query_as::<_, (String, String)>(
-    "SELECT id, workload_issuer_id FROM users
+  let users = sqlx::query_as::<_, (String, String, Option<String>)>(
+    "SELECT id, workload_issuer_id, workload_rule_id FROM users
      WHERE workload_issuer_id IS NOT NULL",
   )
   .fetch_all(db())
   .await
   .context("Failed to query workload users")?;
-  for (id, issuer_id) in users {
-    if !issuer_ids.contains(&issuer_id) {
+  for (id, issuer_id, rule_id) in users {
+    let is_live = live.iter().any(|issuer| {
+      issuer.issuer_id == issuer_id
+        && rule_id
+          .as_ref()
+          .is_some_and(|rule_id| issuer.rule_ids.contains(rule_id))
+    });
+    if !is_live {
       delete_user(&id).await?;
       deleted += 1;
     }
@@ -698,13 +736,6 @@ pub struct DbApiKey {
   pub api_key: ApiKey,
   /// bcrypt hash (api keys only, empty for signing keys).
   pub hashed_secret: String,
-}
-
-impl DbApiKey {
-  pub fn expired(&self) -> bool {
-    self.api_key.expires != 0
-      && self.api_key.expires <= unix_timestamp_ms()
-  }
 }
 
 impl TryFrom<ApiKeyRow> for DbApiKey {

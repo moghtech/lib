@@ -3,10 +3,8 @@ import {
   Badge,
   Button,
   Code,
-  Fieldset,
   Group,
   Modal,
-  PasswordInput,
   SegmentedControl,
   Stack,
   Table,
@@ -16,11 +14,8 @@ import {
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import {
+  AuthProfileSections,
   CopyButton,
-  EnableSwitch,
-  EnrollPasskey,
-  EnrollTotp,
-  LinkedLogins,
   Page,
   Section,
   useManageAuth,
@@ -39,44 +34,22 @@ import {
 export default function Profile() {
   const user = useUser().data;
   const refetchUser = useUserInvalidate();
-  const { mutate: updateExternalSkip2fa } = useManageAuth(
-    "UpdateExternalSkip2fa",
-    { onSuccess: refetchUser },
-  );
   if (!user) return null;
   return (
     <Page title="Profile" icon={User}>
-      <Credentials username={user.username} refetchUser={refetchUser} />
-
-      <LinkedLogins
+      {/* Login, linked providers and 2FA: mogh_ui's, as in Komodo and
+          Cicada. */}
+      <AuthProfileSections
+        user={{
+          username: user.username,
+          passwordSet: user.has_password,
+          totpEnrolled: user.totp_enrolled,
+          passkeyEnrolled: user.passkey_enrolled,
+          externalSkip2fa: user.external_skip_2fa,
+          linkedLogins: user.linked_logins,
+        }}
         refetchUser={refetchUser}
-        passwordSet={user.has_password}
-        linkedLogins={user.linked_logins}
       />
-
-      <Fieldset legend={<Text size="lg">2FA</Text>}>
-        <Group>
-          <EnrollPasskey
-            userInvalidate={refetchUser}
-            passkeyEnrolled={user.passkey_enrolled}
-            totpEnrolled={user.totp_enrolled}
-          />
-          <EnrollTotp
-            userInvalidate={refetchUser}
-            passkeyEnrolled={user.passkey_enrolled}
-            totpEnrolled={user.totp_enrolled}
-          />
-          {(user.totp_enrolled || user.passkey_enrolled) && (
-            <EnableSwitch
-              label="Skip 2FA for external logins"
-              checked={user.external_skip_2fa}
-              onCheckedChange={(external_skip_2fa) =>
-                updateExternalSkip2fa({ external_skip_2fa })
-              }
-            />
-          )}
-        </Group>
-      </Fieldset>
 
       <ApiKeys />
 
@@ -86,63 +59,6 @@ export default function Profile() {
         refetchUser={refetchUser}
       />
     </Page>
-  );
-}
-
-function Credentials({
-  username: current,
-  refetchUser,
-}: {
-  username: string;
-  refetchUser: () => void;
-}) {
-  const [username, setUsername] = useState(current);
-  const [password, setPassword] = useState("");
-  const { mutate: updateUsername } = useManageAuth("UpdateUsername", {
-    onSuccess: () => {
-      notifications.show({ message: "Username updated.", color: "green" });
-      refetchUser();
-    },
-  });
-  const { mutate: updatePassword } = useManageAuth("UpdatePassword", {
-    onSuccess: () => {
-      notifications.show({ message: "Password updated.", color: "green" });
-      setPassword("");
-      refetchUser();
-    },
-  });
-  return (
-    <Section title="Credentials" titleFz="h3" withBorder>
-      <Group align="end">
-        <TextInput
-          label="Username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-        />
-        <Button
-          variant="default"
-          disabled={!username || username === current}
-          onClick={() => updateUsername({ username })}
-        >
-          Update Username
-        </Button>
-      </Group>
-      <Group align="end">
-        <PasswordInput
-          label="New Password"
-          w={250}
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-        <Button
-          variant="default"
-          disabled={!password}
-          onClick={() => updatePassword({ password })}
-        >
-          Update Password
-        </Button>
-      </Group>
-    </Section>
   );
 }
 

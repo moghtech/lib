@@ -3,19 +3,23 @@ use axum::{
   Extension, Router, extract::Path, http::StatusCode, routing::post,
 };
 use example_client::api::execute::*;
-use mogh_auth_server::middleware::authenticate_request;
-use mogh_error::{AddStatusCode as _, Json};
+use mogh_auth_server::{
+  middleware::authenticate_request,
+  validations::validate_public_http_url,
+};
+use mogh_error::{
+  AddStatusCode as _, Json, Variant, variant_request,
+};
 use mogh_pki::{EncodedKeyPair, PkiKind};
 use mogh_resolver::Resolve;
 use mogh_validations::{StringValidator, StringValidatorMatches};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use strum::{Display, EnumDiscriminants};
 use tracing::{debug, info};
 use typeshare::typeshare;
 
 use crate::{
-  api::{Variant, write::validate_note_title},
+  api::write::validate_note_title,
   auth::{ExampleAuthImpl, RequestUser},
   crypto,
 };
@@ -55,11 +59,7 @@ async fn variant_handler(
   Path(Variant { variant }): Path<Variant>,
   Json(params): Json<serde_json::Value>,
 ) -> mogh_error::Result<axum::response::Response> {
-  let req: ExecuteRequest = serde_json::from_value(json!({
-    "type": variant,
-    "params": params,
-  }))
-  .status_code(StatusCode::BAD_REQUEST)?;
+  let req: ExecuteRequest = variant_request(&variant, params)?;
   handler(user, Json(req)).await
 }
 
@@ -144,11 +144,13 @@ impl Resolve<ExecuteArgs> for ValidateString {
         .max_length(100)
         .matches(StringValidatorMatches::VariableName)
         .validate(&self.input),
+      // The auth server's rule for the urls it calls (issuers,
+      // JWKS), which also refuses credentials in the url.
       ValidateStringKind::HttpUrl => StringValidator::default()
         .min_length(1)
         .max_length(2000)
-        .matches(StringValidatorMatches::HttpUrl)
-        .validate(&self.input),
+        .validate(&self.input)
+        .and_then(|_| validate_public_http_url("input", &self.input)),
       ValidateStringKind::NoteTitle => {
         validate_note_title(&self.input)
       }

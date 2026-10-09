@@ -65,11 +65,14 @@ export default defineConfig({
         EXAMPLE_PORT: String(APP_PORT),
         EXAMPLE_BIND_IP: "127.0.0.1",
         EXAMPLE_DATABASE_PATH: path.join(DATA, "example.db"),
-        EXAMPLE_JWT_SECRET: "e2e-jwt-secret",
+        // 32 bytes at least, or the server refuses to start.
+        EXAMPLE_JWT_SECRET: "e2e-jwt-secret-of-the-playwright-suite",
         EXAMPLE_UI_PATH: path.resolve(import.meta.dirname, "dist"),
         EXAMPLE_BCRYPT_COST: "4",
         // The tests fail logins on purpose, all from one ip.
         EXAMPLE_AUTH_RATE_LIMIT_MAX_ATTEMPTS: "1000",
+        // And start every external login from it.
+        EXAMPLE_AUTH_LOGIN_START_LIMIT: "1000",
         // Short, so a test can wait for a login to stop being recent.
         // Every test logs in at its start and is done long before.
         EXAMPLE_REAUTHENTICATION_WINDOW_SECONDS: "15",

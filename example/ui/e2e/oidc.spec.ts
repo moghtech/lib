@@ -87,7 +87,9 @@ test("denying the login at the provider", async ({ page }) => {
   await page.getByTestId("idp-deny").click();
   // Back at the login page with the reason, not on a page of JSON.
   await expect(page).toHaveURL(/\/login$/);
-  await expect(notification(page, /access_denied/)).toBeVisible();
+  await expect(
+    notification(page, /Login was denied at the provider/),
+  ).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Username" })).toBeVisible();
 });
 

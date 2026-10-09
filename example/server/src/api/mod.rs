@@ -16,11 +16,6 @@ mod execute;
 mod read;
 mod write;
 
-#[derive(serde::Deserialize)]
-struct Variant {
-  variant: String,
-}
-
 pub fn app() -> Router {
   let config = core_config();
   let mut app = Router::new()

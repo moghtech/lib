@@ -8,6 +8,7 @@ use mogh_auth_client::config::{
   ExternalLoginProvider, TrustedIssuer,
 };
 use mogh_auth_server::{
+  login_start::LoginStartLimiter,
   provider::{jwt::JwtProvider, passkey::PasskeyProvider},
   rand::random_string,
 };
@@ -19,9 +20,13 @@ use crate::config::core_config;
 
 pub const APP_NAME: &str = "MoghExample";
 
-pub fn jwt_provider() -> &'static JwtProvider {
-  static JWT_PROVIDER: OnceLock<JwtProvider> = OnceLock::new();
-  JWT_PROVIDER.get_or_init(|| {
+/// The provider of the app tokens, built from `jwt_secret` with
+/// `JwtProvider::try_new`: a configured secret under 32 bytes is
+/// refused, and the example doesn't start ([check_jwt_provider]).
+/// Anyone who knows the secret, or guesses it offline from any token
+/// they got, can issue tokens for any user.
+static JWT_PROVIDER: LazyLock<anyhow::Result<JwtProvider>> =
+  LazyLock::new(|| {
     let config = core_config();
     let secret = if config.jwt_secret.is_empty() {
       warn!(
@@ -31,14 +36,34 @@ pub fn jwt_provider() -> &'static JwtProvider {
     } else {
       config.jwt_secret.clone()
     };
-    JwtProvider::new(
-      secret.as_bytes(),
-      config.jwt_ttl_seconds as u128 * 1000,
+    Ok(
+      JwtProvider::try_new(
+        secret.as_bytes(),
+        config.jwt_ttl_seconds as u128 * 1000,
+      )?
+      // Tokens of another app sharing the secret are not accepted.
+      .with_iss(config.host.clone())
+      .with_aud(APP_NAME),
     )
-    // Tokens of another app sharing the secret are not accepted.
-    .with_iss(config.host.clone())
-    .with_aud(APP_NAME)
-  })
+  });
+
+/// Refuses a configured `jwt_secret` under 32 bytes, so the example
+/// stops at startup, before anything issues or checks a token: built
+/// on the first request needing it, the refusal would only show once
+/// the app serves. The error names the minimum and the length, never
+/// the secret.
+pub fn check_jwt_provider() -> anyhow::Result<()> {
+  match JWT_PROVIDER.as_ref() {
+    Ok(_) => Ok(()),
+    Err(e) => Err(anyhow::anyhow!("{e:#}")),
+  }
+}
+
+/// Checked at startup ([check_jwt_provider]), before any request.
+pub fn jwt_provider() -> &'static JwtProvider {
+  JWT_PROVIDER
+    .as_ref()
+    .expect("The jwt provider is checked at startup")
 }
 
 pub fn passkey_provider() -> Option<&'static PasskeyProvider> {
@@ -73,6 +98,30 @@ pub fn general_rate_limiter() -> &'static RateLimiter {
 pub fn local_login_rate_limiter() -> &'static RateLimiter {
   static LIMITER: OnceLock<Arc<RateLimiter>> = OnceLock::new();
   LIMITER.get_or_init(rate_limiter)
+}
+
+/// External login starts per client ip, and login sessions begun per
+/// user. Off along with the rate limiter, like Komodo's.
+pub fn login_start_limiter() -> &'static LoginStartLimiter {
+  static LIMITER: OnceLock<LoginStartLimiter> = OnceLock::new();
+  LIMITER.get_or_init(|| {
+    let config = core_config();
+    let limit = if config.auth_rate_limit_disabled {
+      0
+    } else {
+      config.auth_login_start_limit
+    };
+    let user_limit = if limit == 0 {
+      0
+    } else {
+      LoginStartLimiter::DEFAULT_USER_LIMIT
+    };
+    LoginStartLimiter::new(
+      limit,
+      user_limit,
+      Duration::from_secs(config.auth_login_start_window_seconds),
+    )
+  })
 }
 
 /// A value loaded from the database, kept in memory until it changes.
@@ -154,10 +203,10 @@ pub fn trusted_issuers_cache()
 pub const SUPPORTER_APP: &str = "komodo";
 
 /// How long [GetStatsResponse] is reused for.
-pub const STATS_VALID_FOR_MS: i64 = 2_000;
+pub const STATS_VALID_FOR: Duration = Duration::from_secs(2);
 
 pub fn stats_cache() -> &'static TimeoutCache<(), GetStatsResponse> {
   static CACHE: OnceLock<TimeoutCache<(), GetStatsResponse>> =
     OnceLock::new();
-  CACHE.get_or_init(Default::default)
+  CACHE.get_or_init(|| TimeoutCache::new(STATS_VALID_FOR))
 }

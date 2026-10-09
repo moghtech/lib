@@ -21,7 +21,7 @@ mogh_cache.workspace = true
 mogh_config.workspace = true
 mogh_encryption.workspace = true
 mogh_error = { workspace = true, features = ["axum"] }
-mogh_logger.workspace = true
+mogh_logger = { workspace = true, features = ["init"] }
 mogh_pki.workspace = true
 mogh_rate_limit.workspace = true
 mogh_request_ip.workspace = true
@@ -41,6 +41,7 @@ serde.workspace = true
 strum.workspace = true
 axum.workspace = true
 uuid.workspace = true
+sha2.workspace = true
 envy = "0.4.2"
 
 [dev-dependencies]

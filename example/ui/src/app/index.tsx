@@ -1,15 +1,8 @@
-import {
-  AppShell,
-  Button,
-  Group,
-  NavLink,
-  Text,
-  Title,
-} from "@mantine/core";
+import { AppShell, Button, Group, NavLink, Text } from "@mantine/core";
 import {
   LoadingScreen,
   SupporterBadge,
-  SupporterBrandIcon,
+  SupporterHomeButton,
   ThemeToggle,
   useSupporterBrand,
 } from "mogh_ui";
@@ -23,7 +16,8 @@ import {
 } from "lucide-react";
 import { Suspense } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { loginTokens, useUser, useUserInvalidate } from "@/lib/hooks";
+import { MoghAuth } from "example_client";
+import { useUser, useUserInvalidate } from "@/lib/hooks";
 import {
   RELEASE_DATE,
   SUPPORTER_APP,
@@ -50,43 +44,25 @@ export default function App() {
     releaseDate: RELEASE_DATE,
     rootKeys: SUPPORTER_ROOT_KEYS,
   });
-  const homeIcon = homeBrand?.icon ? (
-    <SupporterBrandIcon brand={homeBrand} />
-  ) : undefined;
-  // An icon which includes the name shows alone.
-  const homeNameHidden = !!homeBrand?.hideName;
   return (
-    <AppShell header={{ height: 62 }} navbar={{ width: 220, breakpoint: 0 }} padding="lg">
+    <AppShell
+      header={{ height: 62 }}
+      navbar={{ width: 220, breakpoint: 0 }}
+      padding="lg"
+    >
       <AppShell.Header>
         <Group h="100%" px="lg" justify="space-between" wrap="nowrap">
           {/* The home button, and next to it the supporter badge, or
               the offer to become one. */}
           <Group gap="xs" wrap="nowrap" miw={0}>
-            <Button
-              component={Link}
-              to="/"
-              variant="subtle"
-              color="gray"
-              px="xs"
-              h="auto"
-              py={4}
-              leftSection={homeNameHidden ? undefined : homeIcon}
-              aria-label={homeNameHidden ? homeBrand?.name : undefined}
-              title={homeNameHidden ? homeBrand?.name : undefined}
+            {/* mogh_ui's, as in Komodo and Cicada: one variant here, the
+                topbar has room for it at every width the suites use. */}
+            <SupporterHomeButton
+              brand={homeBrand}
+              wordmark="Mogh Example"
+              logo={<img src="/mogh-512x512.png" width={32} alt="" />}
               data-testid="home-button"
-            >
-              {homeNameHidden ? (
-                homeIcon
-              ) : (
-                <Title
-                  order={3}
-                  // In capitals when an organization's branding says so.
-                  tt={homeBrand?.uppercaseName ? "uppercase" : undefined}
-                >
-                  {homeBrand?.name ?? "Mogh Example"}
-                </Title>
-              )}
-            </Button>
+            />
             <SupporterBadge
               supporter={supporter}
               branding={branding}
@@ -101,8 +77,7 @@ export default function App() {
               variant="default"
               leftSection={<LogOut size="1rem" />}
               onClick={() => {
-                const tokens = loginTokens();
-                if (user) tokens.remove(user.id);
+                if (user) MoghAuth.LOGIN_TOKENS.remove(user.id);
                 userInvalidate();
                 location.replace("/login");
               }}

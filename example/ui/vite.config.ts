@@ -1,18 +1,19 @@
 import path from "path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { releaseDate } from "mogh_supporter/vite";
+import packageJson from "./package.json";
 
 // https://vitejs.dev/config/
-// The `YYYY-MM-DD` of this build, for the supporter badge: a key covers
-// the releases published up to a date, compared against the build,
-// never the clock. A release process sets EXAMPLE_RELEASE_DATE.
-const RELEASE_DATE =
-  process.env.EXAMPLE_RELEASE_DATE ?? new Date().toISOString().slice(0, 10);
-
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
   define: {
-    __RELEASE_DATE__: JSON.stringify(RELEASE_DATE),
+    // The release date the supporter badge compares keys with, never
+    // the clock: a key covers the releases published up to a date. It
+    // is the `releaseDate` of package.json, bumped with the version, so
+    // a rebuild keeps it. A production build fails without one, the dev
+    // server falls back to today.
+    __RELEASE_DATE__: JSON.stringify(releaseDate({ mode, packageJson })),
   },
   server: {
     port: 9222,
@@ -66,4 +67,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

@@ -23,12 +23,10 @@ async fn app() -> anyhow::Result<()> {
     ));
   }
 
-  // The client ip drives the auth rate limiter and the cidr whitelists,
-  // so an invalid list is a startup error rather than a silent fallback.
-  let trusted_proxies =
-    mogh_server::TrustedProxies::from_config(&config.trusted_proxies)
-      .context("Invalid 'trusted_proxies' config")?;
-  info!("Trusted Proxies: {trusted_proxies:?}");
+  // A 'jwt_secret' under 32 bytes stops the example here, rather
+  // than at the first request issuing or checking a token.
+  state::check_jwt_provider()
+    .context("[FATAL] Invalid 'jwt_secret'")?;
 
   // A request signed with a signing key is made for one of these
   // hosts: an address without one is a startup error, rather than
@@ -58,7 +56,7 @@ async fn app() -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
   let config = core_config();
-  mogh_logger::init(&config.logging)?;
+  mogh_logger::init(config.logging.with_app(config::LOG_APP))?;
 
   let mut term_signal = tokio::signal::unix::signal(
     tokio::signal::unix::SignalKind::terminate(),

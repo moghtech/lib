@@ -43,23 +43,30 @@ export function notification(page: Page, text: string | RegExp) {
 export async function enrollTotp(page: Page) {
   await page.goto("/profile");
   await page.getByRole("button", { name: "Enroll TOTP 2FA" }).click();
-  const uriInput = page.locator('input[value^="otpauth://"]');
-  await expect(uriInput).toBeVisible();
+  const dialog = page.getByRole("dialog");
+  // Read only, not disabled: selectable where the clipboard can't be
+  // written.
+  const uriInput = dialog.getByRole("textbox", { name: "URI" });
+  await expect(uriInput).toHaveValue(/^otpauth:\/\//);
+  await expect(uriInput).not.toBeEditable();
   const totp = OTPAuth.URI.parse(await uriInput.inputValue()) as OTPAuth.TOTP;
-  await page
-    .getByRole("dialog")
-    .locator("input:not([disabled])")
+  await dialog
+    .getByRole("textbox", { name: "Confirm Code" })
     .fill(totp.generate());
-  await page.getByRole("button", { name: "Confirm" }).click();
+  await page.getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByText("Save recovery keys")).toBeVisible();
-  const recoveryCodes = await page
-    .getByRole("dialog")
-    .locator("input[disabled]")
-    .evaluateAll((inputs) =>
-      inputs.map((input) => (input as HTMLInputElement).value),
-    );
+  const codes = dialog.getByRole("textbox", { name: /^Code \d+$/ });
+  await expect(codes.first()).not.toBeEditable();
+  const recoveryCodes = await codes.evaluateAll((inputs) =>
+    inputs.map((input) => (input as HTMLInputElement).value),
+  );
   expect(recoveryCodes).toHaveLength(10);
+  // Held open while the codes show: Escape doesn't lose them.
   await page.keyboard.press("Escape");
+  await expect(codes.first()).toBeVisible();
+  // Done asks whether they were saved first.
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await dialog.getByRole("button", { name: "Saved, close" }).click();
   await expect(
     page.getByRole("button", { name: "Unenroll TOTP 2FA" }),
   ).toBeVisible();

@@ -2,14 +2,14 @@
 //!
 //! API types and a client for the Mogh example app.
 
-use anyhow::{Context as _, anyhow};
+use anyhow::Context as _;
 use mogh_auth_client::{
   api::{login::MoghAuthLoginRequest, manage::MoghAuthManageRequest},
-  signature::signed_request_headers_for_url,
+  request::{SignedPost, json_response, signed_post},
+  signature::{signed_request_headers_for_url, signing_keys},
 };
 
 pub use mogh_auth_client::signature::{SignedRequest, sign_request};
-use mogh_error::deserialize_error;
 use mogh_supporter::api::{
   MoghSupporterReadRequest, MoghSupporterWriteRequest,
 };
@@ -30,6 +30,10 @@ use crate::api::{
 
 #[typeshare(serialized_as = "number")]
 pub type I64 = i64;
+
+/// The most a successful response of the example api may have, which
+/// the client reads it up to (mogh_auth_client's `json_response`).
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 /// How the client authenticates its requests.
 #[derive(Clone)]
@@ -185,7 +189,10 @@ impl ExampleClient {
 
   /// Adds the credential headers to `request`. A signature (signing
   /// key) covers its method, url and body, so set them on `request`
-  /// before.
+  /// before. It signs a request built by hand, once: the requests of
+  /// the client itself go out with mogh_auth_client's `signed_post`,
+  /// which also sends one again when the server refused its
+  /// timestamp.
   pub fn authenticate(
     &self,
     request: reqwest::RequestBuilder,
@@ -241,31 +248,27 @@ impl ExampleClient {
     req_type: &str,
     params: &B,
   ) -> anyhow::Result<R> {
-    let request = self
-      .reqwest
-      .post(format!("{}{path}", self.address))
-      .json(&json!({ "type": req_type, "params": params }));
+    let url = format!("{}{path}", self.address);
+    let body = json!({ "type": req_type, "params": params });
+    if let ClientAuth::PrivateKey { private_key } = &self.auth {
+      // Signed for its host, path and body right before it goes out,
+      // and sent once more, signed anew, when the server refused its
+      // timestamp (the connection took too long to set up).
+      let keys = signing_keys(private_key)?;
+      let mut post = SignedPost::new(&url, &keys, &body)?;
+      post.headers = self.headers.clone();
+      return signed_post(&self.reqwest, &post, MAX_RESPONSE_BYTES)
+        .await;
+    }
+    let request = self.reqwest.post(url).json(&body);
     let res = self
       .authenticate(request)?
       .send()
       .await
       .context("Failed to reach Example API")?;
-    let status = res.status();
-    let body = res
-      .text()
-      .await
-      .map_err(|e| anyhow!("{e:?}").context(status))?;
-    if status.is_success() {
-      serde_json::from_str(&body).map_err(|e| {
-        anyhow!("{e:#?}")
-          .context(format!(
-            "Failed to deserialize response body: {body}"
-          ))
-          .context(status)
-      })
-    } else {
-      Err(deserialize_error(body).context(status))
-    }
+    // A successful body which fails to parse holds credentials (a jwt,
+    // an api key secret): the error leaves its values out.
+    json_response(res, MAX_RESPONSE_BYTES).await
   }
 }
 
