@@ -111,10 +111,10 @@ thiserror = "2.0.21"
 # tracing-opentelemetry 0.34 is tied to opentelemetry 0.33
 tracing-opentelemetry = "0.34.0"
 opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace", "internal-logs"] }
-opentelemetry_sdk = "0.33.0"
+opentelemetry_sdk = "0.33.1"
 tracing-subscriber = { version = "0.3.23", features = ["json"] }
-opentelemetry-semantic-conventions = "0.33.0"
-opentelemetry = "0.33.0"
+opentelemetry-semantic-conventions = "0.33.1"
+opentelemetry = "0.33.1"
 tracing = "0.1.44"
 
 # MACRO
