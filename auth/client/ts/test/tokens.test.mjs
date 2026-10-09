@@ -286,3 +286,93 @@ describe("login tokens shared by tabs", () => {
     assert.equal(warn.mock.callCount(), 1);
   });
 });
+
+describe("refused tokens", () => {
+  beforeEach(() => {
+    storage = new MemoryStorage();
+  });
+
+  it("a refused token isn't sendable, a new login's is", () => {
+    const store = createLoginTokens();
+    store.add_and_change(jwtFor("x"));
+    const refused = store.jwt();
+    assert.equal(store.sendableJwt(), refused);
+
+    store.refuse(refused);
+    assert.equal(store.isRefused(refused), true);
+    assert.equal(store.sendableJwt(), "");
+    // Still the tab's token: the app shows the login page for it.
+    assert.equal(store.jwt(), refused);
+
+    // Logging in again gives a new token.
+    store.add_and_change(jwtFor("x") + "2");
+    assert.equal(store.sendableJwt(), jwtFor("x") + "2");
+    assert.equal(store.isRefused(refused), true);
+  });
+
+  it("stays refused across account switches", () => {
+    const store = createLoginTokens();
+    store.add_and_change(jwtFor("x"));
+    store.refuse(jwtFor("x"));
+    store.add_and_change(jwtFor("y"));
+    assert.equal(store.sendableJwt(), jwtFor("y"));
+    store.change("x");
+    assert.equal(store.sendableJwt(), "");
+  });
+
+  it("is kept per tab", () => {
+    const a = createLoginTokens();
+    a.add_and_change(jwtFor("x"));
+    const b = createLoginTokens();
+    a.refuse(jwtFor("x"));
+    // The other tab still sends it, once, until refused there too.
+    assert.equal(b.sendableJwt(), jwtFor("x"));
+    assert.equal(b.isRefused(jwtFor("x")), false);
+  });
+
+  it("notifies of each new refusal", (t) => {
+    const error = t.mock.method(console, "error", () => {});
+    const store = createLoginTokens();
+    store.add_and_change(jwtFor("x"));
+    let refusals = 0;
+    let changes = 0;
+    const unsubscribe = store.subscribeRefusals(() => refusals++);
+    store.subscribe(() => changes++);
+    // A failing listener doesn't keep the others from it.
+    store.subscribeRefusals(() => {
+      throw new Error("listener");
+    });
+
+    store.refuse(jwtFor("x"));
+    assert.equal(refusals, 1);
+    // `sendableJwt()` changed, for `useSyncExternalStore`.
+    assert.equal(changes, 1);
+    assert.equal(error.mock.callCount(), 1);
+
+    // Once per token.
+    store.refuse(jwtFor("x"));
+    store.refuse("");
+    assert.equal(refusals, 1);
+    assert.equal(changes, 1);
+
+    unsubscribe();
+    store.refuse(jwtFor("y"));
+    assert.equal(refusals, 1);
+    assert.equal(changes, 2);
+  });
+
+  it("the latch doesn't swallow another tab's change", () => {
+    const a = createLoginTokens();
+    a.add_and_change(jwtFor("x"));
+    const b = createLoginTokens();
+    let calls = 0;
+    a.subscribe(() => calls++);
+    // Read by `a` before its storage event arrives.
+    b.add_and_change(jwtFor("y"));
+    assert.equal(a.accounts().length, 2);
+    a.refuse(jwtFor("x"));
+    assert.equal(calls, 1);
+    window.dispatchEvent(storageEvent(KEY));
+    assert.equal(calls, 2);
+  });
+});

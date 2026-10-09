@@ -2,17 +2,34 @@
 
 Typescript client for a `mogh_auth_server` auth api: the request and
 response types, a typed client, the login token store of the browser,
-and the passkey helpers.
+the passkey helpers, and the request helpers the apps' clients send
+their own requests with.
 
 ```ts
 import * as MoghAuth from "mogh_auth_client";
 
 const auth = MoghAuth.MoghAuthClient(
   "https://example.com/auth",
-  MoghAuth.LOGIN_TOKENS?.jwt(),
+  MoghAuth.LOGIN_TOKENS.jwt(),
 );
 const options = await auth.login("GetLoginOptions", {});
 ```
+
+The second argument is the credential the client sends with its
+requests (`MoghAuth.ClientCredential`):
+
+- a JWT, sent as `Authorization`: a string, or `{ jwt }`.
+- an api key, `{ key, secret }`, sent as `X-API-KEY` / `X-API-SECRET`.
+  The server takes it for the manage requests open to api keys, eg.
+  `GetUserId`, `DeleteApiKey`, and an admin's login provider / trusted
+  issuer requests. A request with an api key doesn't follow redirects
+  (see [Redirects of requests with an api key](#redirects-of-requests-with-an-api-key)).
+
+A `jwt` is sent when set, otherwise the api key when both its parts are,
+otherwise nothing (only the session cookie goes along). So an app client
+passes the `{ jwt, key, secret }` it was created with as is.
+`credentialHeaders(credential)` gives the same headers for the app's own
+requests.
 
 ## Errors
 
@@ -27,6 +44,11 @@ Every request rejects with `{ status, result, error? }`
   a gateway's `{"error":{"code":403}}`), `error` names the status and
   `trace` holds the start of the body. A `200` with an invalid body
   rejects with `Invalid response body`.
+- `server` is `true` when `result` is the server's own error body (json
+  with a string `error` and a `trace` list). Not for the error page of a
+  proxy, nor for the `401` / `403` of an auth gateway in front of the
+  server: those say nothing about the credentials the request was sent
+  with.
 - `error` is the caught error, if any.
 
 `isReauthenticationRequired(e)` tells whether a manage request needs the
@@ -40,11 +62,49 @@ error is `server_error`, with the status and the start of the body as
 after too many failed requests, `503` while a login provider or trusted
 issuer of the token's issuer can't be loaded.
 
+## Requests of the app's own api
+
+The apps' clients send their requests the same way, so a UI handles the
+failures of auth and app requests alike, and the rules above live in one
+place:
+
+```ts
+const notes = await MoghAuth.fetchJson<Note[]>(`${url}/read/ListNotes`, {
+  method: "POST",
+  body: JSON.stringify({}),
+  headers: { "content-type": "application/json", authorization: jwt },
+});
+```
+
+- `fetchJson<Res>(input, init)` sends the request with `fetch` and
+  resolves with the json of a `200`. It rejects with a `RequestError` on
+  any failure, never with anything else.
+- `fetchResponse(input, init)` resolves with the `200` response itself,
+  eg. to stream its body, and rejects like `fetchJson`.
+- For a response fetched another way: `responseJson(response)` (the json
+  of a `200`, or the rejection), `responseError(response)` (what a status
+  other than `200` rejects with) and `requestFailed(error)` (what a
+  request which got no response rejects with).
+
+### Redirects of requests with an api key
+
+`fetchJson` and `fetchResponse` (and so `MoghAuthClient`) send a request
+carrying an api key (`X-API-KEY` / `X-API-SECRET`) with
+`redirect: "error"`, unless its `init` sets `redirect` itself: a redirect
+then rejects with `status: 1` instead of being followed. `fetch` outside
+a browser (node, Deno, Bun, a Komodo Action) drops only `Authorization`
+(and the browser's cookies) on a redirect to another origin, and sends
+every other header on to wherever the redirect points: the login page of
+an SSO proxy in front of the server, or the new address of a server
+which moved, would get the api key, and a `307` / `308` sends the body
+again too. A JWT in `Authorization` is dropped, so such requests follow
+redirects as usual. A request with an api key sent with plain `fetch`
+should pass `redirect: "error"` too.
+
 ## Login tokens
 
 `LOGIN_TOKENS` keeps the tokens of the signed in users in `localStorage`
-(key `mogh-auth-tokens-v1`). It is `undefined` where `localStorage` is
-unavailable: in node, or in a browser blocking site data.
+(key `mogh-auth-tokens-v1`).
 
 - The stored tokens are shared by every tab of the origin: a login or a
   logout in one tab applies to all of them. Every call reads the latest
@@ -66,6 +126,51 @@ unavailable: in node, or in a browser blocking site data.
   it uses the auth pages and hooks of `mogh_ui`: they always use the
   default `LOGIN_TOKENS`, so the app has to use it too (a store of its
   own would stay empty after every login).
+- Where `localStorage` is unavailable (in node, or in a browser blocking
+  site data, eg. in an iframe with third party cookies blocked), the
+  tokens are kept in the page's memory instead, so the user can still
+  log in: the login lasts until the page is closed or reloaded, and
+  other tabs don't see it. A blocked `localStorage` is warned about
+  once. So `LOGIN_TOKENS` is always a store, never `undefined`.
+- The storage is read on first use, not on import: importing the
+  package (eg. for the client in node, where reading `localStorage`
+  warns) touches no storage.
+
+## Refused tokens
+
+Every request with a token the server refuses counts against its per IP
+auth rate limit, which logging in shares. So a token the server refused
+is never sent again, by any caller: the app's client and the auth and
+supporter hooks of `mogh_ui` share the one latch of `LOGIN_TOKENS`.
+
+```ts
+const jwt = MoghAuth.LOGIN_TOKENS.sendableJwt();
+if (!jwt) return showLoginPage();
+try {
+  return await MoghAuth.MoghAuthClient(url, jwt).manage("GetUserId", {});
+} catch (e) {
+  if (MoghAuth.isTokenRefusal(e, [401, 403])) {
+    MoghAuth.LOGIN_TOKENS.refuse(jwt);
+  }
+  throw e;
+}
+```
+
+- `isTokenRefusal(e, refusedOn = [401])` tells whether a failed request
+  is the server refusing the token: a status of `refusedOn` with the
+  server's own error body (`RequestError.server`), not the `401` / `403`
+  of a proxy or an auth gateway in front of it. Pass `[401, 403]` for a
+  request whose `403` also means that the session is over (`GetUserId`,
+  an app's `GetUser`), rather than a missing permission.
+- `LOGIN_TOKENS.refuse(jwt)` notes the refusal. `sendableJwt()` gives
+  this tab's token unless it was refused (`""` then), `isRefused(jwt)`
+  checks a given token.
+- `subscribeRefusals(listener)` calls `listener` on each new refusal, eg.
+  to show the login page. The `subscribe` listeners are called too, so
+  `useSyncExternalStore(LOGIN_TOKENS.subscribe, LOGIN_TOKENS.sendableJwt)`
+  re-renders.
+- Refusals are kept per tab, until the page is reloaded. A new login
+  gives a new token, which is sent.
 
 ## Passkeys
 

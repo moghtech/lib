@@ -8,6 +8,11 @@ export interface NoData {
 
 export type BeginExternalLoginLinkResponse = NoData;
 
+/**
+ * The challenge passkey enrollment begins with
+ * ([BeginPasskeyEnrollment][crate::api::manage::BeginPasskeyEnrollment]),
+ * for the browser's `navigator.credentials.create`.
+ */
 export type CreationChallengeResponse = any;
 
 /** Response for [BeginPasskeyEnrollment]. */
@@ -295,8 +300,6 @@ export type ExchangeExternalForJwtResponse = JwtOrTwoFactor;
 /** Response for [ExchangeForJwt]. */
 export type ExchangeForJwtResponse = JwtResponse;
 
-export type JsonValue = any;
-
 export type ListExternalLoginProvidersResponse = ExternalLoginProviderListItem[];
 
 export type ListTrustedIssuersResponse = TrustedIssuerListItem[];
@@ -304,12 +307,25 @@ export type ListTrustedIssuersResponse = TrustedIssuerListItem[];
 /** The response for [LoginLocalUser] */
 export type LoginLocalUserResponse = JwtOrTwoFactor;
 
-export type Passkey = any;
-
+/**
+ * The browser's answer to a [RequestChallengeResponse], which
+ * completes the passkey login
+ * ([CompletePasskeyLogin][crate::api::login::CompletePasskeyLogin]).
+ */
 export type PublicKeyCredential = any;
 
+/**
+ * The browser's answer to a [CreationChallengeResponse], which
+ * completes the enrollment
+ * ([ConfirmPasskeyEnrollment][crate::api::manage::ConfirmPasskeyEnrollment]).
+ */
 export type RegisterPublicKeyCredential = any;
 
+/**
+ * The challenge a passkey login answers with
+ * ([JwtOrTwoFactor::Passkey][crate::api::login::JwtOrTwoFactor::Passkey]),
+ * for the browser's `navigator.credentials.get`.
+ */
 export type RequestChallengeResponse = any;
 
 /** Response for [SignUpLocalUser]. */
@@ -338,12 +354,18 @@ export type UpdateUsernameResponse = NoData;
 /**
  * Begin linking flow for an external login. Response: [NoData].
  * 
- * First call this method when authenticated, then redirect the
- * user to `/external/{slug}/link` relative to the auth api path
- * (eg. `/auth/external/{slug}/link`), using the provider `slug`
- * from [GetLoginOptions][crate::api::login::GetLoginOptions]
- * (see [LoginOptionsProvider][crate::api::login::LoginOptionsProvider]).
- * The slug is not the provider id.
+ * First call this method when authenticated, with the `slug` of the
+ * provider to link, then redirect the user to `/external/{slug}/link`
+ * relative to the auth api path (eg. `/auth/external/{slug}/link`).
+ * The provider `slug` is the one from
+ * [GetLoginOptions][crate::api::login::GetLoginOptions]
+ * (see [LoginOptionsProvider][crate::api::login::LoginOptionsProvider]),
+ * not the provider id. `404` for a provider there is none of, `400`
+ * for a disabled one.
+ * 
+ * The link is begun for that provider only: `/link` of another
+ * provider refuses it (and uses it up), so no page the user visits in
+ * the meantime can start it at a provider of its choosing.
  * 
  * The response sets a new session cookie (the session id changes),
  * and the redirect to `/link` must carry it: only the session which
@@ -351,6 +373,11 @@ export type UpdateUsernameResponse = NoData;
  * the request is sent with credentials.
  */
 export interface BeginExternalLoginLink {
+	/**
+	 * The slug of the provider to link, as `/external/{slug}/link`
+	 * names it.
+	 */
+	slug: string;
 }
 
 /**

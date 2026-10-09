@@ -9,6 +9,7 @@ const {
   MoghAuthClient,
   REAUTHENTICATION_REQUIRED,
   isReauthenticationRequired,
+  isTokenRefusal,
   safeBackto,
 } = await import("../dist/lib.js");
 
@@ -70,7 +71,8 @@ describe("request errors", () => {
     const result = { error: "Invalid credentials", trace: ["cause"] };
     mockFetch(() => Response.json(result, { status: 401 }));
     const e = await rejection(client.login("LoginLocalUser", {}));
-    assert.deepEqual(e, { status: 401, result });
+    // Marked as the server's own answer.
+    assert.deepEqual(e, { status: 401, result, server: true });
   });
 
   it("describes a network failure", async () => {
@@ -132,11 +134,12 @@ describe("request errors", () => {
   });
 
   it("keeps only the string lines of the trace", async () => {
-    for (const [trace, expected] of [
-      [undefined, []],
-      ["cause", []],
-      [{ 0: "cause" }, []],
-      [["cause", 1, null, { a: 1 }, "root"], ["cause", "root"]],
+    // Only a `trace` list is the server's own error body.
+    for (const [trace, expected, server] of [
+      [undefined, [], false],
+      ["cause", [], false],
+      [{ 0: "cause" }, [], false],
+      [["cause", 1, null, { a: 1 }, "root"], ["cause", "root"], true],
     ]) {
       mockFetch(() =>
         Response.json(
@@ -148,6 +151,7 @@ describe("request errors", () => {
       assert.deepEqual(e, {
         status: 403,
         result: { error: "Forbidden", trace: expected, code: 7 },
+        ...(server ? { server: true } : {}),
       });
     }
   });
@@ -169,6 +173,84 @@ describe("request errors", () => {
     assert.deepEqual(await client.manage("GetUserId", {}), {
       user_id: "x",
     });
+  });
+});
+
+describe("credentials", () => {
+  /** The credential headers of the requests `client` sends. */
+  async function credentialHeadersOf(client) {
+    mockFetch(() => Response.json({}));
+    await client.manage("GetUserId", {});
+    await client.login("GetLoginOptions", {});
+    assert.equal(sent.length, 2);
+    // The same on every request.
+    assert.deepEqual(sent[0].init.headers, sent[1].init.headers);
+    const { "content-type": contentType, ...credentials } =
+      sent[0].init.headers;
+    assert.equal(contentType, "application/json");
+    assert.equal(sent[0].init.credentials, "include");
+    return credentials;
+  }
+
+  it("sends a jwt as authorization", async () => {
+    for (const credential of ["jwt-1", { jwt: "jwt-1" }]) {
+      assert.deepEqual(
+        await credentialHeadersOf(
+          MoghAuthClient("https://auth.example", credential),
+        ),
+        { authorization: "jwt-1" },
+      );
+      // `fetch` drops it on a redirect to another origin.
+      for (const { init } of sent) assert.equal(init.redirect, undefined);
+    }
+  });
+
+  it("sends an api key as X-API-KEY / X-API-SECRET", async () => {
+    // Eg. `komodo.auth.manage("DeleteApiKey", ..)` from a script.
+    assert.deepEqual(
+      await credentialHeadersOf(
+        MoghAuthClient("https://auth.example", { key: "k", secret: "s" }),
+      ),
+      { "x-api-key": "k", "x-api-secret": "s" },
+    );
+    // Without following redirects, which would take it elsewhere.
+    for (const { init } of sent) assert.equal(init.redirect, "error");
+  });
+
+  it("takes an app client's state as is", async () => {
+    // `{ jwt, key, secret }`, the unused ones undefined.
+    const apiKey = { jwt: undefined, key: "k", secret: "s" };
+    assert.deepEqual(
+      await credentialHeadersOf(MoghAuthClient("https://auth.example", apiKey)),
+      { "x-api-key": "k", "x-api-secret": "s" },
+    );
+    // A jwt goes first, as in the apps' clients.
+    const both = { jwt: "jwt-1", key: "k", secret: "s" };
+    assert.deepEqual(
+      await credentialHeadersOf(MoghAuthClient("https://auth.example", both)),
+      { authorization: "jwt-1" },
+    );
+  });
+
+  it("sends none without a whole credential", async () => {
+    for (const credential of [
+      undefined,
+      "",
+      {},
+      { jwt: "" },
+      { jwt: undefined, key: undefined, secret: undefined },
+      { key: "k" },
+      { key: "k", secret: "" },
+      { secret: "s" },
+    ]) {
+      assert.deepEqual(
+        await credentialHeadersOf(
+          MoghAuthClient("https://auth.example", credential),
+        ),
+        {},
+        JSON.stringify(credential),
+      );
+    }
   });
 });
 
@@ -278,6 +360,71 @@ describe("tokenExchange errors", () => {
       e.result.error_description,
       "Request failed with error | TypeError: fetch failed",
     );
+  });
+});
+
+describe("isTokenRefusal", () => {
+  it("is the server refusing the token", async () => {
+    mockFetch(() =>
+      Response.json(
+        { error: "Invalid token", trace: ["expired"] },
+        { status: 401 },
+      ),
+    );
+    const e = await rejection(client.manage("GetUserId", {}));
+    assert.equal(isTokenRefusal(e), true);
+  });
+
+  it("only for the given statuses", async () => {
+    // Eg. a disabled user: the session is over for `GetUserId`, not
+    // for a request the user lacks a permission for.
+    mockFetch(() =>
+      Response.json({ error: "User disabled", trace: [] }, { status: 403 }),
+    );
+    const e = await rejection(client.manage("GetUserId", {}));
+    assert.equal(isTokenRefusal(e), false);
+    assert.equal(isTokenRefusal(e, [401, 403]), true);
+  });
+
+  it("not a proxy's or a gateway's answer", async () => {
+    // An auth gateway in front of the server says nothing about the
+    // token sent to the server.
+    for (const response of [
+      () => Response.json({ error: "unauthorized" }, { status: 401 }),
+      () => new Response("<h1>401 Authorization Required</h1>", {
+        status: 401,
+      }),
+    ]) {
+      mockFetch(response);
+      const e = await rejection(client.manage("GetUserId", {}));
+      assert.equal(e.status, 401);
+      assert.equal(isTokenRefusal(e), false);
+    }
+  });
+
+  it("is false for anything else, without throwing", () => {
+    const throwing = {
+      get status() {
+        throw new Error("getter");
+      },
+    };
+    for (const [i, e] of [
+      undefined,
+      null,
+      401,
+      "401",
+      {},
+      { status: 401 },
+      { status: "401", server: true },
+      { status: 1, server: true },
+      { status: 429, server: true },
+      { status: 500, server: true },
+      { status: 401, server: "true" },
+      throwing,
+    ].entries()) {
+      assert.equal(isTokenRefusal(e), false, `case ${i}`);
+    }
+    assert.equal(isTokenRefusal({ status: 401, server: true }), true);
   });
 });
 
