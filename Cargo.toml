@@ -25,7 +25,7 @@ mogh_auth_server = "8.0.0"
 mogh_cache = "2.0.0"
 mogh_config = "4.1.0"
 mogh_encryption = "3.0.0"
-mogh_env_parser = "1.0.0"
+mogh_env_parser = "1.0.1"
 mogh_error = "2.0.0"
 mogh_logger = { version = "2.0.0", default-features = false }
 mogh_pki = "4.0.0"
@@ -39,7 +39,7 @@ mogh_supporter = "2.0.0"
 mogh_validations = "2.0.0"
 
 # CICADA
-cicada_loader = "0.24.0"
+cicada_loader = "0.24.1"
 
 # ASYNC
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "form", "rustls"] }
