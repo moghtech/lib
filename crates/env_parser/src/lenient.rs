@@ -1,35 +1,4 @@
-//! The final deserialization, lenient about strings the way `envy`
-//! reads the process environment: a string value coerces into the
-//! type the struct asks for. Configuration arrives as strings from
-//! env file sources and from `${VAR}` interpolation, and a `port:
-//! u16` field must accept `PORT=8080` all the same.
-//!
-//! - `bool`, integers and floats parse from the (trimmed) string; a
-//!   `char` is the string's single character, untrimmed, so
-//!   whitespace such as `" "` or a tab stays a valid char.
-//! - A sequence (`Vec<T>`, tuples) splits a string on commas,
-//!   entries trimmed and empty ones dropped, so `""` is an empty
-//!   list; each entry coerces in turn. A tuple or `[T; N]` given
-//!   more entries than it has is an error, as in serde_json.
-//! - `Option<T>` is `Some` (only `null` is `None`).
-//! - A unit enum variant matches the string.
-//! - A `String` stays what it is.
-//! - A map key (a string in json) coerces into the map's key type
-//!   the same way, as serde_json reads keys: `{ "8080": "api" }`
-//!   into a `HashMap<u16, String>`, a `bool`, a newtype around
-//!   either, a unit enum variant.
-//!
-//! Every other value, and every nested map or array, deserializes
-//! as `serde_json::Value` does, with the same leniency applied to
-//! their children, including the payload of an externally tagged
-//! enum variant (`{ "Vault": { "port": "8200" } }`).
-//!
-//! Out of reach: anything serde buffers before deserializing it,
-//! that is `#[serde(flatten)]` fields, untagged enums and
-//! internally / adjacently tagged enums. serde reads those through
-//! `deserialize_any`, where a string is a string, so a numeric field
-//! inside them must arrive typed (from toml / yaml / json), not from
-//! an env file.
+//! The lenient deserializer, see [Lenient].
 
 use serde::{
   Deserializer, de::IntoDeserializer as _, de::Visitor,
@@ -37,7 +6,42 @@ use serde::{
 };
 use serde_json::{Error, Value};
 
-pub(crate) struct Lenient(pub(crate) Value);
+/// A deserializer over a [serde_json::Value] which coerces strings
+/// into the type asked for, the way `envy` reads the process
+/// environment: `T::deserialize(Lenient(value))` where
+/// `serde_json::from_value(value)` would refuse `"8080"` for a
+/// `u16`. Env file values are all strings, and a `port: u16` field
+/// must accept `PORT=8080` all the same. [crate::deserialize] wraps
+/// it with the field's path and a redacted message on failure.
+///
+/// - `bool`, integers and floats parse from the (trimmed) string,
+///   a boolean in any case (`TRUE`, `False`); a `char` is the
+///   string's single character, untrimmed, so `" "` or a tab stays
+///   a valid char.
+/// - A sequence (`Vec<T>`, tuples) splits a string on commas,
+///   entries trimmed and empty ones dropped, so `""` is an empty
+///   list; each entry coerces in turn. A tuple or `[T; N]` given
+///   more entries than it has is an error, as in serde_json.
+/// - `Option<T>` is `Some` (only `null` is `None`).
+/// - A unit enum variant matches the string.
+/// - A `String` stays what it is.
+/// - A map key (a string in json) coerces into the map's key type
+///   the same way, as serde_json reads keys: `{ "8080": "api" }`
+///   into a `HashMap<u16, String>`, a `bool`, a newtype around
+///   either, a unit enum variant.
+///
+/// Every other value, and every nested map or array, deserializes
+/// as `serde_json::Value` does, with the same leniency applied to
+/// their children, including the payload of an externally tagged
+/// enum variant (`{ "Vault": { "port": "8200" } }`).
+///
+/// Out of reach: anything serde buffers before deserializing it,
+/// that is `#[serde(flatten)]` fields, untagged enums and
+/// internally / adjacently tagged enums. serde reads those through
+/// `deserialize_any`, where a string is a string, so a numeric field
+/// inside them must arrive typed (from toml / yaml / json), not from
+/// an env file.
+pub struct Lenient(pub Value);
 
 impl Lenient {
   fn string(&self) -> Option<&str> {
@@ -679,7 +683,7 @@ mod tests {
   #[test]
   fn coercion_errors_carry_no_values_after_redaction() {
     let err = from::<u16>(json!("hunter2secret")).unwrap_err();
-    let message = crate::error::redact_serde_error(&err);
+    let message = crate::redact_serde_error(&err);
     assert!(!message.contains("hunter2secret"), "{message}");
     assert!(message.contains("expected u16"), "{message}");
   }

@@ -17,6 +17,7 @@ Source: https://github.com/moghtech/lib
 - mogh_cache
 - mogh_config
 - mogh_encryption
+- mogh_env_parser
 - mogh_error
 - mogh_logger
 - mogh_pki

@@ -1,6 +1,16 @@
-use std::{path::PathBuf, sync::LazyLock};
+use std::path::PathBuf;
 
+use mogh_env_parser::{
+  Lenient, redact_prefixed_serde_message, redact_serde_message,
+};
 use serde::de::DeserializeOwned;
+
+/// A serde_json error's message with its values redacted, see
+/// [mogh_env_parser::redact_serde_error]: the env file sources'
+/// parser redacts its own errors with it, and so does this crate
+/// for every other format, since config values may be secrets and
+/// errors are logged.
+pub(crate) use mogh_env_parser::redact_serde_error;
 
 /// The json type name of a value, for error messages
 /// which must not include the value itself.
@@ -15,108 +25,6 @@ pub(crate) fn value_type(value: &serde_json::Value) -> &'static str {
   }
 }
 
-/// Redacts values from a serde error message, since config values
-/// may be secrets and errors are logged: double quoted strings
-/// (`invalid type: string "hunter2"`) and backticked tokens
-/// (`invalid type: integer `4829``). An unknown enum variant or
-/// field is redacted whole, whatever it holds (serde doesn't escape
-/// it), keeping the names expected after it:
-/// `unknown variant [redacted], expected `fast` or `safe``.
-pub(crate) fn redact_serde_error(e: &serde_json::Error) -> String {
-  redact_message(&e.to_string(), false)
-}
-
-/// [redact_serde_error] for the message of any parser. serde's own
-/// message comes first, or with `path_prefix` (yaml) may follow
-/// the path of the value it is about (`server.mode: ...`).
-fn redact_message(message: &str, path_prefix: bool) -> String {
-  // Where serde's message starts. serde writes each value right
-  // after its own wording, and the first one comes after the path,
-  // so the wording before the first quote / backtick tells where
-  // the path ends: the path (yaml keys) may hold anything.
-  static WORDING: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-      r"(?:\A|: )((?:invalid (?:type|value): (?:string|character|boolean|integer|floating point)|unknown (?:variant|field)|missing field|duplicate field) )\z",
-    )
-    .unwrap()
-  });
-  let start = match message.find(['"', '`']) {
-    Some(quote) if path_prefix => {
-      match WORDING.captures(&message[..quote]) {
-        Some(wording) => wording.get(1).unwrap().start(),
-        // A quote or backtick in the path, which can't be told
-        // apart from a value's: keep only the text before it, and
-        // where the error is.
-        None => {
-          static LOCATION: LazyLock<regex::Regex> =
-            LazyLock::new(|| {
-              regex::Regex::new(
-                r" at (?:line \d+ column \d+|position \d+)\z",
-              )
-              .unwrap()
-            });
-          let location = LOCATION
-            .find(&message[quote..])
-            .map_or("", |location| location.as_str());
-          return format!(
-            "{}[redacted]{location}",
-            &message[..quote]
-          );
-        }
-      }
-    }
-    _ => 0,
-  };
-  // serde writes an unknown enum variant or field name in
-  // backticks without escaping it, so it may hold backticks or
-  // quotes itself: it runs up to serde's own `, expected` / `, there
-  // are no`, the last one, as it may hold these too. The names
-  // expected after it are the program's, and stay readable. Only at
-  // the start of serde's message: text like it anywhere else is
-  // inside a value, eg. `invalid type: string "unknown variant `a`,
-  // expected b", expected u16`, whose string is redacted whole
-  // below.
-  static UNKNOWN: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-      r"(?s)\A(unknown (?:variant|field) )`.*`(, expected|, there are no)",
-    )
-    .unwrap()
-  });
-  let (path, rest) = message.split_at(start);
-  if let Some(unknown) = UNKNOWN.captures(rest) {
-    let end = unknown.get(0).unwrap().end();
-    return format!(
-      "{path}{}[redacted]{}{}",
-      &unknown[1],
-      &unknown[2],
-      &rest[end..]
-    );
-  }
-  redact_values(message)
-}
-
-/// Redacts the values serde writes into its messages: strings
-/// escaped in double quotes (`string "a \"b\""`), a character in
-/// backticks (which may be a backtick itself), and numbers and
-/// booleans in backticks.
-fn redact_values(message: &str) -> String {
-  static QUOTED: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-      r#"(?s)"(?:[^"\\]|\\.)*"|character `.`|`[^`]*`"#,
-    )
-    .unwrap()
-  });
-  QUOTED
-    .replace_all(message, |caps: &regex::Captures| {
-      if caps[0].starts_with("character ") {
-        "character [redacted]"
-      } else {
-        "[redacted]"
-      }
-    })
-    .into_owned()
-}
-
 /// The message of a toml error, redacted like [redact_serde_error],
 /// with the line and column of its span in `contents`. Not the
 /// error's `Display`, which quotes the offending line, nor its
@@ -125,7 +33,7 @@ pub(crate) fn redact_toml_error(
   e: &toml::de::Error,
   contents: &str,
 ) -> String {
-  let message = redact_message(e.message().trim_end(), false);
+  let message = redact_serde_message(e.message().trim_end());
   let Some((line, column)) =
     e.span().and_then(|span| line_column(contents, span.start))
   else {
@@ -135,9 +43,13 @@ pub(crate) fn redact_toml_error(
 }
 
 /// The yaml error message (with its line and column), redacted like
-/// [redact_serde_error].
+/// [redact_serde_error]. yaml names the key of the failing value
+/// before serde's message (`server.mode: ...`), which a quote or
+/// backtick in the key would make indistinguishable from a value:
+/// [redact_prefixed_serde_message] keeps only the text before such
+/// a key.
 pub(crate) fn redact_yaml_error(e: &serde_yaml_ng::Error) -> String {
-  redact_message(&e.to_string(), true)
+  redact_prefixed_serde_message(&e.to_string())
 }
 
 /// The 1 based line and column (in chars) of a byte offset.
@@ -160,9 +72,11 @@ fn line_column(
 /// offending field and the type found there, never its value.
 ///
 /// String values coerce into the requested type the way `envy`
-/// reads the process environment, since configuration arrives as
-/// strings from env file sources and `${VAR}` interpolation, and a
-/// `port: u16` field must accept `PORT=8080` all the same:
+/// reads the process environment ([mogh_env_parser::Lenient], the
+/// deserializer `cicada_loader::load_env_as` reads an environment
+/// with too), since configuration arrives as strings from env file
+/// sources and `${VAR}` interpolation, and a `port: u16` field must
+/// accept `PORT=8080` all the same:
 ///
 /// - `bool`, integers and floats parse from the (trimmed) string; a
 ///   `char` is the string's single character, untrimmed.
@@ -193,27 +107,27 @@ pub(crate) fn deserialize_final_with_env<T: DeserializeOwned>(
   value: &serde_json::Value,
   env: Option<&crate::env::EnvValues>,
 ) -> crate::Result<T> {
-  serde_path_to_error::deserialize(crate::lenient::Lenient(
-    value.clone(),
-  ))
-  .map_err(|e| {
-    let path = e.path();
-    let message = redact_serde_error(e.inner());
-    if let Some(variable) = env.and_then(|env| env.variable_at(path))
-    {
-      return Error::ParseEnv {
-        variable: variable.to_string(),
+  serde_path_to_error::deserialize(Lenient(value.clone())).map_err(
+    |e| {
+      let path = e.path();
+      let message = redact_serde_error(e.inner());
+      if let Some(variable) =
+        env.and_then(|env| env.variable_at(path))
+      {
+        return Error::ParseEnv {
+          variable: variable.to_string(),
+          path: path.to_string(),
+          message,
+        };
+      }
+      let found = value_at(value, path).map(value_type);
+      Error::ParseFinalJson {
         path: path.to_string(),
+        found,
         message,
-      };
-    }
-    let found = value_at(value, path).map(value_type);
-    Error::ParseFinalJson {
-      path: path.to_string(),
-      found,
-      message,
-    }
-  })
+      }
+    },
+  )
 }
 
 /// The value at a serde error path, if the path resolves.
@@ -299,11 +213,11 @@ pub enum Error {
     message: String,
   },
 
-  /// See [crate::parse_env_file]; the message names the line and
-  /// what was expected, never a value.
+  /// See [mogh_env_parser::parse_env_file_object]; the message
+  /// names the line and what was expected, never a value.
   #[error("Failed to parse env file at {path} | {e}")]
   ParseEnvFile {
-    e: crate::env_file::EnvFileError,
+    e: mogh_env_parser::EnvFileError,
     path: PathBuf,
   },
 
@@ -433,37 +347,6 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  #[test]
-  fn redacts_quoted_values_from_serde_errors() {
-    let err = serde_json::from_value::<u16>(serde_json::json!(
-      "hunter2 \"quoted\" secret"
-    ))
-    .unwrap_err();
-    let message = redact_serde_error(&err);
-    assert!(!message.contains("hunter2"), "{message}");
-    assert!(
-      message.contains("invalid type: string [redacted]"),
-      "{message}"
-    );
-    assert!(message.contains("expected u16"));
-    // Numbers are formatted in backticks by serde.
-    let err =
-      serde_json::from_value::<String>(serde_json::json!(482913))
-        .unwrap_err();
-    let message = redact_serde_error(&err);
-    assert!(!message.contains("482913"), "{message}");
-    // A character is written in backticks unescaped.
-    let err = <serde_json::Error as serde::de::Error>::invalid_type(
-      serde::de::Unexpected::Char('`'),
-      &"a secret",
-    );
-    let message = redact_serde_error(&err);
-    assert_eq!(
-      message,
-      "invalid type: character [redacted], expected a secret"
-    );
-  }
 
   /// serde writes an unknown enum variant (or field name) in
   /// backticks without escaping it: a backtick in the value used to

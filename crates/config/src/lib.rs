@@ -16,7 +16,10 @@
 //! secrets, not templates). The final deserialization coerces
 //! string values into the field's type (numbers, booleans, comma
 //! separated lists, `Option`, unit enum variants), see
-//! [deserialize_final].
+//! [deserialize_final]. The env file grammar and the coercion are
+//! [mogh_env_parser]'s, which `cicada_loader::load_env_as` reads an
+//! environment with too, so a secret environment reads the same
+//! here and there.
 //!
 //! The process environment is a source too, over the files:
 //! [ConfigLoader::load_with_env] with an [EnvSource], whose table
@@ -45,23 +48,23 @@ use indexmap::IndexMap;
 use serde::de::DeserializeOwned;
 
 mod env;
-mod env_file;
 mod error;
 mod includes;
 mod interpolate;
-mod lenient;
 mod load;
 mod merge;
 
 pub use env::{EnvSource, FILE_SUFFIX};
-pub use env_file::{
+pub use error::{Error, deserialize_final};
+pub use interpolate::interpolate_env_and_shell;
+pub use merge::{merge_config, merge_objects};
+// The env file grammar is `mogh_env_parser`'s since 4.1 (shared
+// with `cicada_loader`); re-exported so 4.0 callers keep compiling.
+pub use mogh_env_parser::{
   EnvFileEntry, EnvFileError, EnvFileSerializeError,
   normalize_env_description, parse_env_file, representable_env_name,
   serialize_env_file,
 };
-pub use error::{Error, deserialize_final};
-pub use interpolate::interpolate_env_and_shell;
-pub use merge::{merge_config, merge_objects};
 
 pub type Result<T> = ::core::result::Result<T, Error>;
 

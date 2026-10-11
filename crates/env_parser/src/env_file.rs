@@ -20,7 +20,8 @@
 //! `DATABASE.ADDRESS=x` fills `database.address`, so a flat set of
 //! secrets can populate a structured config. A name with an empty
 //! segment (`.dockerconfigjson`, `A..B`), or with more than 32
-//! segments, stays one flat key.
+//! segments, stays one flat key. [crate::from_str] reads the object
+//! into a type, coercing the string values ([crate::Lenient]).
 
 /// The most `.` separated segments a name nests into. A name with
 /// more stays one flat key: nesting without a bound lets one long
@@ -157,7 +158,8 @@ pub fn parse_env_file(
 /// Parses an env file into the configuration object it describes:
 /// names lowercased (`DB_PASSWORD` is the field `db_password`),
 /// dots nesting (`DATABASE.ADDRESS` is `database.address`), values
-/// strings (the final deserialization coerces them).
+/// strings ([crate::deserialize] coerces them into the fields'
+/// types; [crate::from_str] does both steps).
 ///
 /// A name with an empty segment cannot nest (`.dockerconfigjson`,
 /// `A..B`, `A.`, `.`), so it is kept whole as one flat key,
@@ -171,7 +173,7 @@ pub fn parse_env_file(
 /// both a value and an object (`DATABASE=x` next to
 /// `DATABASE.ADDRESS=y`), and two spellings of one name (`Db` and
 /// `DB`).
-pub(crate) fn parse_env_file_object(
+pub fn parse_env_file_object(
   content: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>, EnvFileError>
 {
@@ -495,10 +497,10 @@ fn write_value(out: &mut String, value: &str) {
   out.push('"');
 }
 
-/// Whether a config path is an env file: named `.env`, or with the
-/// `env` extension (`app.env`). `Path::extension` is `None` for
-/// `.env`, hence the file name check.
-pub(crate) fn is_env_file(path: &std::path::Path) -> bool {
+/// Whether a path names an env file: `.env`, or the `env` extension
+/// in any case (`app.env`, `APP.ENV`). `Path::extension` is `None`
+/// for `.env`, hence the file name check. `.envrc` is none.
+pub fn is_env_file(path: &std::path::Path) -> bool {
   let name = path
     .file_name()
     .and_then(|name| name.to_str())

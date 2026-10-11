@@ -23,8 +23,9 @@ mogh_auth_server = "8.0.0"
 
 # MOGH
 mogh_cache = "2.0.0"
-mogh_config = "4.0.0"
+mogh_config = "4.1.0"
 mogh_encryption = "3.0.0"
+mogh_env_parser = "1.0.0"
 mogh_error = "2.0.0"
 mogh_logger = { version = "2.0.0", default-features = false }
 mogh_pki = "4.0.0"
@@ -63,7 +64,7 @@ indexmap = { version = "2.14.2", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 strum = { version = "0.28.0", features = ["derive"] }
 serde_yaml_ng = "0.10.0"
-serde_json = "1.0.151"
+serde_json = "1.0.152"
 serde_path_to_error = "0.1.20"
 serde_qs = "1.0.0"
 toml = "1.1.8"
@@ -120,11 +121,11 @@ tracing = "0.1.44"
 # MACRO
 quote = "1.0.47"
 proc-macro2 = "1.0.107"
-syn = "3.0.6"
+syn = "3.0.7"
 
 # MISC
 clap = { version = "4.6.7", features = ["derive"] }
-uuid = { version = "1.27.0", features = ["v4"] }
+uuid = { version = "1.28.0", features = ["v4"] }
 typeshare = "1.0.5"
 libc = "0.2.190"
 wildcard = "0.3.0"
@@ -145,6 +146,7 @@ mogh_auth_server = { path = "auth/server" }
 mogh_cache = { path = "crates/cache" }
 mogh_config = { path = "crates/config" }
 mogh_encryption = { path = "crates/encryption" }
+mogh_env_parser = { path = "crates/env_parser" }
 mogh_error = { path = "crates/error" }
 mogh_logger = { path = "crates/logger" }
 mogh_pki = { path = "crates/pki" }

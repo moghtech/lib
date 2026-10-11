@@ -6,11 +6,11 @@ use std::{
 };
 
 use colored::Colorize;
+use mogh_env_parser::{is_env_file, parse_env_file_object};
 use serde::de::DeserializeOwned;
 
 use crate::{
   Error, Result,
-  env_file::{is_env_file, parse_env_file_object},
   error::{redact_serde_error, redact_toml_error, redact_yaml_error},
   includes::read_includes,
   interpolate::{interpolate_value, unsupported_interpolations},

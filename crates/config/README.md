@@ -172,23 +172,27 @@ List an env file as a path, or match it with a directory wildcard
 so a compose `.env` next to the config files is not read by accident.
 `.env` has no extension for `Path::extension`, and is recognized by name.
 
-Both directions of the grammar live here. `mogh_config::parse_env_file` reads a
-file into its entries: the line, the name, the value, and the description held
-by the `#` comment lines directly above the entry (a blank line detaches them).
-`mogh_config::serialize_env_file` writes entries back, each description as
-comment lines above its entry, a value holding `$` single quoted when it can be
-(Compose, systemd and dotenv libraries take it literally then), any other value
-double quoted when it wouldn't survive unquoted. A serialized file parses back
-to the same entries, each description as `mogh_config::normalize_env_description`
-has it: every line break a `\n` (`\r\n`, and a lone `\r` or another character
-some dotenv parser ends a line at, so no text of a description is an entry to
-them), no line ending in whitespace (a comment line can't keep it). The parser
-reads descriptions in that form too. An app storing descriptions normalizes
-them with it when they are written, so an export / import round trip gives
-them back unchanged. A name the syntax can't hold
-(`mogh_config::representable_env_name`) or a name given twice is an error.
-Cicada Core renders its exports with `serialize_env_file`, so a
-`cicada://.env` source is read by the parser of the same grammar.
+Both directions of the grammar live in
+[`mogh_env_parser`](https://crates.io/crates/mogh_env_parser), re-exported here.
+`mogh_config::parse_env_file` reads a file into its entries: the line, the
+name, the value, and the description held by the `#` comment lines directly
+above the entry (a blank line detaches them). `mogh_config::serialize_env_file`
+writes entries back, each description as comment lines above its entry, a value
+holding `$` single quoted when it can be (Compose, systemd and dotenv libraries
+take it literally then), any other value double quoted when it wouldn't survive
+unquoted. A serialized file parses back to the same entries, each description
+as `mogh_config::normalize_env_description` has it: every line break a `\n`
+(`\r\n`, and a lone `\r` or another character some dotenv parser ends a line
+at, so no text of a description is an entry to them), no line ending in
+whitespace (a comment line can't keep it). The parser reads descriptions in
+that form too. An app storing descriptions normalizes them with it when they
+are written, so an export / import round trip gives them back unchanged. A name
+the syntax can't hold (`mogh_config::representable_env_name`) or a name given
+twice is an error. Cicada Core renders its exports with `serialize_env_file`,
+so a `cicada://.env` source is read by the parser of the same grammar, and
+`cicada_loader::load_env_as` reads an environment with the same parser and
+coercion (`mogh_env_parser::from_str`), so it fills a struct exactly as a
+`cicada://.env` source does.
 
 ## Features
 
