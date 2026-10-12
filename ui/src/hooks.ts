@@ -31,12 +31,13 @@ export function useKeyListener(
       return;
     }
 
+    const ctrl = e.ctrlKey || e.metaKey;
     if (
       e.key === listenKey &&
       (extra === "shift"
-        ? e.shiftKey
+        ? e.shiftKey && !ctrl && !e.altKey
         : extra === "ctrl"
-          ? e.ctrlKey || e.metaKey
+          ? ctrl && !e.shiftKey && !e.altKey
           : true)
     ) {
       // The handler decides first: a declined press keeps its default.
