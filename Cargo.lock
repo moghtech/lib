@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_server"
-version = "8.0.0"
+version = "8.1.0"
 dependencies = [
  "anyhow",
  "axum",

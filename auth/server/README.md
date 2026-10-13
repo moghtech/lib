@@ -1513,6 +1513,26 @@ generous or separate, make jobs retry an exchange with a delay rather than in a
 tight loop, or use self hosted runners with their own ips. Successful exchanges
 are never rate limited.
 
+#### Verifying a workload token without an exchange
+
+An app taking a platform token as the proof of an identity elsewhere than at
+`/token` (eg. a device registering itself with the token its pod holds) calls
+`api::token::verify_workload_token(&auth, ip, token, accept)`. Performs the verification
+the exchange does (the issuer's keys, audiences and token age, then the first
+enabled rule the claims match), restricted to the rules `accept` admits, with no
+user looked up or created and no token issued. It answers the `VerifiedWorkload`
+(issuer, rule, claims), or the exchange's errors: `400` for a token no issuer
+accepts or none of whose admitted rules match, `503` for an issuer whose keys
+could not be loaded; failures count against the token exchange rate limit of the
+ip, like the exchange's.
+
+```rust
+let verified = verify_workload_token(&auth, ip, token, |issuer, rule| {
+  bound_rules.contains(&(issuer.id.as_str(), rule.id.as_str()))
+})
+.await?;
+```
+
 ### The exchange on another surface
 
 Apps serving the exchange elsewhere, eg. a Vault compatible `auth/jwt/login`

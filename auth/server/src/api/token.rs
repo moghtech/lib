@@ -884,11 +884,79 @@ async fn load_issuer_keys(
   })
 }
 
-/// A verified workload token, and the rule it matched.
-struct VerifiedWorkload {
-  issuer: TrustedIssuer,
-  rule: WorkloadRule,
-  claims: Claims,
+/// A workload token verified by a trusted issuer, and the rule which
+/// matched the token. This is what the exchange logs in a workload
+/// from, see [verify_workload_token].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct VerifiedWorkload {
+  /// The trusted issuer whose keys verified the token.
+  pub issuer: TrustedIssuer,
+  /// The rule of `issuer` the token matched.
+  pub rule: WorkloadRule,
+  /// The token's verified claims.
+  pub claims: Claims,
+}
+
+/// Verifies a workload token the way [exchange_token] does, without
+/// the exchange: Verifies that the trusted issuer which accepts it is enabled, of
+/// the token's issuer, has its keys verifying the signature, and its
+/// audiences and token age met. Checks that the first enabled rule of that
+/// issuer the token's claims match and are among the rules `accept`
+/// admits. No user is looked up or created, no token issued. Used with
+/// an app taking a platform token as the proof of an identity
+/// elsewhere than at its token endpoint (eg. a device's onboarding),
+/// where the rules that qualify tokens is up to the downstream application.
+///
+/// Fails the same as other token exchange: 
+/// - `400` for a token no trusted issuer accepts or none of whose admitted rules match
+/// - `503` for an issuer whose keys could not be loaded (it might have accepted the token).
+/// Failures count against the failure rate limit of
+/// `ip` ([AuthImpl::token_exchange_rate_limiter]) like the
+/// exchange's, the surface served being unauthenticated too.
+pub async fn verify_workload_token<I, A>(
+  auth: &I,
+  ip: IpAddr,
+  token: &str,
+  accept: A,
+) -> mogh_error::Result<VerifiedWorkload>
+where
+  I: AuthImpl + ?Sized,
+  A: Fn(&TrustedIssuer, &WorkloadRule) -> bool + Sync,
+{
+  with_exchange_rate_limit(
+    async {
+      if token.len() > MAX_SUBJECT_TOKEN_LENGTH {
+        return Err(invalid_grant(format!(
+          "The token is longer than {MAX_SUBJECT_TOKEN_LENGTH} bytes"
+        )));
+      }
+      let unmatched = |trusted: &TrustedIssuer| {
+        format!(
+          "The token is valid, but matches none of the rules of '{}' it may use here",
+          trusted.name
+        )
+      };
+      match verify_workload_by(
+        auth,
+        token,
+        load_issuer_keys,
+        &accept,
+        &unmatched,
+      )
+      .await
+      {
+        Ok(Some(verified)) => Ok(verified),
+        Ok(None) => Err(invalid_grant(
+          "No trusted issuer accepts tokens of this issuer",
+        )),
+        Err(not_accepted) => Err(not_accepted.into_error()),
+      }
+    },
+    auth.token_exchange_rate_limiter(),
+    &ip,
+  )
+  .await
 }
 
 /// Finds the trusted issuer which accepts the token, and the rule
@@ -905,6 +973,44 @@ where
   I: AuthImpl + ?Sized,
   K: Fn(TrustedIssuer) -> G,
   G: Future<Output = mogh_error::Result<Arc<TokenVerificationKeys>>>,
+{
+  // With a role, only the rule(s) of that name are evaluated,
+  // like Vault evaluates the named role.
+  let accept = |_: &TrustedIssuer, rule: &WorkloadRule| {
+    is_role(role, &[&rule.id, &rule.name])
+  };
+  let unmatched = |trusted: &TrustedIssuer| match role {
+    Some(role) => format!(
+      "The token is valid, but does not match rule '{role}' of '{}'",
+      trusted.name
+    ),
+    None => format!(
+      "The token is valid, but matches no rule of '{}'",
+      trusted.name
+    ),
+  };
+  verify_workload_by(auth, token, load_keys, &accept, &unmatched)
+    .await
+}
+
+/// [verify_workload] over the rules `accept` admits: the candidates
+/// are the enabled trusted issuers matching the token's issuer with such a
+/// rule, and the rule matched is the first enabled one of them the
+/// claims meet. `unmatched` words the refusal of a verified token
+/// matching no rules.
+async fn verify_workload_by<I, K, G, A, U>(
+  auth: &I,
+  token: &str,
+  load_keys: K,
+  accept: &A,
+  unmatched: &U,
+) -> Result<Option<VerifiedWorkload>, NotAccepted>
+where
+  I: AuthImpl + ?Sized,
+  K: Fn(TrustedIssuer) -> G,
+  G: Future<Output = mogh_error::Result<Arc<TokenVerificationKeys>>>,
+  A: Fn(&TrustedIssuer, &WorkloadRule) -> bool + Sync,
+  U: Fn(&TrustedIssuer) -> String + Sync,
 {
   let issuer = unverified_issuer(token).ok_or_else(|| {
     NotAccepted::rejected(invalid_grant(
@@ -923,10 +1029,7 @@ where
     .filter(|trusted| {
       trusted.enabled
         && issuers_match(&trusted.issuer, &issuer)
-        && trusted
-          .rules
-          .iter()
-          .any(|rule| is_role(role, &[&rule.id, &rule.name]))
+        && trusted.rules.iter().any(|rule| accept(trusted, rule))
     })
     .collect::<Vec<_>>();
 
@@ -936,7 +1039,7 @@ where
 
   let mut unavailable = None;
   let mut rejected = None;
-  let mut unmatched = None;
+  let mut unmatched_error = None;
   for trusted in candidates {
     let keys = match load_keys(trusted.clone()).await {
       Ok(keys) => keys,
@@ -958,28 +1061,15 @@ where
         continue;
       }
     };
-    // With a role, only the rule(s) of that name are evaluated,
-    // like Vault evaluates the named role.
-    let rules = match role {
-      Some(_) => trusted
-        .rules
-        .iter()
-        .filter(|rule| is_role(role, &[&rule.id, &rule.name]))
-        .cloned()
-        .collect::<Vec<_>>(),
-      None => trusted.rules.clone(),
-    };
+    let rules = trusted
+      .rules
+      .iter()
+      .filter(|rule| accept(&trusted, rule))
+      .cloned()
+      .collect::<Vec<_>>();
     let Some(rule) = match_rule(&rules, &claims).cloned() else {
-      unmatched.get_or_insert(invalid_grant(match role {
-        Some(role) => format!(
-          "The token is valid, but does not match rule '{role}' of '{}'",
-          trusted.name
-        ),
-        None => format!(
-          "The token is valid, but matches no rule of '{}'",
-          trusted.name
-        ),
-      }));
+      unmatched_error
+        .get_or_insert(invalid_grant(unmatched(&trusted)));
       continue;
     };
     // Verified and matched: as far as a token gets.
@@ -1006,7 +1096,7 @@ where
     error,
     rejected: was_rejected,
   };
-  Err(match (unmatched, unavailable, rejected) {
+  Err(match (unmatched_error, unavailable, rejected) {
     (Some(e), _, _) => reached(Reach::Refused, e),
     (None, Some(e), _) => reached(Reach::Unavailable, e),
     (None, None, Some(e)) => reached(Reach::Rejected, e),
