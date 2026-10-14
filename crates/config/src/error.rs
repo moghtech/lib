@@ -328,6 +328,23 @@ pub enum Error {
     e: std::io::Error,
   },
 
+  /// A config file spelling a field of a table both flat
+  /// ([EnvSource::flat_prefix][crate::EnvSource::flat_prefix],
+  /// `oidc_enabled`) and in its table (`oidc.enabled`), or holding
+  /// the table's key as no table (`oidc = "x"`) next to a flat key
+  /// of it. Names the file and the keys, never a value.
+  #[error(
+    "Config file {path:?} has both {key} and {field}: a field is spelled flat and in its table, keep one"
+  )]
+  FlatKeyTwice {
+    path: PathBuf,
+    /// The flat key.
+    key: String,
+    /// The field's path in its table, or the table's path when the
+    /// file holds it as no table.
+    field: String,
+  },
+
   /// A value from the environment (see
   /// [EnvSource][crate::EnvSource]) which the config field it sets
   /// can't take. The message has the value redacted, like

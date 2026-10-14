@@ -49,6 +49,7 @@ use serde::de::DeserializeOwned;
 
 mod env;
 mod error;
+mod flat;
 mod includes;
 mod interpolate;
 mod load;
@@ -182,7 +183,7 @@ impl ConfigLoader<'_, '_> {
   /// the worker thread in release builds. Local files are blocking
   /// file I/O too, which is short.
   pub fn load<T: DeserializeOwned>(self) -> Result<T> {
-    let config = self.load_sources()?;
+    let config = self.load_sources(&flat::FlatPrefixes::default())?;
     error::deserialize_final(&serde_json::Value::Object(config))
   }
 
@@ -194,14 +195,19 @@ impl ConfigLoader<'_, '_> {
   ///
   /// With no [Self::paths], the config is the type's defaults
   /// (`#[serde(default)]`) with the environment's values.
+  ///
+  /// The files may spell the fields of a table flat where `env`
+  /// says so ([EnvSource::flat_prefix]): each source is rewritten
+  /// as it is parsed, before the sources merge.
   pub fn load_with_env<T: DeserializeOwned>(
     self,
     env: &EnvSource,
   ) -> Result<T> {
     // The environment first: its mistakes (a file which can't be
     // read) stop the load before any file does.
+    let flat = env.flat_prefixes()?;
     let env = env.read(self.debug_print)?;
-    let mut config = self.load_sources()?;
+    let mut config = self.load_sources(&flat)?;
     env.apply(&mut config);
     error::deserialize_final_with_env(
       &serde_json::Value::Object(config),
@@ -212,6 +218,7 @@ impl ConfigLoader<'_, '_> {
   /// The sources in [ConfigLoader::paths] merged, see [Self::load].
   fn load_sources(
     self,
+    flat: &flat::FlatPrefixes,
   ) -> Result<serde_json::Map<String, serde_json::Value>> {
     let ConfigLoader {
       paths,
@@ -313,6 +320,7 @@ impl ConfigLoader<'_, '_> {
       &all_files,
       merge_nested,
       extend_array,
+      flat,
     )
   }
 }

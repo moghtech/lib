@@ -12,6 +12,7 @@ use serde::de::DeserializeOwned;
 use crate::{
   Error, Result,
   error::{redact_serde_error, redact_toml_error, redact_yaml_error},
+  flat::FlatPrefixes,
   includes::read_includes,
   interpolate::{interpolate_value, unsupported_interpolations},
   merge::merge_source,
@@ -355,6 +356,10 @@ pub fn parse_cicada_path(
 /// placeholders already), and a secret must not be able to run a
 /// command in the process reading it.
 ///
+/// Each source has its flat keys moved into their tables before it
+/// merges (`flat`, see [crate::EnvSource::flat_prefix]), so the
+/// sources may spell a field differently.
+///
 /// Returns the merged sources, for the final deserialization
 /// ([crate::deserialize_final]), after the environment's values
 /// when there is an [crate::EnvSource].
@@ -362,6 +367,7 @@ pub(crate) fn load_parse_config_files(
   files: &[FoundFile],
   merge_nested: bool,
   extend_array: bool,
+  flat: &FlatPrefixes,
 ) -> Result<serde_json::Map<String, serde_json::Value>> {
   let mut target = serde_json::Map::new();
 
@@ -375,7 +381,9 @@ pub(crate) fn load_parse_config_files(
           path: file.clone(),
           message: format!("{e:#}"),
         })?;
-      let source = parse_config_contents(&node, &contents)?;
+      let mut source: serde_json::Map<String, serde_json::Value> =
+        parse_config_contents(&node, &contents)?;
+      flat.fold(file, &mut source)?;
       merge_source(
         &mut target,
         source,
@@ -405,7 +413,7 @@ pub(crate) fn load_parse_config_files(
     // Interpolate each string leaf (and key) individually, rather
     // than the serialized document, so values containing quotes,
     // backslashes or newlines cannot break or inject into the json.
-    let source = if env_file {
+    let mut source = if env_file {
       source
     } else {
       let mut source = serde_json::Value::Object(source);
@@ -422,6 +430,7 @@ pub(crate) fn load_parse_config_files(
         _ => unreachable!("interpolation keeps the value an object"),
       }
     };
+    flat.fold(file, &mut source)?;
 
     merge_source(
       &mut target,

@@ -749,3 +749,192 @@ fn debug_leaves_out_the_values() {
   let debug = format!("{env:?}");
   assert!(!debug.contains("hunter2"), "{debug}");
 }
+
+/// The fields of a table spelled flat (`flat_prefix`): each file is
+/// folded into the table spelling as it is parsed, so files may
+/// spell a field differently, and the environment overrides either
+/// spelling with its values parsed into the fields' types as ever.
+#[test]
+fn flat_keys_spell_a_table() {
+  #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+  #[serde(default)]
+  struct Flat {
+    host: String,
+    oidc: Oidc,
+    oidc_token_exchange: Exchange,
+    google_oauth: Oauth,
+  }
+  #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+  #[serde(default)]
+  struct Oidc {
+    enabled: bool,
+    client_id: String,
+    audiences: Vec<String>,
+  }
+  #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+  #[serde(default)]
+  struct Exchange {
+    enabled: bool,
+    max_age: u64,
+  }
+  #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+  #[serde(default)]
+  struct Oauth {
+    #[serde(alias = "id")]
+    client_id: String,
+  }
+  let dir = scratch_dir("flat");
+  let env = || {
+    EnvSource::new("APP_")
+      .fields([
+        "host",
+        "oidc.enabled",
+        "oidc.client_id",
+        "oidc.audiences",
+        "oidc_token_exchange.enabled",
+        "oidc_token_exchange.max_age",
+        "google_oauth.client_id",
+      ])
+      .key_alias("google_oauth.client_id", "id")
+      .flat_prefix("oidc", "oidc_")
+      .flat_prefix("oidc_token_exchange", "oidc_token_exchange_")
+      .flat_prefix("google_oauth", "google_oauth_")
+  };
+  let load = |files: &[&Path], env: EnvSource| {
+    ConfigLoader {
+      paths: files,
+      match_wildcards: &[],
+      include_file_name: "",
+      merge_nested: true,
+      extend_array: false,
+      debug_print: false,
+    }
+    .load_with_env::<Flat>(&env)
+  };
+  let no_vars = Vec::<(String, String)>::new;
+
+  // Flat keys: the longest prefix wins, and a field which starts
+  // with a prefix stays the field.
+  let flat = dir.join("flat.toml");
+  std::fs::write(
+    &flat,
+    r#"
+host = "h"
+oidc_enabled = true
+oidc_client_id = "flat"
+oidc_audiences = ["a", "b"]
+oidc_token_exchange_enabled = true
+oidc_token_exchange.max_age = 7
+google_oauth_id = "g"
+"#,
+  )
+  .unwrap();
+  let config = load(&[&flat], env().with_vars(no_vars())).unwrap();
+  assert_eq!(
+    config,
+    Flat {
+      host: String::from("h"),
+      oidc: Oidc {
+        enabled: true,
+        client_id: String::from("flat"),
+        audiences: vec![String::from("a"), String::from("b")],
+      },
+      oidc_token_exchange: Exchange {
+        enabled: true,
+        max_age: 7,
+      },
+      google_oauth: Oauth {
+        client_id: String::from("g"),
+      },
+    }
+  );
+
+  // The table spelling loads as before, and the later of two files
+  // in different spellings overrides field by field.
+  let table = dir.join("table.toml");
+  std::fs::write(
+    &table,
+    "[oidc]\nenabled = false\nclient_id = \"table\"\n[oidc_token_exchange]\nenabled = false\n",
+  )
+  .unwrap();
+  let config = load(&[&table], env().with_vars(no_vars())).unwrap();
+  assert_eq!(config.oidc.client_id, "table");
+  assert!(!config.oidc.enabled);
+  let config =
+    load(&[&flat, &table], env().with_vars(no_vars())).unwrap();
+  assert_eq!(config.oidc.client_id, "table");
+  assert!(!config.oidc.enabled);
+  assert_eq!(config.oidc.audiences, ["a", "b"]);
+  assert!(!config.oidc_token_exchange.enabled);
+  assert_eq!(config.oidc_token_exchange.max_age, 7);
+  let config =
+    load(&[&table, &flat], env().with_vars(no_vars())).unwrap();
+  assert_eq!(config.oidc.client_id, "flat");
+  assert!(config.oidc.enabled);
+
+  // The environment over a flat file, parsed into the field's type.
+  let config = load(
+    &[&flat],
+    env().with_vars([
+      ("APP_OIDC_ENABLED", "false"),
+      ("APP_OIDC_AUDIENCES", "x, y"),
+      ("APP_OIDC_TOKEN_EXCHANGE_MAX_AGE", "9"),
+      ("APP_GOOGLE_OAUTH_CLIENT_ID", "env-g"),
+    ]),
+  )
+  .unwrap();
+  assert!(!config.oidc.enabled);
+  assert_eq!(config.oidc.audiences, ["x", "y"]);
+  assert_eq!(config.oidc.client_id, "flat");
+  assert_eq!(config.oidc_token_exchange.max_age, 9);
+  assert_eq!(config.google_oauth.client_id, "env-g");
+
+  // An env file source follows the same rule.
+  let env_file = dir.join("app.env");
+  std::fs::write(&env_file, "OIDC_ENABLED=true\nOIDC_CLIENT_ID=env-file\n")
+    .unwrap();
+  let config =
+    load(&[&env_file], env().with_vars(no_vars())).unwrap();
+  assert!(config.oidc.enabled);
+  assert_eq!(config.oidc.client_id, "env-file");
+
+  // Both spellings in one file: an error naming the file and both
+  // keys.
+  let both = dir.join("both.toml");
+  std::fs::write(&both, "oidc_enabled = true\n[oidc]\nenabled = true\n")
+    .unwrap();
+  let error = load(&[&both], env().with_vars(no_vars())).unwrap_err();
+  assert!(
+    matches!(
+      &error,
+      Error::FlatKeyTwice { path, key, field }
+        if path == &both && key == "oidc_enabled" && field == "oidc.enabled"
+    ),
+    "{error}"
+  );
+
+  // Without the rules, the flat keys are unknown fields: ignored.
+  let config = load(
+    &[&flat],
+    EnvSource::new("APP_").fields(["host"]).with_vars(no_vars()),
+  )
+  .unwrap();
+  assert_eq!(config.host, "h");
+  assert_eq!(config.oidc, Oidc::default());
+
+  // The rules are checked with the table.
+  for invalid in [
+    EnvSource::new("APP_").fields(["host"]).flat_prefix("oidc", ""),
+    EnvSource::new("APP_")
+      .fields(["host"])
+      .flat_prefix("oidc", "oidc_")
+      .flat_prefix("other", "oidc_"),
+    EnvSource::new("APP_").fields(["host"]).flat_prefix("", "oidc_"),
+  ] {
+    let error =
+      load(&[&flat], invalid.with_vars(no_vars())).unwrap_err();
+    assert!(matches!(error, Error::InvalidEnvSource { .. }), "{error}");
+  }
+  std::fs::remove_dir_all(dir).unwrap();
+}
+

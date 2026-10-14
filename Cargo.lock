@@ -2479,7 +2479,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_config"
-version = "4.1.1"
+version = "4.2.0"
 dependencies = [
  "cicada_loader",
  "colored",

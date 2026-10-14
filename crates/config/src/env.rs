@@ -1,11 +1,15 @@
 //! The process environment as a config source, see [EnvSource].
 
-use std::{collections::HashMap, ffi::OsString, path::Path};
+use std::{
+  collections::{HashMap, HashSet},
+  ffi::OsString,
+  path::Path,
+};
 
 use colored::Colorize;
 use serde::Serialize;
 
-use crate::{Error, Result};
+use crate::{Error, Result, flat::FlatPrefixes};
 
 /// The suffix of the variable which names a file holding the value
 /// of another (`KOMODO_JWT_SECRET_FILE` for `KOMODO_JWT_SECRET`).
@@ -98,10 +102,16 @@ pub const FILE_SUFFIX: &str = "_FILE";
 ///   field the config type also takes under another key (a serde
 ///   alias, eg. `mongo` for `database`) needs [Self::key_alias]: the
 ///   files' values under the other key then stay with the field.
+/// - **Flat tables.** [Self::flat_prefix] lets the config files
+///   spell the fields of a table as top-level keys with a prefix
+///   (`oidc_enabled` for `oidc.enabled`). Each source is rewritten
+///   as it is parsed, before the sources merge. The variables are
+///   not affected: named after the field's path either way.
 ///
 /// The table is checked when it is read: two variables of one name,
-/// a path inside another one's, an alias of no variable is an
-/// [Error::InvalidEnvSource], a mistake of the app.
+/// a path inside another one's, an alias of no variable, a flat
+/// prefix twice is an [Error::InvalidEnvSource], a mistake of the
+/// app.
 pub struct EnvSource {
   prefix: String,
   separator: String,
@@ -117,6 +127,9 @@ pub struct EnvSource {
   allow_empty: Vec<String>,
   /// `(path of the field, its other key)`, see [Self::key_alias].
   key_aliases: Vec<(Vec<String>, String)>,
+  /// `(path of the table, prefix of its flat keys)`, see
+  /// [Self::flat_prefix].
+  flat_prefixes: Vec<(Vec<String>, String)>,
   /// Read instead of the process environment, see
   /// [Self::with_vars].
   values: Option<Vec<(OsString, OsString)>>,
@@ -154,6 +167,7 @@ impl std::fmt::Debug for EnvSource {
       .field("file_specs", &self.file_specs)
       .field("allow_empty", &self.allow_empty)
       .field("key_aliases", &self.key_aliases)
+      .field("flat_prefixes", &self.flat_prefixes)
       .field(
         "values",
         &self.values.as_ref().map(|values| values.len()),
@@ -176,6 +190,7 @@ impl EnvSource {
       file_specs: Vec::new(),
       allow_empty: Vec::new(),
       key_aliases: Vec::new(),
+      flat_prefixes: Vec::new(),
       values: None,
     }
   }
@@ -317,6 +332,43 @@ impl EnvSource {
     alias: impl Into<String>,
   ) -> EnvSource {
     self.key_aliases.push((split(path), alias.into()));
+    self
+  }
+
+  /// The config files may also spell the fields of the table at
+  /// `path` (dot separated) as top-level keys starting with
+  /// `prefix`: with `flat_prefix("oidc", "oidc_")`, a file's
+  /// `oidc_enabled = true` reads as `oidc.enabled = true`, and so
+  /// does an env file's `OIDC_ENABLED=true`. Each source is
+  /// rewritten as it is parsed, before the sources merge, so two
+  /// files may spell a field differently (the later one still
+  /// overrides). The variables are not affected: `oidc.enabled` is
+  /// `APP_OIDC_ENABLED` either way. Only [load_with_env][crate::ConfigLoader::load_with_env]
+  /// applies the rules, as they are declared here.
+  ///
+  /// - The longest prefix wins: with
+  ///   `flat_prefix("oidc_token_exchange", "oidc_token_exchange_")`
+  ///   too, `oidc_token_exchange_enabled` is
+  ///   `oidc_token_exchange.enabled`, never
+  ///   `oidc.token_exchange_enabled`.
+  /// - A top-level key which is a field of the table (the first
+  ///   segment of a variable's path, or of a rule's path) is never
+  ///   a flat spelling, however it starts:
+  ///   `oidc_token_exchange = { enabled = true }` stays the field
+  ///   `oidc_token_exchange`.
+  /// - Keys match as written (`OIDC_ENABLED` in a toml file is not
+  ///   `oidc_enabled`), and the rest of the key is one field name:
+  ///   `oidc_a_b` is the field `a_b` of `oidc`.
+  /// - One file spelling a field both ways (`oidc_enabled` and
+  ///   `[oidc] enabled`), or holding the table's key as no table
+  ///   next to a flat key (`oidc = "x"`), is an error naming the
+  ///   file and both keys ([Error::FlatKeyTwice]), never a value.
+  pub fn flat_prefix(
+    mut self,
+    path: &str,
+    prefix: impl Into<String>,
+  ) -> EnvSource {
+    self.flat_prefixes.push((split(path), prefix.into()));
     self
   }
 
@@ -469,7 +521,55 @@ impl EnvSource {
         )));
       }
     }
+    for (index, (path, prefix)) in self.flat_prefixes.iter().enumerate()
+    {
+      if prefix.is_empty() || has_empty_segment(path) {
+        return Err(invalid(format!(
+          "the flat prefix '{prefix}' of '{}' has an empty prefix or path segment",
+          path.join(".")
+        )));
+      }
+      if self.flat_prefixes[index + 1..]
+        .iter()
+        .any(|(_, other)| other == prefix)
+      {
+        return Err(invalid(format!(
+          "the flat prefix '{prefix}' is declared twice"
+        )));
+      }
+    }
     Ok(Table { vars, aliases })
+  }
+
+  /// The rules of [Self::flat_prefix], checked with the table, see
+  /// [FlatPrefixes].
+  pub(crate) fn flat_prefixes(&self) -> Result<FlatPrefixes> {
+    let table = self.table()?;
+    let mut fields = HashSet::new();
+    for var in &table.vars {
+      if let Some(first) = var.path.first() {
+        fields.insert(first.clone());
+      }
+    }
+    for (path, _) in &self.flat_prefixes {
+      if let Some(first) = path.first() {
+        fields.insert(first.clone());
+      }
+    }
+    Ok(FlatPrefixes::new(self.flat_prefixes.clone(), fields))
+  }
+
+  /// Rewrites `source`, a parsed config file (named `file` in the
+  /// error), as the loader does before the sources merge: each flat
+  /// key of [Self::flat_prefix] moved into its table. For an app's
+  /// test of its own config file, say, checking that every key is
+  /// one the config type knows.
+  pub fn fold_flat_keys(
+    &self,
+    file: &Path,
+    source: &mut serde_json::Map<String, serde_json::Value>,
+  ) -> Result<()> {
+    self.flat_prefixes()?.fold(file, source)
   }
 
   /// The name [Self::fields] gives `path`.
