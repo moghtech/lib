@@ -46,9 +46,11 @@ impl FlatPrefixes {
       if self.fields.contains(&key) {
         continue;
       }
-      let Some((path, prefix)) = self.rules.iter().find(|(_, prefix)| {
-        key.len() > prefix.len() && key.starts_with(prefix.as_str())
-      }) else {
+      let Some((path, prefix)) =
+        self.rules.iter().find(|(_, prefix)| {
+          key.len() > prefix.len() && key.starts_with(prefix.as_str())
+        })
+      else {
         continue;
       };
       let field = key[prefix.len()..].to_string();

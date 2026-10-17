@@ -908,7 +908,7 @@ pub struct VerifiedWorkload {
 /// elsewhere than at its token endpoint (eg. a device's onboarding),
 /// where the rules that qualify tokens is up to the downstream application.
 ///
-/// Fails the same as other token exchange: 
+/// Fails the same as other token exchange:
 /// - `400` for a token no trusted issuer accepts or none of whose admitted rules match
 /// - `503` for an issuer whose keys could not be loaded (it might have accepted the token).
 /// Failures count against the failure rate limit of

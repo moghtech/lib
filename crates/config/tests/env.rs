@@ -891,8 +891,11 @@ google_oauth_id = "g"
 
   // An env file source follows the same rule.
   let env_file = dir.join("app.env");
-  std::fs::write(&env_file, "OIDC_ENABLED=true\nOIDC_CLIENT_ID=env-file\n")
-    .unwrap();
+  std::fs::write(
+    &env_file,
+    "OIDC_ENABLED=true\nOIDC_CLIENT_ID=env-file\n",
+  )
+  .unwrap();
   let config =
     load(&[&env_file], env().with_vars(no_vars())).unwrap();
   assert!(config.oidc.enabled);
@@ -901,8 +904,11 @@ google_oauth_id = "g"
   // Both spellings in one file: an error naming the file and both
   // keys.
   let both = dir.join("both.toml");
-  std::fs::write(&both, "oidc_enabled = true\n[oidc]\nenabled = true\n")
-    .unwrap();
+  std::fs::write(
+    &both,
+    "oidc_enabled = true\n[oidc]\nenabled = true\n",
+  )
+  .unwrap();
   let error = load(&[&both], env().with_vars(no_vars())).unwrap_err();
   assert!(
     matches!(
@@ -924,17 +930,23 @@ google_oauth_id = "g"
 
   // The rules are checked with the table.
   for invalid in [
-    EnvSource::new("APP_").fields(["host"]).flat_prefix("oidc", ""),
+    EnvSource::new("APP_")
+      .fields(["host"])
+      .flat_prefix("oidc", ""),
     EnvSource::new("APP_")
       .fields(["host"])
       .flat_prefix("oidc", "oidc_")
       .flat_prefix("other", "oidc_"),
-    EnvSource::new("APP_").fields(["host"]).flat_prefix("", "oidc_"),
+    EnvSource::new("APP_")
+      .fields(["host"])
+      .flat_prefix("", "oidc_"),
   ] {
     let error =
       load(&[&flat], invalid.with_vars(no_vars())).unwrap_err();
-    assert!(matches!(error, Error::InvalidEnvSource { .. }), "{error}");
+    assert!(
+      matches!(error, Error::InvalidEnvSource { .. }),
+      "{error}"
+    );
   }
   std::fs::remove_dir_all(dir).unwrap();
 }
-

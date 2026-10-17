@@ -521,7 +521,8 @@ impl EnvSource {
         )));
       }
     }
-    for (index, (path, prefix)) in self.flat_prefixes.iter().enumerate()
+    for (index, (path, prefix)) in
+      self.flat_prefixes.iter().enumerate()
     {
       if prefix.is_empty() || has_empty_segment(path) {
         return Err(invalid(format!(
