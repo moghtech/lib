@@ -248,15 +248,14 @@ coercion (`mogh_env_parser::from_str`), so it fills a struct exactly as a
   environments, the file missing) or to parse is an error too, rather than
   starting the app with its defaults, like a local file which doesn't parse.
 
-  The loader is not re-exported, so its API is no part of `mogh_config`'s: from
-  4.0, a `cicada_loader` minor (`0.x`) bump ships as a `mogh_config` minor
+  The loader is re-exported as `mogh_config::cicada_loader`, so an application
+  using its own API (starting the background with `cicada_loader::spawn()`,
+  reacting to changes with `on_change` / `subscribe`, `load_path_as`,
+  `load_env_as`) reaches it there, at the one version `mogh_config` uses, with
+  no second dependency to keep in line: two loader versions in one process
+  would each initialize a device from the same `CICADA_*` environment and key
+  file. A `cicada_loader` minor (`0.x`) bump ships as a `mogh_config` minor
   release (its notes name the loader's changes), and a loader patch bump as a
-  patch release. An application using the loader's own API (starting its
-  background with `cicada_loader::spawn()`, reacting to changes with
-  `on_change` / `subscribe`, `load_path_as`, `load_env_as`) depends on
-  `cicada_loader` itself,
-  at the minor this `mogh_config` uses, and checks that it stays so (eg.
-  `cargo tree --duplicates` listing no `cicada_loader`, in CI): two minors are
-  two loaders in one process, each initializing a device from the same
-  `CICADA_*` environment and key file. `CICADA_BACKGROUND=true` starts the
-  background without the loader's API.
+  patch release. The background starts on its own when something needs it: a
+  change hook, `CICADA_EXIT_ON_CHANGE`, `CICADA_KEY_ROTATION_INTERVAL`, or a
+  device key which expires under a max age.

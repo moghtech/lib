@@ -41,14 +41,15 @@
 //! network I/O, to run outside an async runtime (see
 //! [ConfigLoader::load]).
 //!
-//! The loader (`cicada_loader`) is not re-exported, so its API is no
-//! part of this crate's: a loader minor (`0.x`) bump ships as a
-//! minor release of this crate, a loader patch as a patch release.
-//! An application using the loader's own API (its background,
-//! `load_path_as`, `load_env_as`) depends on `cicada_loader` at the
-//! minor this crate uses: two minors would be two loaders in one
-//! process, each initializing a device from the same `CICADA_*`
-//! environment and key file.
+//! The loader is re-exported as [`cicada_loader`] with the feature,
+//! so an application reaches its own API (its background, the
+//! `on_change` / `subscribe` change hooks, `load_path_as`,
+//! `load_env_as`) as `mogh_config::cicada_loader::...`, at the one
+//! version this crate uses and with no second dependency to keep in
+//! line: two loader versions in one process would each initialize
+//! a device from the same `CICADA_*` environment and key file. A
+//! loader minor (`0.x`) bump ships as a minor release of this
+//! crate, a loader patch as a patch release.
 
 use std::{
   ffi::OsString,
@@ -67,6 +68,14 @@ mod interpolate;
 mod load;
 mod merge;
 
+/// The Cicada loader behind `cicada:` paths, for an application
+/// that wants its own API: the background ([cicada_loader::spawn]),
+/// the change hooks ([cicada_loader::on_change],
+/// [cicada_loader::subscribe]), typed loads
+/// ([cicada_loader::load_path_as]). Reached here, it is the one
+/// loader this crate uses.
+#[cfg(feature = "cicada")]
+pub use cicada_loader;
 pub use env::{EnvSource, FILE_SUFFIX};
 pub use error::{Error, deserialize_final};
 pub use interpolate::interpolate_env_and_shell;

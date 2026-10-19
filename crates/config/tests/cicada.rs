@@ -94,7 +94,6 @@ fn a_cicada_source_which_fails_to_load_is_an_error() {
     std::env::set_var("CICADA_CORE_ADDRESS", "http://127.0.0.1:1");
     std::env::set_var("CICADA_CORE_CONNECT_TIMEOUT_SECS", "1");
     std::env::set_var("CICADA_CORE_REQUEST_TIMEOUT_SECS", "1");
-    std::env::set_var("CICADA_BACKGROUND", "false");
     std::env::set_var(
       "CICADA_PRIVATE_KEY_FILE",
       dir.join("device.key"),
