@@ -683,13 +683,14 @@ dependencies = [
 
 [[package]]
 name = "cicada_loader"
-version = "0.25.2"
+version = "0.25.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99fe8aa926739d09a1f2bfa258268fe1638214ade57bd95cb7aa79d15cb50c8b"
+checksum = "05da048db79c355173c773bc261647155d0b5f862a796ade72f55bc84fe42023"
 dependencies = [
  "anyhow",
  "cicada_client",
  "envy",
+ "libc",
  "mogh_env_parser",
  "serde",
  "serde_json",
