@@ -75,3 +75,4 @@ import "./syntax/toml";
 import "./syntax/fancy_toml";
 import "./syntax/key_value";
 import "./syntax/string_list";
+import "./syntax/caddyfile";

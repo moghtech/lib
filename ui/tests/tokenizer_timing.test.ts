@@ -9,7 +9,7 @@ import { loadBuiltin, loadSyntax, tokenizer } from "./monarch.ts";
 // position, and retries one character further along when none matches,
 // so a rule which scans a run to its end before it fails made such a
 // line quadratic: up to ~1.3 s of main thread per edit of it.
-await loadSyntax("key_value", "fancy_toml", "toml", "string_list");
+await loadSyntax("key_value", "fancy_toml", "toml", "string_list", "caddyfile");
 // Monaco's own, which mogh_ui uses as they are.
 await loadBuiltin("yaml", "shell");
 
@@ -49,6 +49,31 @@ const CONTEXTS: Record<string, () => (line: string) => unknown> = {
   },
   toml: () => tokenizer("toml"),
   string_list: () => tokenizer("string_list"),
+  caddyfile: () => tokenizer("caddyfile"),
+  "caddyfile {": () => {
+    const tokenize = tokenizer("caddyfile");
+    tokenize("example.com {");
+    return tokenize;
+  },
+  'caddyfile "': () => {
+    const tokenize = tokenizer("caddyfile");
+    tokenize("example.com {");
+    tokenize('respond "');
+    return tokenize;
+  },
+  "caddyfile <<": () => {
+    const tokenize = tokenizer("caddyfile");
+    tokenize("example.com {");
+    tokenize("respond <<EOF");
+    return tokenize;
+  },
+  "caddyfile \\": () => {
+    const tokenize = tokenizer("caddyfile");
+    tokenize("example.com {");
+    tokenize("reverse_proxy \\");
+    return tokenize;
+  },
+  corefile: () => tokenizer("corefile"),
   yaml: () => tokenizer("yaml"),
   shell: () => tokenizer("shell"),
 };

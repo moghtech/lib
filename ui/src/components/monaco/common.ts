@@ -10,6 +10,8 @@ export type MonacoLanguage =
   | "string_list"
   | "shell"
   | "dockerfile"
+  | "caddyfile"
+  | "corefile"
   | "rust"
   | "javascript"
   | "typescript";
@@ -24,15 +26,41 @@ const LANGUAGE_EXTENSIONS: Record<MonacoLanguage, string[]> = {
   string_list: [],
   shell: [".sh", ".bash", ".zsh"],
   dockerfile: ["Dockerfile"],
+  caddyfile: ["Caddyfile", ".caddyfile", ".caddy"],
+  corefile: ["Corefile", ".corefile"],
   rust: [".rs"],
   javascript: [".js", ".jsx", ".mjs", ".cjs"],
   typescript: [".ts", ".tsx"],
 };
 
+/**
+ * File names which are a language's name and a variant after a dot:
+ * `Dockerfile.prod`, `Caddyfile.dev`, `Corefile.local`. Checked after
+ * `LANGUAGE_EXTENSIONS`, so `Caddyfile.json` is json.
+ */
+const LANGUAGE_NAME_PREFIXES: Partial<Record<MonacoLanguage, string[]>> = {
+  dockerfile: ["Dockerfile."],
+  caddyfile: ["Caddyfile."],
+  corefile: ["Corefile."],
+};
+
+/**
+ * The language of a file, by the end of its name (an extension, or a
+ * name like `Caddyfile` / `name.Caddyfile`) or the start of its base
+ * name (`Caddyfile.dev`). Case sensitive.
+ */
 export function languageFromPath(path: string) {
   for (const [lang, extensions] of Object.entries(LANGUAGE_EXTENSIONS)) {
     for (const extension of extensions) {
       if (path.endsWith(extension)) {
+        return lang as MonacoLanguage;
+      }
+    }
+  }
+  const name = path.split("/").pop() ?? path;
+  for (const [lang, prefixes] of Object.entries(LANGUAGE_NAME_PREFIXES)) {
+    for (const prefix of prefixes) {
+      if (name.startsWith(prefix)) {
         return lang as MonacoLanguage;
       }
     }
