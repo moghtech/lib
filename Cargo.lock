@@ -683,9 +683,9 @@ dependencies = [
 
 [[package]]
 name = "cicada_loader"
-version = "0.25.1"
+version = "0.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59dc4024eebb5ac6997a3e921a502d264a8aedcad6cbcd2651e696a7c4bba64b"
+checksum = "99fe8aa926739d09a1f2bfa258268fe1638214ade57bd95cb7aa79d15cb50c8b"
 dependencies = [
  "anyhow",
  "cicada_client",
@@ -2482,7 +2482,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_config"
-version = "4.3.1"
+version = "4.3.2"
 dependencies = [
  "cicada_loader",
  "colored",
