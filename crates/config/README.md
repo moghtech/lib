@@ -135,6 +135,33 @@ The rules:
 | Flat tables | `flat_prefix("oidc", "oidc_")` lets a config file spell the fields of the table `oidc` as top-level keys `oidc_enabled`, `oidc_client_id`, ... (an env file's `OIDC_ENABLED=true` too). Each source is rewritten as it is parsed, before the sources merge, so files may spell a field differently. The longest prefix wins, a top-level key which is a field of the config (the first segment of a variable's path, or a rule's path) is never a flat spelling, and one file spelling a field both ways is `Error::FlatKeyTwice`, naming the file and both keys. The variables are named after the field's path either way. |
 | The table | Checked when it is read: a name twice, a path inside another's, an alias of no variable is `Error::InvalidEnvSource`, the app's mistake. `names()` lists the table's variables (eg. for docs, or a test that a renamed field kept its variable). |
 
+The loader's own settings can come from the environment too, with
+`ConfigLoader::from_env()`: one variable per field, named after it with the
+prefix `CONFIG_`. `CONFIG_PATHS` and `CONFIG_MATCH_WILDCARDS` are comma
+separated lists, `CONFIG_INCLUDE_FILE_NAME` a name, `CONFIG_MERGE_NESTED`,
+`CONFIG_EXTEND_ARRAY` and `CONFIG_DEBUG_PRINT` `true` or `false` in any case,
+each read by the rules above (names in any case, blank is unset, `_FILE`, a
+value the field can't take is `Error::ParseEnv` naming the variable). A field
+whose variable is unset keeps `ConfigLoader::default()`'s value. The loader
+borrows its lists, so what is read is kept for the rest of the process: read
+the environment once, at startup. `ConfigLoader::from_vars` reads given
+variables instead (tests).
+
+```rust,no_run
+use mogh_config::ConfigLoader;
+
+#[derive(serde::Deserialize)]
+struct Config {
+  title: String,
+}
+
+// CONFIG_PATHS=/etc/app CONFIG_MATCH_WILDCARDS=*config.* CONFIG_MERGE_NESTED=true
+let config = ConfigLoader::from_env()
+  .expect("Failed to read the CONFIG_* variables")
+  .load::<Config>()
+  .expect("Failed to load the config");
+```
+
 ## Env files
 
 An env file is a flat configuration source: `NAME=value` lines, `#`

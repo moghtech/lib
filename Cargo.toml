@@ -23,7 +23,7 @@ mogh_auth_server = "8.0.0"
 
 # MOGH
 mogh_cache = "2.0.0"
-mogh_config = "4.3.0"
+mogh_config = "4.3.1"
 mogh_encryption = "3.0.0"
 mogh_env_parser = "1.0.1"
 mogh_error = "2.0.0"

@@ -25,6 +25,9 @@
 //! [ConfigLoader::load_with_env] with an [EnvSource], whose table
 //! names the variable of each field (`APP_DATABASE_ADDRESS` for
 //! `database.address`), each also taking a file (`APP_X_FILE`).
+//! The loader's own settings can come from it too:
+//! [ConfigLoader::from_env] reads one `CONFIG_*` variable per field
+//! (`CONFIG_PATHS`, `CONFIG_MATCH_WILDCARDS`, ...).
 //!
 //! With the `cicada` feature, a `cicada:` path among the paths (or
 //! on a line of an include file) is a source loaded from Cicada by
@@ -47,7 +50,10 @@
 //! process, each initializing a device from the same `CICADA_*`
 //! environment and key file.
 
-use std::path::{Path, PathBuf};
+use std::{
+  ffi::OsString,
+  path::{Path, PathBuf},
+};
 
 use colored::Colorize;
 use indexmap::IndexMap;
@@ -173,6 +179,163 @@ impl Default for ConfigLoader<'_, '_> {
       extend_array: false,
       debug_print: false,
     }
+  }
+}
+
+/// The settings of a [ConfigLoader] as the `CONFIG_*` variables give
+/// them, see [ConfigLoader::from_env]. The defaults are
+/// [ConfigLoader::default]'s.
+#[derive(serde::Deserialize)]
+#[serde(default)]
+struct LoaderEnv {
+  paths: Vec<PathBuf>,
+  match_wildcards: Vec<String>,
+  include_file_name: String,
+  merge_nested: bool,
+  extend_array: bool,
+  debug_print: bool,
+}
+
+impl Default for LoaderEnv {
+  fn default() -> Self {
+    let ConfigLoader {
+      paths,
+      match_wildcards,
+      include_file_name,
+      merge_nested,
+      extend_array,
+      debug_print,
+    } = ConfigLoader::default();
+    LoaderEnv {
+      paths: paths.iter().map(|path| path.to_path_buf()).collect(),
+      match_wildcards: match_wildcards
+        .iter()
+        .map(|wildcard| wildcard.to_string())
+        .collect(),
+      include_file_name: include_file_name.to_string(),
+      merge_nested,
+      extend_array,
+      debug_print,
+    }
+  }
+}
+
+/// The table of [ConfigLoader::from_env]: a variable per field of
+/// [LoaderEnv], named after it.
+fn loader_env_source() -> EnvSource {
+  EnvSource::new("CONFIG_").fields([
+    "paths",
+    "match_wildcards",
+    "include_file_name",
+    "merge_nested",
+    "extend_array",
+    "debug_print",
+  ])
+}
+
+/// A loader configured by the environment, see [Self::from_env].
+impl ConfigLoader<'static, 'static> {
+  /// A loader configured by the process environment: a variable per
+  /// field, named after the field with the prefix `CONFIG_`, read by
+  /// the rules of [EnvSource].
+  ///
+  /// - `CONFIG_PATHS`: [paths][Self::paths], a comma separated list
+  ///   (`/etc/app,./app.local.toml`; entries trimmed and empty ones
+  ///   dropped, so a path holding a comma can't be listed).
+  /// - `CONFIG_MATCH_WILDCARDS`:
+  ///   [match_wildcards][Self::match_wildcards], a comma separated
+  ///   list (`*config.*,*.env`).
+  /// - `CONFIG_INCLUDE_FILE_NAME`:
+  ///   [include_file_name][Self::include_file_name].
+  /// - `CONFIG_MERGE_NESTED`, `CONFIG_EXTEND_ARRAY`,
+  ///   `CONFIG_DEBUG_PRINT`: [merge_nested][Self::merge_nested],
+  ///   [extend_array][Self::extend_array] and
+  ///   [debug_print][Self::debug_print], `true` or `false` in any
+  ///   case.
+  ///
+  /// A variable unset, or set blank (nothing but whitespace and
+  /// commas), leaves its field at [Self::default]'s value. Names
+  /// match in any case (`config_paths`), `CONFIG_X_FILE` names a
+  /// file holding the value of `CONFIG_X`, and every other
+  /// `CONFIG_*` variable is ignored. A value a field can't take
+  /// (`CONFIG_MERGE_NESTED=yes`) is [Error::ParseEnv], naming the
+  /// variable and the field, never the value; a value which isn't
+  /// UTF-8 is [Error::EnvNotUnicode], a variable set twice in two
+  /// cases [Error::EnvVarSetTwice], and a `_FILE` which can't be
+  /// read [Error::EnvFile].
+  ///
+  /// The loader borrows its paths and patterns, so those read here
+  /// are kept for the rest of the process (a few strings, never
+  /// freed): read the environment once, at startup, then
+  /// [load][Self::load] or [load_with_env][Self::load_with_env].
+  /// [Self::from_vars] reads given variables instead, eg. in tests.
+  ///
+  /// ```no_run
+  /// # #[derive(serde::Deserialize)]
+  /// # struct Config { title: String }
+  /// // CONFIG_PATHS=/etc/app CONFIG_MATCH_WILDCARDS=*config.* app
+  /// let config = mogh_config::ConfigLoader::from_env()?
+  ///   .load::<Config>()?;
+  /// # Ok::<(), mogh_config::Error>(())
+  /// ```
+  pub fn from_env() -> Result<Self> {
+    Self::read_env(&loader_env_source())
+  }
+
+  /// [Self::from_env] reading these variables (names and values,
+  /// the whole environment) instead of the process environment, eg.
+  /// in a test of an app's startup.
+  pub fn from_vars<K, V>(
+    vars: impl IntoIterator<Item = (K, V)>,
+  ) -> Result<Self>
+  where
+    K: Into<OsString>,
+    V: Into<OsString>,
+  {
+    Self::read_env(&loader_env_source().with_vars(vars))
+  }
+
+  /// The loader the `CONFIG_*` table `env` reads, its lists kept
+  /// for the rest of the process.
+  fn read_env(env: &EnvSource) -> Result<Self> {
+    // No source but the environment: its values over the defaults.
+    let LoaderEnv {
+      paths,
+      match_wildcards,
+      include_file_name,
+      merge_nested,
+      extend_array,
+      debug_print,
+    } = ConfigLoader {
+      paths: &[],
+      match_wildcards: &[],
+      include_file_name: "",
+      merge_nested: false,
+      extend_array: false,
+      debug_print: false,
+    }
+    .load_with_env(env)?;
+    // Leaked: the loader borrows them, and nothing else could own
+    // them. Once per startup, a few strings.
+    let paths: &'static [PathBuf] = Vec::leak(paths);
+    let paths = paths
+      .iter()
+      .map(PathBuf::as_path)
+      .collect::<Vec<&'static Path>>();
+    let match_wildcards: &'static [String] =
+      Vec::leak(match_wildcards);
+    let match_wildcards = match_wildcards
+      .iter()
+      .map(String::as_str)
+      .collect::<Vec<&'static str>>();
+    Ok(ConfigLoader {
+      paths: Vec::leak(paths),
+      match_wildcards: Vec::leak(match_wildcards),
+      include_file_name: String::leak(include_file_name),
+      merge_nested,
+      extend_array,
+      debug_print,
+    })
   }
 }
 
