@@ -285,9 +285,12 @@ pub enum Error {
   CicadaFeatureDisabled { path: PathBuf },
 
   /// A `cicada:` config path (listed in the paths, or in an include
-  /// file) which failed to load from Cicada (Core unreachable, the
-  /// device not onboarded or not granted the environments, the file
-  /// missing, ...). An error rather than a skipped path, like
+  /// file) which is no cicada path the loader takes (nothing after
+  /// the scheme, a `..`, a query parameter other than `env` or one
+  /// without `=`) or which
+  /// failed to load from Cicada (Core unreachable, the device not
+  /// onboarded or not granted the environments, the file missing,
+  /// ...). An error rather than a skipped path, like
   /// [Error::CicadaFeatureDisabled].
   #[error("Failed to load cicada config at {path:?} | {message}")]
   CicadaLoad {

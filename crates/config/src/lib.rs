@@ -26,20 +26,26 @@
 //! names the variable of each field (`APP_DATABASE_ADDRESS` for
 //! `database.address`), each also taking a file (`APP_X_FILE`).
 //!
-//! With the `cicada` feature, `cicada://filesystem/path.yaml?env=a+b`
-//! loads a file from Cicada interpolated with the environments, and
+//! With the `cicada` feature, a `cicada:` path among the paths (or
+//! on a line of an include file) is a source loaded from Cicada by
+//! `cicada_loader`, in the loader's own syntax
+//! (`cicada_loader::CicadaPath`): `cicada://filesystem/path.yaml?env=a+b`
+//! is a file interpolated with the environments `a` and `b`, and
 //! `cicada://.env?env=a+b` the environments themselves as an env
-//! file. That is blocking network I/O, to run outside an async
-//! runtime (see [ConfigLoader::load]).
+//! file. This crate tells such a path by its `cicada:` scheme and
+//! hands it to the loader as written; the file's name inside Cicada
+//! picks its format here as for a local file. That is blocking
+//! network I/O, to run outside an async runtime (see
+//! [ConfigLoader::load]).
 //!
 //! The loader (`cicada_loader`) is not re-exported, so its API is no
 //! part of this crate's: a loader minor (`0.x`) bump ships as a
 //! minor release of this crate, a loader patch as a patch release.
 //! An application using the loader's own API (its background,
-//! `load_env_as`) depends on `cicada_loader` at the minor this crate
-//! uses: two minors would be two loaders in one process, each
-//! initializing a device from the same `CICADA_*` environment and
-//! key file.
+//! `load_path_as`, `load_env_as`) depends on `cicada_loader` at the
+//! minor this crate uses: two minors would be two loaders in one
+//! process, each initializing a device from the same `CICADA_*`
+//! environment and key file.
 
 use std::path::{Path, PathBuf};
 

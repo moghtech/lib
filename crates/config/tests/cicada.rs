@@ -31,6 +31,57 @@ fn a_cicada_source_which_fails_to_load_is_an_error() {
   let defaults = dir.join("defaults.toml");
   std::fs::write(&defaults, "port = 8080\n").unwrap();
 
+  // A path the loader's syntax refuses (nothing after the scheme, a
+  // `..`, a query parameter other than `env`) is an error naming the
+  // path as listed, before Core is asked anything: here, before the
+  // loader is even configured.
+  for path in [
+    "cicada://",
+    "cicada://app/../secrets.env?env=prod",
+    "cicada://app/secrets.env?enb=prod",
+  ] {
+    let err = ConfigLoader {
+      paths: &[&defaults, Path::new(path)],
+      match_wildcards: &[],
+      include_file_name: ".include",
+      merge_nested: true,
+      extend_array: false,
+      debug_print: false,
+    }
+    .load::<Config>()
+    .unwrap_err();
+    let Error::CicadaLoad {
+      path: listed,
+      message,
+    } = &err
+    else {
+      panic!("expected a cicada load error for {path}, got {err}");
+    };
+    assert_eq!(listed, Path::new(path));
+    assert!(message.contains("Invalid cicada path"), "{message}");
+  }
+
+  // A file of no config type, told by its name inside Cicada, is
+  // refused as the listed path before the device is initialized or
+  // the file read: here, before the loader is even configured.
+  let err = ConfigLoader {
+    paths: &[
+      &defaults,
+      Path::new("cicada://app/config.txt?env=prod"),
+    ],
+    match_wildcards: &[],
+    include_file_name: ".include",
+    merge_nested: true,
+    extend_array: false,
+    debug_print: false,
+  }
+  .load::<Config>()
+  .unwrap_err();
+  let Error::UnsupportedFileType { path } = &err else {
+    panic!("expected an unsupported file type error, got {err}");
+  };
+  assert_eq!(path, Path::new("cicada://app/config.txt?env=prod"));
+
   // Safety: the only test in this binary, and the loader reads the
   // environment on the load below.
   unsafe {

@@ -198,10 +198,15 @@ coercion (`mogh_env_parser::from_str`), so it fills a struct exactly as a
 ## Features
 
 - `cicada` (off by default since 3.0): load config from [Cicada](https://github.com/moghtech/cicada)
-  with `cicada:` paths, eg. `cicada://filesystem/config.yaml?env=prod` for a
-  file interpolated with the `prod` environment, or `cicada://.env?env=base+prod`
-  for the environments themselves as an env file. It pulls the Cicada client
-  into the build, so it is opt in:
+  with `cicada:` paths, the syntax of the
+  [`cicada_loader`](https://crates.io/crates/cicada_loader) crate
+  (`cicada_loader::CicadaPath`): `cicada://filesystem/config.yaml?env=prod` is a
+  file interpolated with the `prod` environment, `cicada://.env?env=base+prod`
+  the environments themselves as an env file, and `+` layers environments (later
+  wins). This crate tells such a path by its `cicada:` scheme and hands it to the
+  loader as written, which parses and loads it; the file's name inside Cicada
+  picks the format (`config.yaml` as yaml, `.env` as an env file), as for a local
+  file. The feature pulls the Cicada client into the build, so it is opt in:
   `mogh_config = { version = "4", features = ["cicada"] }`.
   A `cicada:` line in an include file is a source like a `cicada:` path.
   Loading a `cicada:` source is blocking network I/O (reqwest's blocking
@@ -211,17 +216,18 @@ coercion (`mogh_env_parser::from_str`), so it fills a struct exactly as a
   `tokio::task::spawn_blocking`. On a runtime thread it panics in debug builds
   and blocks the worker in release builds.
   Without the feature a `cicada:` path is an error, not a skipped path. With
-  it, a `cicada:` source which fails to load (`Error::CicadaLoad`: Core
-  unreachable, the device not onboarded or not granted the environments, the
-  file missing) or to parse is an error too, rather than starting the app with
-  its defaults, like a local file which doesn't parse.
+  it, a `cicada:` source which fails to load (`Error::CicadaLoad`: no path the
+  loader takes, Core unreachable, the device not onboarded or not granted the
+  environments, the file missing) or to parse is an error too, rather than
+  starting the app with its defaults, like a local file which doesn't parse.
 
   The loader is not re-exported, so its API is no part of `mogh_config`'s: from
   4.0, a `cicada_loader` minor (`0.x`) bump ships as a `mogh_config` minor
   release (its notes name the loader's changes), and a loader patch bump as a
   patch release. An application using the loader's own API (starting its
   background with `cicada_loader::spawn()`, reacting to changes with
-  `on_change` / `subscribe`, `load_env_as`) depends on `cicada_loader` itself,
+  `on_change` / `subscribe`, `load_path_as`, `load_env_as`) depends on
+  `cicada_loader` itself,
   at the minor this `mogh_config` uses, and checks that it stays so (eg.
   `cargo tree --duplicates` listing no `cicada_loader`, in CI): two minors are
   two loaders in one process, each initializing a device from the same
