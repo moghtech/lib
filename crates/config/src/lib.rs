@@ -98,6 +98,8 @@ pub struct ConfigLoader<'outer, 'inner> {
   /// Path coming later in the array (higher index) will override
   /// configuration in earlier paths. A path which doesn't exist is
   /// skipped, one which exists must load: see [ConfigLoader::load].
+  ///
+  /// Default: empty
   pub paths: &'outer [&'inner Path],
   /// Wilcard patterns to match file names in given directories.
   ///
@@ -112,6 +114,8 @@ pub struct ConfigLoader<'outer, 'inner> {
   /// A pattern which doesn't compile is an error
   /// ([Error::InvalidWildcard]). With no patterns, a directory scan
   /// loads every file in it except env files.
+  ///
+  /// Default: ["*config*"]
   pub match_wildcards: &'outer [&'inner str],
   /// The file name to search for `.include` file.
   ///
@@ -125,6 +129,8 @@ pub struct ConfigLoader<'outer, 'inner> {
   /// A line naming a missing path is skipped like a missing path,
   /// and an include file which exists but can't be read is an
   /// error. An empty name reads no include file.
+  ///
+  /// Default: ".include"
   pub include_file_name: &'static str,
   /// Whether to merge nested config objects.
   /// Otherwise, the object will be replaced at
@@ -135,6 +141,8 @@ pub struct ConfigLoader<'outer, 'inner> {
   /// commented out) keeps the object, and any other value replaces
   /// it (the final deserialization reports one the config type
   /// can't take): a source is never dropped over a type conflict.
+  ///
+  /// Default: false
   pub merge_nested: bool,
   /// Whether to extend array in configuration files.
   /// Otherwise, the array will be replaced at
@@ -144,11 +152,28 @@ pub struct ConfigLoader<'outer, 'inner> {
   /// When extending, a `null` adds nothing, an env file's comma
   /// separated value (`HOSTS=b,c`) adds its entries, and any other
   /// value replaces the array.
+  ///
+  /// Default: false
   pub extend_array: bool,
   /// Print some extra information on configuation load.
   ///
   /// Note. This is different than application level log level.
+  ///
+  /// Default: false
   pub debug_print: bool,
+}
+
+impl Default for ConfigLoader<'_, '_> {
+  fn default() -> Self {
+    Self {
+      paths: &[],
+      match_wildcards: &["*config*"],
+      include_file_name: ".include",
+      merge_nested: false,
+      extend_array: false,
+      debug_print: false,
+    }
+  }
 }
 
 impl ConfigLoader<'_, '_> {
