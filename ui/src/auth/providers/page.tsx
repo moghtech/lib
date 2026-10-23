@@ -60,6 +60,7 @@ const KIND_ICONS: Record<
 export function LoginProviderPage({
   id,
   backTo,
+  adminGroups = true,
   onDeleted,
   children,
 }: {
@@ -67,6 +68,10 @@ export function LoginProviderPage({
   id: string;
   /** Where the back button (and a deletion) leads. */
   backTo: string;
+  /** Offer an OIDC provider's admin groups. Off for an app whose
+   * providers never make a user an admin: the field is hidden, and
+   * the provider keeps the groups it has. */
+  adminGroups?: boolean;
   /** Called after the provider was deleted, before navigating back. */
   onDeleted?: () => void;
   /** Rendered below the configuration: what the app knows about the
@@ -248,6 +253,7 @@ export function LoginProviderPage({
             // Reset the draft for another provider
             key={item.provider.id}
             item={item}
+            adminGroups={adminGroups}
             onSave={async (values) => {
               await update(providerUpdate(item, values));
             }}
@@ -274,9 +280,11 @@ type ListItem =
  */
 function LoginProviderConfig({
   item,
+  adminGroups,
   onSave,
 }: {
   item: ListItem;
+  adminGroups: boolean;
   onSave: (values: ProviderFormValues) => Promise<unknown>;
 }) {
   const kind = item.provider.config.kind;
@@ -295,7 +303,7 @@ function LoginProviderConfig({
   const groupsUsed =
     !!values.groups_claim.trim() ||
     values.allowed_groups.length > 0 ||
-    values.admin_groups.length > 0;
+    (adminGroups && values.admin_groups.length > 0);
 
   // A list field, labelled after its key (ConfigItem spaces snake case).
   const tags =
@@ -437,24 +445,32 @@ function LoginProviderConfig({
               },
               allowed_groups: tags(
                 "allowed_groups",
-                "Only members of one of these groups (or an admin group) can log in. Empty allows everyone.",
+                adminGroups
+                  ? "Only members of one of these groups (or an admin group) can log in. Empty allows everyone."
+                  : "Only members of one of these groups can log in. Empty allows everyone.",
                 "Add group",
               ),
-              admin_groups: (value, set) => (
-                <Stack>
-                  {tags(
-                    "admin_groups",
-                    "Members of these groups are made admins when they log in.",
-                    "Add group",
-                  )(value, set)}
-                  {values.admin_groups.length > 0 && !readOnly && (
-                    <Alert icon={<ShieldAlert size="1rem" />} color="yellow">
-                      Anyone who controls membership of these groups at the
-                      provider can make themselves an admin here.
-                    </Alert>
-                  )}
-                </Stack>
-              ),
+              // A field set to false is not rendered.
+              admin_groups: adminGroups
+                ? (value, set) => (
+                    <Stack>
+                      {tags(
+                        "admin_groups",
+                        "Members of these groups are made admins when they log in.",
+                        "Add group",
+                      )(value, set)}
+                      {values.admin_groups.length > 0 && !readOnly && (
+                        <Alert
+                          icon={<ShieldAlert size="1rem" />}
+                          color="yellow"
+                        >
+                          Anyone who controls membership of these groups at the
+                          provider can make themselves an admin here.
+                        </Alert>
+                      )}
+                    </Stack>
+                  )
+                : false,
               additional_scopes: tags(
                 "additional_scopes",
                 "Requested on top of openid, profile and email. The 'groups' scope is requested automatically when the provider advertises it." +

@@ -62,6 +62,7 @@ export function TrustedIssuerPage({
   id,
   backTo,
   groupOptions,
+  ruleAdmin = true,
   onDeleted,
   children,
 }: {
@@ -71,6 +72,10 @@ export function TrustedIssuerPage({
   backTo: string;
   /** The groups of the app, suggested for the groups of a rule. */
   groupOptions?: string[];
+  /** Offer the rules' admin flag. Off for an app whose rules never
+   * make a workload an admin: the switch and the badges are hidden,
+   * and a rule keeps the flag it has. */
+  ruleAdmin?: boolean;
   /** Called after the issuer was deleted, before navigating back. */
   onDeleted?: () => void;
   /** Rendered below the configuration: what the app knows about the
@@ -218,7 +223,7 @@ export function TrustedIssuerPage({
                       ? rules.length
                       : `${enabledRules.length} of ${rules.length} enabled`}
                   </Text>
-                  {enabledRules.some((rule) => rule.admin) && (
+                  {ruleAdmin && enabledRules.some((rule) => rule.admin) && (
                     <Badge color="yellow" title="A rule grants admin">
                       Admin
                     </Badge>
@@ -236,6 +241,7 @@ export function TrustedIssuerPage({
             key={item.issuer.id}
             item={item}
             groupOptions={groupOptions}
+            ruleAdmin={ruleAdmin}
             onSave={async (values) => {
               await update({ issuer: trustedIssuer(item.issuer.id, values) });
             }}
@@ -257,10 +263,12 @@ export function TrustedIssuerPage({
 function TrustedIssuerConfig({
   item,
   groupOptions,
+  ruleAdmin,
   onSave,
 }: {
   item: ListItem;
   groupOptions?: string[];
+  ruleAdmin: boolean;
   onSave: (values: IssuerFormValues) => Promise<unknown>;
 }) {
   const readOnly = item.read_only;
@@ -407,6 +415,7 @@ function TrustedIssuerConfig({
                   onChange={(rules) => set({ rules })}
                   readOnly={readOnly}
                   groupOptions={groupOptions}
+                  ruleAdmin={ruleAdmin}
                   errors={shown}
                 />
               ),
@@ -424,12 +433,14 @@ function RulesEditor({
   onChange,
   readOnly,
   groupOptions,
+  ruleAdmin,
   errors,
 }: {
   rules: RuleFormValues[];
   onChange: (rules: RuleFormValues[]) => void;
   readOnly: boolean;
   groupOptions?: string[];
+  ruleAdmin: boolean;
   /** The errors to show, by path (`issuerFormErrors`). */
   errors: Record<string, string>;
 }) {
@@ -588,16 +599,18 @@ function RulesEditor({
             disabled={readOnly}
           />
 
-          <Switch
-            checked={rule.admin}
-            onChange={(e) => setRule(r, { admin: e.currentTarget.checked })}
-            label="Admin"
-            description="The rule's user is an admin"
-            color="red"
-            disabled={readOnly}
-          />
+          {ruleAdmin && (
+            <Switch
+              checked={rule.admin}
+              onChange={(e) => setRule(r, { admin: e.currentTarget.checked })}
+              label="Admin"
+              description="The rule's user is an admin"
+              color="red"
+              disabled={readOnly}
+            />
+          )}
 
-          {rule.admin && !readOnly && (
+          {ruleAdmin && rule.admin && !readOnly && (
             <Alert icon={<ShieldAlert size="1rem" />} color="yellow">
               Every workload matching this rule acts as an admin. Make sure its
               claims only match what you intend.

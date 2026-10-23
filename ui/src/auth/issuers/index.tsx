@@ -35,10 +35,15 @@ type ListItem = MoghAuth.Types.TrustedIssuerListItem;
  */
 export function TrustedIssuersTable({
   link,
+  ruleAdmin = true,
   ...sectionProps
 }: {
   /** The route of an issuer's page (`TrustedIssuerPage`), by its id. */
   link: (id: string) => string;
+  /** Mark the issuers with a rule granting admin. Off for an app
+   * whose rules never make a workload an admin (see
+   * `TrustedIssuerPage`'s `ruleAdmin`). */
+  ruleAdmin?: boolean;
 } & SectionProps) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -226,11 +231,12 @@ export function TrustedIssuersTable({
                       ? rules.length
                       : `${enabled} of ${rules.length} enabled`}
                   </Text>
-                  {rules.some((rule) => rule.enabled && rule.admin) && (
-                    <Badge color="yellow" title="A rule grants admin">
-                      Admin
-                    </Badge>
-                  )}
+                  {ruleAdmin &&
+                    rules.some((rule) => rule.enabled && rule.admin) && (
+                      <Badge color="yellow" title="A rule grants admin">
+                        Admin
+                      </Badge>
+                    )}
                 </Group>
               );
             },
