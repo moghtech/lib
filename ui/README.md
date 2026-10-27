@@ -71,7 +71,7 @@ import { ThemeProvider } from "mogh_ui";
   login is enabled), the linked providers (`LinkedLogins`) and 2FA
   (`EnrollPasskey`, `EnrollTotp`, skipping it for external logins). The
   app maps its user to `{ username, passwordSet, totpEnrolled,
-  passkeyEnrolled, externalSkip2fa, linkedLogins }` and keeps its own
+passkeyEnrolled, externalSkip2fa, linkedLogins }` and keeps its own
   sections around it (`loginExtra` adds to the Login section, eg.
   ending the user's sessions).
 - The login page's `backto` (`backtoPath`) is only followed to a path on
@@ -180,6 +180,22 @@ import { ThemeProvider } from "mogh_ui";
 - `EnableSwitch` with `toggleOnEnter`: Enter toggles it as Space does,
   through its own `onChange` / `onCheckedChange` (eg. a form's
   `getInputProps`), instead of submitting the form around it.
+- `CredentialKeysTable` is the profile page's list of a user's api keys
+  or signing keys (`CredentialKey` rows: `id`, `name`, `enabled`,
+  `expires_at`, `cidr_whitelist`, the timestamps as unix ms or ISO
+  8601): the name renamed inline, the app's `keyColumn`, the enabled
+  switch, `ExpiresIn`, the source ips (`CidrWhitelistCell`, an inline
+  editor which stays open when the save is refused), the timestamps,
+  a search, and a confirmed delete of the selected rows. `update` and
+  `onDelete` are the app's writes; a rejected update keeps the editor
+  open. It sorts and searches its rows itself unless the app passes
+  its server-side `sortBy` / `tableSortProps` / `search` /
+  `selection`. `nameError` is the rename rule (`credentialNameError`:
+  at most 200 characters, blank refused unless `required: false`).
+  `CidrWhitelistInput` is the create forms' input of the same list.
+- `signing-key.ts` tells public keys apart (`publicKeyExcerpt`) and
+  checks a pasted one before it is sent (`publicKeyError`, with the
+  app's `publicKeyHints(keyFile)`, `publicKeyValue`, `isPrivateKey`).
 - `useKeyListener` / `useShiftKeyListener` / `useCtrlKeyListener`: a
   handler returning `false` declines the press, which then keeps its
   browser default (eg. Enter on a focused button).
@@ -219,9 +235,9 @@ import { ThemeProvider } from "mogh_ui";
   supporter page, a switch to hide the name for an icon which
   includes it, a switch to show the name in capital letters, and a
   switch to show icon and name in place of the app's home button. The topbar gets it from `useSupporterBrand({ app,
-  releaseDate, rootKeys })`: `supporter` and `branding` go to
+releaseDate, rootKeys })`: `supporter` and `branding` go to
   `SupporterBadge`, and `homeBrand` to `SupporterHomeButton({ brand,
-  wordmark, logo })`, the topbar's home button: the app's logo and
+wordmark, logo })`, the topbar's home button: the app's logo and
   name, or while `homeBrand` is set the brand's icon (the app's logo
   while it has none) and name, still linking to `/`, and the badge
   renders nothing. The button makes room for an icon higher than
