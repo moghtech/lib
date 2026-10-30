@@ -996,7 +996,7 @@ sign the path the server receives: `signed_request_headers` takes the host
 - The signature is over these lines, joined by `\n` without a trailing one:
 
   ```text
-  mogh-signed-request-v1
+  MOGH1-ED25519
   {host}
   {method}
   {path_and_query}

@@ -78,10 +78,11 @@ pub const API_PUBLIC_KEY_HEADER: &str = "x-api-public-key";
 pub const API_HOST_HEADER: &str = "x-api-host";
 pub const API_NONCE_HEADER: &str = "x-api-nonce";
 
-/// The first line of every [SignedRequest::message]. A signature made
-/// with the same key for anything else never verifies as a request,
-/// and a later format gets another version.
-pub const SIGNED_REQUEST_VERSION: &str = "mogh-signed-request-v1";
+/// The first line of every [SignedRequest::message]: the format
+/// (`MOGH1`) and the signature primitive. A signature made with the same key for
+/// anything else never verifies as a request, and a later format or
+/// another primitive gets another first line.
+pub const SIGNED_REQUEST_VERSION: &str = "MOGH1-ED25519";
 
 /// How the error starts (`401`) which a server answers a request
 /// with that is signed for a host ([API_HOST_HEADER]) it is not
@@ -142,7 +143,7 @@ impl SignedRequest<'_> {
   /// without a trailing one.
   ///
   /// ```text
-  /// mogh-signed-request-v1
+  /// MOGH1-ED25519
   /// {host}
   /// {method}
   /// {path_and_query}
@@ -523,13 +524,13 @@ mod tests {
     assert_eq!(
       request("POST", "/auth/manage?x=1", b"").message(),
       format!(
-        "mogh-signed-request-v1\nexample.com\nPOST\n/auth/manage?x=1\n1234\n{NONCE}\n{EMPTY_SHA256}"
+        "MOGH1-ED25519\nexample.com\nPOST\n/auth/manage?x=1\n1234\n{NONCE}\n{EMPTY_SHA256}"
       )
     );
     assert_eq!(
       request("POST", "/read", b"{}").message(),
       format!(
-        "mogh-signed-request-v1\nexample.com\nPOST\n/read\n1234\n{NONCE}\n44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        "MOGH1-ED25519\nexample.com\nPOST\n/read\n1234\n{NONCE}\n44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
       )
     );
     // Every field is signed as it is given: methods are case
@@ -857,9 +858,9 @@ mod tests {
     };
     assert_eq!(
       request.message(),
-      "mogh-signed-request-v1\nexample.com\nPOST\n/read?x=1\n1718000000000\n0123456789abcdef0123456789abcdef\n1063e6f54ccbb0c3e238533021c0952c1cd6c646f177a3bd44b396d640d8a0d8"
+      "MOGH1-ED25519\nexample.com\nPOST\n/read?x=1\n1718000000000\n0123456789abcdef0123456789abcdef\n1063e6f54ccbb0c3e238533021c0952c1cd6c646f177a3bd44b396d640d8a0d8"
     );
-    let signature = "Njr3/bBJ/8KlrrnfSauEu0CQZg8NvcK1WIeNqfC6kXri2ZHm3whO7Z8JINSNeknfgE4kFv9gfJbt4bu9TW1kAw==";
+    let signature = "6bjRdFlvAuIZdoF5TkwRxSbdaW4hlMGmr2/b8EA7kJk8kvlXlG/dCfaJv7BdFs25rxNJNvRIrlcl7/S7YuRcAg==";
     assert_eq!(
       sign_request(private_key, &request).unwrap(),
       signature

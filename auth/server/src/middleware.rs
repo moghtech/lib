@@ -3204,7 +3204,7 @@ mod tests {
       assert_eq!(
         message,
         format!(
-          "mogh-signed-request-v1\nexample.com\nPOST\n/auth/manage?x=1\n1234\n{NONCE}\n{empty}"
+          "MOGH1-ED25519\nexample.com\nPOST\n/auth/manage?x=1\n1234\n{NONCE}\n{empty}"
         )
       );
     }
@@ -3218,7 +3218,7 @@ mod tests {
         b"{}"
       ),
       format!(
-        "mogh-signed-request-v1\n10.0.0.5:9120\nPOST\n/read\n1234\n{NONCE}\n44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        "MOGH1-ED25519\n10.0.0.5:9120\nPOST\n/read\n1234\n{NONCE}\n44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
       )
     );
   }

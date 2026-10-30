@@ -18,8 +18,8 @@ repository = "https://github.com/moghtech/lib"
 
 [workspace.dependencies]
 # MOGH API
-mogh_auth_client = "8.0.0"
-mogh_auth_server = "8.0.0"
+mogh_auth_client = "9.0.0"
+mogh_auth_server = "9.0.0"
 
 # MOGH
 mogh_cache = "2.0.0"
@@ -35,7 +35,7 @@ mogh_resolver = "2.0.0"
 mogh_resolver_derive = "2.0.0"
 mogh_secret_file = "2.0.0"
 mogh_server = "3.0.0"
-mogh_supporter = "2.0.0"
+mogh_supporter = "3.0.0"
 mogh_validations = "2.0.0"
 
 # CICADA
