@@ -4,6 +4,8 @@
 // rejects with the same `RequestError`, which the UIs handle in one
 // place for auth and app requests alike.
 
+import { SIGNED_AT_ANOTHER_TIME, type RequestSigner } from "./signature.js";
+
 /**
  * A failed request, as the promises of `MoghAuthClient` and
  * `fetchJson` reject.
@@ -40,6 +42,11 @@ export type RequestError = {
  * - a JWT, sent as `Authorization`. A string is the shorthand
  *   of `{ jwt }`.
  * - an api key, sent as `X-API-KEY` / `X-API-SECRET`.
+ * - a signing key, as a `RequestSigner` (`requestSigner`): every
+ *   request is signed right before it is sent (`fetchSignedJson`), the
+ *   key itself is never sent. It has no static headers:
+ *   `credentialHeaders` gives none for it, `credentialSigner` gives
+ *   the signer.
  *
  * A `jwt` is sent when set, otherwise the api key when both `key` and
  * `secret` are, otherwise nothing: the request then only carries the
@@ -50,15 +57,23 @@ export type RequestError = {
 export type ClientCredential =
   | string
   | { jwt?: string | undefined }
-  | { key: string; secret: string };
-
-/** The headers of an api key, as `credentialHeaders` sends it. */
-const API_KEY_HEADERS = ["x-api-key", "x-api-secret"];
+  | { key: string; secret: string }
+  | { sign: RequestSigner };
 
 /**
- * The headers which send `credential` (see `ClientCredential`). Send a
- * request with an api key through `fetchJson` / `fetchResponse`, or
- * with `redirect: "error"` (see `fetchResponse`).
+ * The headers a request isn't sent on to wherever a redirect points
+ * with (see `fetchResponse`): an api key, and a request signature
+ * (which no other host verifies anyway, but a `307` / `308` would send
+ * the body again).
+ */
+const NO_REDIRECT_HEADERS = ["x-api-key", "x-api-secret", "x-api-signature"];
+
+/**
+ * The headers which send `credential` (see `ClientCredential`): none
+ * for a signing key, whose requests go through `fetchSignedJson` with
+ * `credentialSigner`. Send a request with an api key through
+ * `fetchJson` / `fetchResponse`, or with `redirect: "error"` (see
+ * `fetchResponse`).
  */
 export function credentialHeaders(
   credential: ClientCredential | undefined,
@@ -75,6 +90,15 @@ export function credentialHeaders(
     return { "x-api-key": key, "x-api-secret": secret };
   }
   return {};
+}
+
+/** The signer of a signing key credential, `undefined` for the others. */
+export function credentialSigner(
+  credential: ClientCredential | undefined,
+): RequestSigner | undefined {
+  if (!credential || typeof credential !== "object") return undefined;
+  const { sign } = credential as { sign?: unknown };
+  return typeof sign === "function" ? (sign as RequestSigner) : undefined;
 }
 
 /**
@@ -149,9 +173,9 @@ export async function responseJson<Res>(response: Response): Promise<Res> {
  * `requestFailed` when no response came, `responseError` for another
  * status.
  *
- * A request carrying an api key (`X-API-KEY` / `X-API-SECRET`) doesn't
- * follow redirects, unless `init.redirect` says otherwise: a redirect
- * rejects with `status: 1`. `fetch` outside a browser (node, Deno, a
+ * A request carrying an api key (`X-API-KEY` / `X-API-SECRET`) or a
+ * signature (`X-API-SIGNATURE`) doesn't follow redirects, unless
+ * `init.redirect` says otherwise: a redirect rejects with `status: 1`. `fetch` outside a browser (node, Deno, a
  * Komodo Action) drops only `Authorization` (and the browser's
  * cookies) on a redirect to another origin, and sends the other
  * headers on to wherever it points: the login page of an SSO proxy in
@@ -176,15 +200,15 @@ export async function fetchResponse(
 }
 
 /**
- * `init` with `redirect: "error"` when it carries an api key and
- * doesn't set `redirect` itself (see `fetchResponse`).
+ * `init` with `redirect: "error"` when it carries an api key or a
+ * signature and doesn't set `redirect` itself (see `fetchResponse`).
  */
 function withRedirectPolicy(
   init: RequestInit | undefined,
 ): RequestInit | undefined {
   if (!init || init.redirect !== undefined) return init;
   const headers = new Headers(init.headers);
-  if (!API_KEY_HEADERS.some((name) => headers.has(name))) return init;
+  if (!NO_REDIRECT_HEADERS.some((name) => headers.has(name))) return init;
   return { ...init, redirect: "error" };
 }
 
@@ -206,6 +230,168 @@ export async function fetchJson<Res>(
   init?: RequestInit,
 ): Promise<Res> {
   return await responseJson<Res>(await fetchResponse(input, init));
+}
+
+/**
+ * The error of a signed request which carries other credentials. The
+ * server would take those over the signature, and count what it makes
+ * of them against the client: it is not sent.
+ */
+export const OTHER_CREDENTIALS =
+  "The request carries other credentials (a `user:password@` in the url, an Authorization header or an api key), which the server takes over the signature";
+
+/**
+ * Send a request signed with a signing key (`sign`, see
+ * `requestSigner`), and resolve with its `200` response. Rejects with a
+ * `RequestError` otherwise, like `fetchResponse`, and never with
+ * anything else: a key which doesn't parse, or a request no server
+ * could accept, reject with `status: 1` and the reason as the `trace`.
+ *
+ * The body (a string or bytes, nothing else: it is sent exactly as
+ * signed) is signed right before each attempt, with a new timestamp
+ * and nonce. The signature is made before the request is sent, so the
+ * time to connect (DNS, TCP and TLS of a new connection) counts
+ * against the timestamp tolerance of the server, a second by default:
+ * on a slow link the first request over a new connection can arrive
+ * too late. The server tells so (`401`, `SIGNED_AT_ANOTHER_TIME`),
+ * which it finds out before anything else and counts against nobody.
+ * Then the request goes out once more, signed anew, over a connection
+ * opened before it is signed: an unsigned `HEAD` to the url opens it,
+ * which carries no credentials. Only once: any other answer, a second
+ * refusal included, is the result.
+ *
+ * A signed request follows no redirect (`redirect: "error"`) and
+ * carries no cookies (`credentials: "omit"`), unless `init` sets
+ * either. Other credentials in it (an `Authorization` header, an api
+ * key, a `user:password@` in the url) are refused
+ * (`OTHER_CREDENTIALS`): the server takes them over the signature.
+ */
+export async function fetchSignedResponse(
+  input: string | URL,
+  init: RequestInit,
+  sign: RequestSigner,
+): Promise<Response> {
+  const url = typeof input === "string" ? input : input.href;
+  const method = sentMethod(init.method);
+  const body = init.body ?? undefined;
+  if (
+    body !== undefined &&
+    typeof body !== "string" &&
+    !(body instanceof Uint8Array)
+  ) {
+    throw requestFailed(
+      new Error(
+        "A signed request body has to be a string or bytes, sent exactly as signed",
+      ),
+    );
+  }
+  const headers: Record<string, string> = {};
+  new Headers(init.headers).forEach((value, name) => {
+    headers[name] = value;
+  });
+  if (
+    urlHasCredentials(url) ||
+    "authorization" in headers ||
+    "x-api-key" in headers ||
+    "x-api-secret" in headers
+  ) {
+    throw requestFailed(new Error(OTHER_CREDENTIALS));
+  }
+  const attempt = async (): Promise<Response> => {
+    let signed: Record<string, string>;
+    try {
+      signed = await sign({ method, url, body });
+    } catch (error) {
+      throw requestFailed(error);
+    }
+    try {
+      return await fetch(url, {
+        ...init,
+        method,
+        body,
+        headers: { ...headers, ...signed },
+        redirect: init.redirect ?? "error",
+        credentials: init.credentials ?? "omit",
+      });
+    } catch (error) {
+      throw requestFailed(error);
+    }
+  };
+  let response = await attempt();
+  if (response.status === 401 && (await refusedTimestamp(response))) {
+    // Best effort, the request is sent anyway. The answer has no
+    // body, the connection is there for the request to take.
+    try {
+      const warm = await fetch(url, {
+        method: "HEAD",
+        redirect: "error",
+        credentials: init.credentials ?? "omit",
+      });
+      await warm.arrayBuffer();
+    } catch {
+      // Not a failure of the request.
+    }
+    response = await attempt();
+  }
+  if (response.status !== 200) throw await responseError(response);
+  return response;
+}
+
+/**
+ * `fetchSignedResponse`, resolving with the json of the `200` response
+ * (`responseJson`). Rejects with a `RequestError` on any failure.
+ *
+ * ```ts
+ * const sign = requestSigner(signingKeys(privateKey));
+ * const notes = await fetchSignedJson<Note[]>(`${url}/read/ListNotes`, {
+ *   method: "POST",
+ *   body: JSON.stringify({}),
+ *   headers: { "content-type": "application/json" },
+ * }, sign);
+ * ```
+ */
+export async function fetchSignedJson<Res>(
+  input: string | URL,
+  init: RequestInit,
+  sign: RequestSigner,
+): Promise<Res> {
+  return await responseJson<Res>(await fetchSignedResponse(input, init, sign));
+}
+
+/**
+ * The method as `fetch` sends it, which the signature has to cover:
+ * `fetch` spells these six in uppercase whatever their case, and
+ * sends any other as given (methods are case sensitive).
+ */
+function sentMethod(method: string | undefined): string {
+  const given = method ?? "GET";
+  const upper = given.toUpperCase();
+  return ["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"].includes(upper)
+    ? upper
+    : given;
+}
+
+/** Whether the url carries credentials (`user:password@`). */
+function urlHasCredentials(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return Boolean(parsed.username || parsed.password);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a `401` refuses the request's timestamp
+ * (`SIGNED_AT_ANOTHER_TIME`). Read from a clone: the response stays
+ * readable for the rejection.
+ */
+async function refusedTimestamp(response: Response): Promise<boolean> {
+  try {
+    return (await response.clone().text()).includes(SIGNED_AT_ANOTHER_TIME);
+  } catch {
+    return false;
+  }
 }
 
 // The parts below are shared with `tokenExchange`, whose errors have

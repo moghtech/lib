@@ -101,6 +101,70 @@ again too. A JWT in `Authorization` is dropped, so such requests follow
 redirects as usual. A request with an api key sent with plain `fetch`
 should pass `redirect: "error"` too.
 
+## Signed requests
+
+A client holding the private key of a signing key signs its requests
+instead of sending a credential: the scheme `mogh_auth_server` verifies,
+an Ed25519 signature over the host, method, path, a timestamp, a nonce
+and the sha256 of the body (the same one `mogh_auth_client`'s Rust
+`signature` module makes). The private key never leaves the client. It
+runs on WebCrypto, so it works in node (22 or later), Deno, Bun and the
+browser alike.
+
+```ts
+import { fetchSignedJson, requestSigner, signingKeys } from "mogh_auth_client";
+
+// Parsed once: pkcs8 pem or base64 der, or a raw key of 32 bytes.
+const keys = signingKeys(process.env.SIGNING_KEY);
+const sign = requestSigner(keys, { address: url });
+const notes = await fetchSignedJson<Note[]>(`${url}/read/ListNotes`, {
+  method: "POST",
+  body: JSON.stringify({}),
+  headers: { "content-type": "application/json" },
+}, sign);
+
+// The auth api, signed the same way.
+const auth = MoghAuthClient(`${url}/auth`, { sign });
+```
+
+- `signingKeys(privateKey, { inline })` parses the key and derives its
+  public key (`publicKey`, base64 spki der: the form the server
+  stores). The forms are mogh_pki's: pkcs8 pem (`openssl genpkey
+  -algorithm ed25519`), the base64 der of its body, or raw bytes (a
+  value of 32 characters or fewer is the seed itself, zero padded).
+  `inline: true`, for a key a person writes down, refuses a raw value
+  shorter than 32 bytes. A value reading like the path of a key file is
+  refused, as is a key of another algorithm. `generateSigningKey()`
+  makes a new pair.
+- `requestSigner(keys, { address, host, headers })` signs each request
+  for the host of its url and its path and query, as they are sent. With
+  an `address` (the server's, which every request url starts with) it
+  signs the path after it, the one the server receives where a proxy in
+  front of it strips a prefix. `headers` are sent along unsigned.
+- `fetchSignedJson(input, init, sign)` (and `fetchSignedResponse`) send
+  the request signed right before it goes out, with `redirect: "error"`
+  and `credentials: "omit"` unless `init` sets them. The body has to be
+  a string or bytes: it is sent exactly as signed. When the server
+  refuses the timestamp (`401`, `SIGNED_AT_ANOTHER_TIME`: a new
+  connection took longer than its tolerance, a second by default), the
+  request goes out once more, signed anew, over a connection an
+  unsigned `HEAD` opened first. A request carrying other credentials
+  (`Authorization`, an api key, `user:password@` in the url) is refused
+  (`OTHER_CREDENTIALS`), the server would take them over the signature.
+  Failures reject with a `RequestError` like `fetchJson`: a key which
+  doesn't parse rejects with `status: 1` and the reason as the `trace`,
+  never repeating the key.
+- `MoghAuthClient(url, { sign })` signs its manage requests, which the
+  server takes like an api key's. `credentialHeaders` gives no headers
+  for a signer, `credentialSigner` gives the signer.
+- The pieces, for a client sending requests its own way:
+  `signedRequestHeaders(keys, host, method, pathAndQuery, body)` makes
+  the five headers (`X-API-PUBLIC-KEY`, `X-API-HOST`, `X-API-TIMESTAMP`,
+  `X-API-NONCE`, `X-API-SIGNATURE`), `signedRequestHeadersForUrl` takes
+  the host and path from a url, `signRequest` / `signedMessage` sign and
+  spell the message, `urlHost` derives the host a request is signed for
+  (`example.com`, `10.0.0.5:9120`), `randomNonce` makes a nonce.
+
 ## Login tokens
 
 `LOGIN_TOKENS` keeps the tokens of the signed in users in `localStorage`

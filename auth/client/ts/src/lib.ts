@@ -2,9 +2,11 @@ import { credentialToJSON } from "./passkey.js";
 import {
   bodySnippet,
   credentialHeaders,
+  credentialSigner,
   describeError,
   errorBody,
   fetchJson,
+  fetchSignedJson,
   readBody,
   statusMessage,
   traceList,
@@ -28,14 +30,44 @@ export {
 } from "./tokens.js";
 export type { LoginToken, LoginTokensStore } from "./tokens.js";
 export {
+  OTHER_CREDENTIALS,
   credentialHeaders,
+  credentialSigner,
   fetchJson,
   fetchResponse,
+  fetchSignedJson,
+  fetchSignedResponse,
   requestFailed,
   responseError,
   responseJson,
 } from "./request.js";
 export type { ClientCredential, RequestError } from "./request.js";
+export {
+  API_HOST_HEADER,
+  API_NONCE_HEADER,
+  API_PUBLIC_KEY_HEADER,
+  API_SIGNATURE_HEADER,
+  API_TIMESTAMP_HEADER,
+  SIGNED_AT_ANOTHER_TIME,
+  SIGNED_FOR_ANOTHER_HOST,
+  SIGNED_REQUEST_VERSION,
+  bodySha256,
+  checkSignedRequest,
+  generateSigningKey,
+  looksLikeAPath,
+  randomNonce,
+  requestSigner,
+  signRequest,
+  signedMessage,
+  signedRequestHeaders,
+  signedRequestHeadersForUrl,
+  signingKeys,
+  urlHost,
+  urlPathAndQuery,
+  validHost,
+  validNonce,
+} from "./signature.js";
+export type { RequestSigner, SignedRequest, SigningKeys } from "./signature.js";
 export type { LoginResponses, ManageResponses };
 
 /**
@@ -150,14 +182,18 @@ function encodeParams(type: string, params: unknown) {
  * `https://example.com/auth`.
  *
  * `credential` authenticates its manage requests: a JWT (a string, eg.
- * `LOGIN_TOKENS.jwt()`, or `{ jwt }`), or an api key (`{ key, secret }`),
+ * `LOGIN_TOKENS.jwt()`, or `{ jwt }`), an api key (`{ key, secret }`),
  * which the server takes for the requests open to api keys (eg.
  * `GetUserId`, `DeleteApiKey`, and the login provider / trusted issuer
- * requests of an admin). An app client passes the credential it was
+ * requests of an admin), or a signing key (`{ sign }`, a
+ * `RequestSigner` of `requestSigner`), which signs every request the
+ * way the server verifies it (`fetchSignedJson`) and which the server
+ * takes like an api key. An app client passes the credential it was
  * created with, its `{ jwt, key, secret }` as is. Without one the
  * requests only carry the session cookie.
  */
 export function MoghAuthClient(url: string, credential?: ClientCredential) {
+  const signer = credentialSigner(credential);
   const headers = {
     "content-type": "application/json",
     ...credentialHeaders(credential),
@@ -167,13 +203,27 @@ export function MoghAuthClient(url: string, credential?: ClientCredential) {
     path: "/login" | "/manage",
     type: string,
     params: Params
-  ): Promise<Res> =>
-    await fetchJson<Res>(`${url}${path}/${type}`, {
+  ): Promise<Res> => {
+    const input = `${url}${path}/${type}`;
+    const body = JSON.stringify(encodeParams(type, params));
+    if (signer) {
+      return await fetchSignedJson<Res>(
+        input,
+        {
+          method: "POST",
+          body,
+          headers: { "content-type": "application/json" },
+        },
+        signer
+      );
+    }
+    return await fetchJson<Res>(input, {
       method: "POST",
-      body: JSON.stringify(encodeParams(type, params)),
+      body,
       headers,
       credentials: "include",
     });
+  };
 
   const login = async <
     T extends LoginRequest["type"],
