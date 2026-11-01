@@ -190,11 +190,104 @@ pub enum TrustedIssuerKeys {
   /// clusters: `kubectl get --raw /openid/v1/jwks`.
   /// Has to be updated when the issuer rotates its keys.
   Static(String),
+  /// The cluster which issues the tokens verifies them itself,
+  /// through its TokenReview API. For Kubernetes clusters, instead
+  /// of exporting their keys: no keys are stored, so key rotation
+  /// needs no update, and a token bound to a deleted pod is
+  /// refused at once.
+  TokenReview(TokenReviewConfig),
 }
 
 impl Default for TrustedIssuerKeys {
   fn default() -> Self {
     TrustedIssuerKeys::Discovery {}
+  }
+}
+
+impl TrustedIssuerKeys {
+  /// The reviewer credential of a [TrustedIssuerKeys::TokenReview]
+  /// source.
+  pub fn review_token(&self) -> Option<&str> {
+    match self {
+      TrustedIssuerKeys::TokenReview(config) => {
+        Some(&config.token)
+      }
+      _ => None,
+    }
+  }
+
+  pub fn review_token_mut(&mut self) -> Option<&mut String> {
+    match self {
+      TrustedIssuerKeys::TokenReview(config) => {
+        Some(&mut config.token)
+      }
+      _ => None,
+    }
+  }
+}
+
+impl TrustedIssuer {
+  /// Redacts the reviewer credential of a
+  /// [TrustedIssuerKeys::TokenReview] issuer, leaving everything
+  /// else visible so the issuer can be shown in an edit form.
+  pub fn redact_secrets(&mut self) {
+    if let Some(token) = self.keys.review_token_mut() {
+      let redacted = empty_or_redacted(token);
+      token.zeroize();
+      *token = redacted;
+    }
+  }
+}
+
+/// Verification of a [TrustedIssuer]'s tokens through the Kubernetes
+/// TokenReview API of the cluster which issues them. The cluster is
+/// asked whether each presented token is valid for the issuer's
+/// audiences, with the signature, expiry and the token's binding to
+/// its pod checked by the cluster itself.
+#[typeshare]
+#[derive(Clone, Default, PartialEq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct TokenReviewConfig {
+  /// The url of the cluster's api server, eg. `https://10.0.0.1:6443`.
+  /// Empty: the review goes through the app's own channel named by
+  /// `device` instead.
+  #[serde(default)]
+  pub url: String,
+  /// The PEM bundle the api server's certificate is verified
+  /// against. Empty: the system roots.
+  #[serde(default)]
+  pub ca: String,
+  /// The bearer credential of a reviewer service account bound to
+  /// the `system:auth-delegator` cluster role. Required with `url`.
+  /// Redacted on reads; an empty or redacted update keeps the
+  /// stored one.
+  #[serde(default)]
+  pub token: String,
+  /// Review through the app's own channel instead of `url`. For
+  /// Cicada this names the device (periphery) running in the
+  /// cluster, by id: its own service account reviews the tokens,
+  /// so the server needs no reach to the cluster and stores no
+  /// credential.
+  #[serde(default)]
+  pub device: String,
+}
+
+/// The reviewer credential is redacted.
+impl std::fmt::Debug for TokenReviewConfig {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("TokenReviewConfig")
+      .field("url", &self.url)
+      .field("ca", &self.ca)
+      .field("token", &empty_or_redacted(&self.token))
+      .field("device", &self.device)
+      .finish()
+  }
+}
+
+/// Wipes the reviewer credential from memory.
+impl Zeroize for TokenReviewConfig {
+  fn zeroize(&mut self) {
+    self.token.zeroize();
   }
 }
 

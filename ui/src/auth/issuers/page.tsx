@@ -324,7 +324,7 @@ function TrustedIssuerConfig({
               keys_source: {
                 label: "Signing Keys",
                 description:
-                  "Discovery loads them from the issuer's /.well-known/openid-configuration (Github Actions, Gitlab, clusters exposing their discovery). Static keys are for issuers the app server can't reach, like most clusters.",
+                  "Discovery loads them from the issuer's /.well-known/openid-configuration (Github Actions, Gitlab, clusters exposing their discovery). Static keys are for issuers the app server can't reach. Token review asks a Kubernetes cluster to verify its own tokens, so no keys are stored.",
                 options: KEYS_SOURCES,
               },
               keys_url: {
@@ -360,6 +360,61 @@ function TrustedIssuerConfig({
                 ) : (
                   <></>
                 ),
+              review_url: {
+                label: "API Server URL",
+                description:
+                  "The cluster api server the reviews go to. Leave empty to review through a device instead.",
+                placeholder: "https://10.0.0.1:6443",
+                hidden: values.keys_source !== "TokenReview",
+                error: shown.review_url,
+              },
+              review_token: {
+                label: "Reviewer Credential",
+                description:
+                  "The bearer token of a service account bound to system:auth-delegator. Left empty, the stored credential is kept.",
+                placeholder: values.review_token_stored
+                  ? "Unchanged"
+                  : "Enter the reviewer credential",
+                hidden:
+                  values.keys_source !== "TokenReview" ||
+                  !!values.review_device.trim(),
+                secret: true,
+                error: shown.review_token,
+              },
+              review_ca: (value, set) =>
+                values.keys_source === "TokenReview" &&
+                !values.review_device.trim() ? (
+                  <ConfigItem
+                    label="API Server CA"
+                    description="The PEM bundle the api server's certificate is verified against. Empty: the system roots."
+                  >
+                    <Textarea
+                      value={value ?? ""}
+                      onChange={(e) =>
+                        set({ review_ca: e.currentTarget.value })
+                      }
+                      placeholder="-----BEGIN CERTIFICATE-----"
+                      autosize
+                      minRows={2}
+                      maxRows={8}
+                      styles={{ input: { fontFamily: "monospace" } }}
+                      disabled={readOnly}
+                      aria-label="API Server CA"
+                      error={shown.review_ca}
+                      w={{ base: "100%", lg: 600 }}
+                    />
+                  </ConfigItem>
+                ) : (
+                  <></>
+                ),
+              review_device: {
+                label: "Review Device",
+                description:
+                  "The device (periphery) in the cluster that reviews the tokens with its own service account, by id. The server then stores no cluster credential.",
+                placeholder: "dev_...",
+                hidden: values.keys_source !== "TokenReview",
+                error: shown.review_device,
+              },
               audiences: (value, set) => (
                 <ConfigItem
                   label="Audiences"

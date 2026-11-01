@@ -27,6 +27,19 @@ export interface IssuerFormValues {
   /** The url / key set json, depending on the source. */
   keys_url: string;
   keys_static: string;
+  /** The cluster api server url of a TokenReview source. */
+  review_url: string;
+  /** The PEM bundle the api server's certificate is verified against. */
+  review_ca: string;
+  /**
+   * The reviewer credential to store. Always starts empty: an empty
+   * save keeps the stored one (`review_token_stored` says whether one
+   * is stored, the server redacts it).
+   */
+  review_token: string;
+  review_token_stored: boolean;
+  /** The device (periphery) a TokenReview source reviews through. */
+  review_device: string;
   audiences: string[];
   /**
    * 0 for no limit. `""` while the field is emptied, which is no value
@@ -41,7 +54,11 @@ export const KEYS_SOURCES: { value: KeysSource; label: string }[] = [
   { value: "Discovery", label: "Discovery" },
   { value: "JwksUri", label: "Keys URL" },
   { value: "Static", label: "Static keys" },
+  { value: "TokenReview", label: "Token review" },
 ];
+
+/** The redacted credential the server lists in place of a stored one. */
+const REDACTED = "##############";
 
 export const newRule = (): RuleFormValues => ({
   id: "",
@@ -67,6 +84,15 @@ export function issuerFormValues(issuer: TrustedIssuer): IssuerFormValues {
     keys_source: keys?.source ?? "Discovery",
     keys_url: keys?.source === "JwksUri" ? keys.params : "",
     keys_static: keys?.source === "Static" ? keys.params : "",
+    review_url:
+      keys?.source === "TokenReview" ? (keys.params.url ?? "") : "",
+    review_ca:
+      keys?.source === "TokenReview" ? (keys.params.ca ?? "") : "",
+    review_token: "",
+    review_token_stored:
+      keys?.source === "TokenReview" && !!keys.params.token,
+    review_device:
+      keys?.source === "TokenReview" ? (keys.params.device ?? "") : "",
     audiences: issuer.audiences ?? [],
     max_token_age_secs: issuer.max_token_age_secs ?? 0,
     rules: (issuer.rules ?? []).map((rule) => ({
@@ -94,7 +120,18 @@ export function trustedIssuer(
       ? { source: "JwksUri", params: values.keys_url.trim() }
       : values.keys_source === "Static"
         ? { source: "Static", params: values.keys_static }
-        : { source: "Discovery", params: {} };
+        : values.keys_source === "TokenReview"
+          ? {
+              source: "TokenReview",
+              params: {
+                url: values.review_url.trim(),
+                ca: values.review_ca.trim(),
+                // Empty (or the redacted listing) keeps the stored one
+                token: values.review_token,
+                device: values.review_device.trim(),
+              },
+            }
+          : { source: "Discovery", params: {} };
   return {
     id,
     name: values.name.trim(),
@@ -164,6 +201,39 @@ export function issuerFormErrors(
       }
     } catch {
       errors.keys_static = "The static keys must be valid JSON";
+    }
+  }
+  if (values.keys_source === "TokenReview") {
+    const url = values.review_url.trim();
+    const device = values.review_device.trim();
+    if (!url && !device) {
+      errors.review_url =
+        "A token review needs the cluster api server URL, or a device to review through";
+    } else if (url && device) {
+      errors.review_device =
+        "A token review goes to the URL or through the device, not both";
+    }
+    if (url && !validHttpUrl(url)) {
+      errors.review_url = "The api server must be an http(s) URL";
+    }
+    if (
+      url &&
+      !values.review_token &&
+      !values.review_token_stored
+    ) {
+      errors.review_token = "A reviewer credential is required with a URL";
+    }
+    if (values.review_token === REDACTED) {
+      errors.review_token =
+        "The redacted credential cannot be used as the credential";
+    }
+    if (device && values.review_token) {
+      errors.review_token =
+        "A device reviews with its own credentials: no credential here";
+    }
+    if (device && values.review_ca.trim()) {
+      errors.review_ca =
+        "A device reviews with its own cluster CA: no CA here";
     }
   }
   // What ties a token to this app

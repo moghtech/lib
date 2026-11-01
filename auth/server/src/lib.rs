@@ -8,7 +8,9 @@ use anyhow::{Context as _, anyhow};
 use axum::{extract::Request, http::StatusCode};
 use mogh_auth_client::{
   api::manage::CreateApiKey,
-  config::{ExternalLoginProvider, TrustedIssuer},
+  config::{
+    ExternalLoginProvider, TrustedIssuer, TrustedIssuerKeys,
+  },
 };
 use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::RateLimiter;
@@ -37,7 +39,10 @@ use crate::{
     external::ExternalLoginInfo,
     jwt::JwtProvider,
     passkey::PasskeyProvider,
-    workload::{WorkloadAccess, WorkloadIdentity},
+    workload::{
+      ReviewedToken, WorkloadAccess, WorkloadIdentity,
+      direct_token_review,
+    },
   },
   user::BoxAuthUser,
   validations::{
@@ -1139,6 +1144,46 @@ pub trait AuthImpl: Send + Sync + 'static {
     &self,
   ) -> DynFuture<mogh_error::Result<Vec<TrustedIssuer>>> {
     Box::pin(async { Ok(Vec::new()) })
+  }
+
+  /// Reviews the token of a [TrustedIssuerKeys::TokenReview] issuer:
+  /// asks the cluster which issued it whether it is valid for one of
+  /// the issuer's audiences. The exchange treats a client error
+  /// (4xx) as the token's rejection, and anything else as the issuer
+  /// being unavailable (503).
+  ///
+  /// The default posts a TokenReview to the source's `url` with the
+  /// stored reviewer credential ([direct_token_review]), and refuses
+  /// an issuer naming a `device`: reviewing through a channel of the
+  /// app's own is the app's to implement, direct issuers included
+  /// (call [direct_token_review] for them).
+  fn review_workload_token(
+    &self,
+    issuer: TrustedIssuer,
+    token: String,
+  ) -> DynFuture<mogh_error::Result<ReviewedToken>> {
+    Box::pin(async move {
+      let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
+      else {
+        return Err(
+          anyhow!(
+            "Trusted issuer '{}' does not verify through token reviews",
+            issuer.name
+          )
+          .into(),
+        );
+      };
+      if !config.device.is_empty() {
+        return Err(
+          anyhow!(
+            "Trusted issuer '{}' reviews through a device, which is not supported here",
+            issuer.name
+          )
+          .status_code(StatusCode::NOT_IMPLEMENTED),
+        );
+      }
+      direct_token_review(&issuer, config, &token).await
+    })
   }
 
   /// Store a new trusted issuer. The ids of the issuer and its

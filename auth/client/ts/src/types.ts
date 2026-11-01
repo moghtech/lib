@@ -154,7 +154,15 @@ export type TrustedIssuerKeys =
 	 * clusters: `kubectl get --raw /openid/v1/jwks`.
 	 * Has to be updated when the issuer rotates its keys.
 	 */
-	| { source: "Static", params: string };
+	| { source: "Static", params: string }
+	/**
+	 * The cluster which issues the tokens verifies them itself,
+	 * through its TokenReview API. For Kubernetes clusters, instead
+	 * of exporting their keys: no keys are stored, so key rotation
+	 * needs no update, and a token bound to a deleted pod is
+	 * refused at once.
+	 */
+	| { source: "TokenReview", params: TokenReviewConfig };
 
 /** A condition on a claim of a workload token. */
 export interface WorkloadClaim {
@@ -890,6 +898,42 @@ export interface TokenExchangeResponse {
 	token_type: string;
 	/** Seconds until the app token expires. */
 	expires_in: U64;
+}
+
+/**
+ * Verification of a [TrustedIssuer]'s tokens through the Kubernetes
+ * TokenReview API of the cluster which issues them. The cluster is
+ * asked whether each presented token is valid for the issuer's
+ * audiences, with the signature, expiry and the token's binding to
+ * its pod checked by the cluster itself.
+ */
+export interface TokenReviewConfig {
+	/**
+	 * The url of the cluster's api server, eg. `https://10.0.0.1:6443`.
+	 * Empty: the review goes through the app's own channel named by
+	 * `device` instead.
+	 */
+	url?: string;
+	/**
+	 * The PEM bundle the api server's certificate is verified
+	 * against. Empty: the system roots.
+	 */
+	ca?: string;
+	/**
+	 * The bearer credential of a reviewer service account bound to
+	 * the `system:auth-delegator` cluster role. Required with `url`.
+	 * Redacted on reads; an empty or redacted update keeps the
+	 * stored one.
+	 */
+	token?: string;
+	/**
+	 * Review through the app's own channel instead of `url`. For
+	 * Cicada this names the device (periphery) running in the
+	 * cluster, by id: its own service account reviews the tokens,
+	 * so the server needs no reach to the cluster and stores no
+	 * credential.
+	 */
+	device?: string;
 }
 
 /**

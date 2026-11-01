@@ -218,6 +218,87 @@ fn check_token_age(
   Ok(())
 }
 
+/// A numeric timestamp claim. Some issuers write timestamps as floats.
+fn timestamp_claim(
+  payload: &serde_json::Map<String, serde_json::Value>,
+  claim: &str,
+) -> Option<i64> {
+  let value = payload.get(claim)?;
+  value
+    .as_i64()
+    .or_else(|| value.as_f64().map(|value| value as i64))
+}
+
+/// The claim checks of [TokenVerificationKeys::verify] for a token
+/// whose signature the issuing cluster verified through its
+/// TokenReview API ([TrustedIssuerKeys::TokenReview]): the payload
+/// is authentic once the cluster authenticates the token, so only
+/// the claims are checked here. The token must be issued to one of
+/// `audiences` and carry no audience outside them, it must not be
+/// expired or not yet valid, and `max_age_secs` bounds its age like
+/// [TokenVerificationKeys::verify]. Returns all the claims.
+///
+/// [TrustedIssuerKeys::TokenReview]: mogh_auth_client::config::TrustedIssuerKeys::TokenReview
+pub(crate) fn check_reviewed_payload(
+  token: &str,
+  audiences: &[String],
+  max_age_secs: u64,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+  if token.len() > MAX_SUBJECT_TOKEN_LENGTH {
+    return Err(anyhow!("Token is too large"));
+  }
+  let payload = unverified_payload(token)
+    .ok_or_else(|| anyhow!("Token is not a valid JWT"))?;
+  if is_security_event_token(token) {
+    return Err(anyhow!(
+      "Security event tokens (eg. logout tokens) can't be exchanged"
+    ));
+  }
+
+  let now = unix_timestamp_secs();
+  match timestamp_claim(&payload, "exp") {
+    None => return Err(anyhow!("Token has no expiry (exp)")),
+    Some(exp)
+      if exp < now.saturating_sub(CLOCK_SKEW_TOLERANCE_SECS) =>
+    {
+      return Err(anyhow!("Token is expired"));
+    }
+    Some(_) => {}
+  }
+  check_not_before(token, now)?;
+
+  // The token must be issued to one of `audiences`, and any further
+  // audience on it must be among them too, as [TokenVerificationKeys::verify] has it.
+  let token_audiences: Vec<&str> = match payload.get("aud") {
+    Some(serde_json::Value::String(aud)) => vec![aud.as_str()],
+    Some(serde_json::Value::Array(auds)) => {
+      auds.iter().filter_map(|aud| aud.as_str()).collect()
+    }
+    _ => Vec::new(),
+  };
+  let accepted = |aud: &&str| {
+    audiences
+      .iter()
+      .any(|accepted| !accepted.is_empty() && accepted == *aud)
+  };
+  if token_audiences.is_empty()
+    || !token_audiences.iter().all(accepted)
+  {
+    return Err(anyhow!("The token's audiences are not accepted"));
+  }
+
+  match timestamp_claim(&payload, "iat") {
+    Some(issued_at) => {
+      check_token_age(issued_at, now, max_age_secs)?
+    }
+    None if max_age_secs > 0 => {
+      return Err(anyhow!("Token has no issue time (iat)"));
+    }
+    None => {}
+  }
+  Ok(payload)
+}
+
 fn is_asymmetric(alg: &CoreJwsSigningAlgorithm) -> bool {
   ASYMMETRIC_ALGS.contains(alg)
 }
@@ -906,5 +987,128 @@ mod tests {
       "https://idp.example.com.evil.com"
     ));
     assert!(!issuers_match("", ""));
+  }
+
+  /// A JWT with an arbitrary payload. The signature is garbage:
+  /// [check_reviewed_payload] trusts the reviewing cluster with it.
+  fn reviewed_jwt(payload: serde_json::Value) -> String {
+    let encode = |value: &serde_json::Value| {
+      BASE64URL_NOPAD.encode(value.to_string().as_bytes())
+    };
+    format!(
+      "{}.{}.c2lnbmF0dXJl",
+      encode(&serde_json::json!({"alg": "RS256", "typ": "JWT"})),
+      encode(&payload),
+    )
+  }
+
+  #[test]
+  fn test_check_reviewed_payload() {
+    let now = unix_timestamp_secs();
+    let audiences =
+      ["app".to_string(), "second".to_string(), String::new()];
+    let payload = |aud: serde_json::Value| {
+      serde_json::json!({
+        "iss": "https://cluster.example.com",
+        "sub": "system:serviceaccount:ns:app",
+        "aud": aud,
+        "exp": now + 300,
+        "iat": now - 60,
+      })
+    };
+
+    // Accepted, with all the claims returned
+    let claims = check_reviewed_payload(
+      &reviewed_jwt(payload(serde_json::json!("app"))),
+      &audiences,
+      0,
+    )
+    .unwrap();
+    assert_eq!(claims["sub"], "system:serviceaccount:ns:app");
+
+    // An audience list within the accepted ones works too
+    check_reviewed_payload(
+      &reviewed_jwt(payload(serde_json::json!(["app", "second"]))),
+      &audiences,
+      0,
+    )
+    .unwrap();
+
+    // Bounded age accepts a fresh token and refuses an old one
+    check_reviewed_payload(
+      &reviewed_jwt(payload(serde_json::json!("app"))),
+      &audiences,
+      300,
+    )
+    .unwrap();
+    let old = check_reviewed_payload(
+      &reviewed_jwt(payload(serde_json::json!("app"))),
+      &audiences,
+      30,
+    )
+    .unwrap_err();
+    assert!(old.to_string().contains("issued"), "{old:#}");
+
+    let cases: Vec<(&str, serde_json::Value)> = vec![
+      (
+        "another audience",
+        payload(serde_json::json!("elsewhere")),
+      ),
+      (
+        "an audience outside the accepted ones",
+        payload(serde_json::json!(["app", "elsewhere"])),
+      ),
+      ("no audience", payload(serde_json::Value::Null)),
+      (
+        "the empty audience",
+        payload(serde_json::json!([""])),
+      ),
+      ("expired", {
+        let mut p = payload(serde_json::json!("app"));
+        p["exp"] = serde_json::json!(now - 300);
+        p
+      }),
+      ("no expiry", {
+        let mut p = payload(serde_json::json!("app"));
+        p.as_object_mut().unwrap().remove("exp");
+        p
+      }),
+      ("not valid yet", {
+        let mut p = payload(serde_json::json!("app"));
+        p["nbf"] = serde_json::json!(now + 300);
+        p
+      }),
+      ("a security event token", {
+        let mut p = payload(serde_json::json!("app"));
+        p["events"] = serde_json::json!({});
+        p
+      }),
+    ];
+    for (what, payload) in cases {
+      assert!(
+        check_reviewed_payload(
+          &reviewed_jwt(payload),
+          &audiences,
+          0
+        )
+        .is_err(),
+        "{what}"
+      );
+    }
+
+    // Not a JWT at all
+    assert!(
+      check_reviewed_payload("garbage", &audiences, 0).is_err()
+    );
+
+    // No issue time: fine without an age bound, refused with one
+    let mut ageless = payload(serde_json::json!("app"));
+    ageless.as_object_mut().unwrap().remove("iat");
+    check_reviewed_payload(&reviewed_jwt(ageless.clone()), &audiences, 0)
+      .unwrap();
+    assert!(
+      check_reviewed_payload(&reviewed_jwt(ageless), &audiences, 60)
+        .is_err()
+    );
   }
 }

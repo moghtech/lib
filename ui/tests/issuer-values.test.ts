@@ -48,10 +48,91 @@ test("a stored issuer's values pass, and make the same issuer", () => {
       keys_source: "Discovery",
       keys_url: "",
       keys_static: "",
+      review_url: "",
+      review_ca: "",
+      review_token: "",
+      review_token_stored: false,
+      review_device: "",
       audiences: [],
       max_token_age_secs: 0,
       rules: [],
     },
+  );
+});
+
+test("a token review issuer round-trips, its credential write-only", () => {
+  // Stored with a credential: listed redacted, the form starts empty
+  // and knows one is stored.
+  const read = issuerFormValues({
+    id: "i3",
+    name: "Cluster",
+    enabled: true,
+    issuer: "https://kubernetes.default.svc.cluster.local",
+    keys: {
+      source: "TokenReview",
+      params: {
+        url: "https://10.0.0.1:6443",
+        ca: "",
+        token: "##############",
+        device: "",
+      },
+    },
+    audiences: ["https://cicada.example.com"],
+  });
+  assert.equal(read.keys_source, "TokenReview");
+  assert.equal(read.review_url, "https://10.0.0.1:6443");
+  assert.equal(read.review_token, "");
+  assert.equal(read.review_token_stored, true);
+
+  // An empty credential saves as empty, which keeps the stored one.
+  const kept = trustedIssuer("i3", { ...read, rules: [] });
+  assert.deepEqual(kept.keys, {
+    source: "TokenReview",
+    params: {
+      url: "https://10.0.0.1:6443",
+      ca: "",
+      token: "",
+      device: "",
+    },
+  });
+  assert.deepEqual(issuerFormErrors({ ...read, rules: [] }), {});
+
+  // Fresh direct setup: the credential is required with a url.
+  const direct = values({
+    keys_source: "TokenReview",
+    review_url: "https://10.0.0.1:6443",
+  });
+  assert.deepEqual(Object.keys(issuerFormErrors(direct)), [
+    "review_token",
+  ]);
+  assert.deepEqual(
+    issuerFormErrors(values({ ...direct, review_token: "reviewer" })),
+    {},
+  );
+
+  // Through a device: no url, credential or CA beside it.
+  const device = values({
+    keys_source: "TokenReview",
+    review_device: "dev_123",
+  });
+  assert.deepEqual(issuerFormErrors(device), {});
+  assert.deepEqual(
+    Object.keys(
+      issuerFormErrors(
+        values({
+          ...device,
+          review_url: "https://10.0.0.1:6443",
+          review_token: "reviewer",
+          review_ca: "pem",
+        }),
+      ),
+    ),
+    ["review_device", "review_token", "review_ca"],
+  );
+  // Neither target is an error too.
+  assert.deepEqual(
+    Object.keys(issuerFormErrors(values({ keys_source: "TokenReview" }))),
+    ["review_url"],
   );
 });
 

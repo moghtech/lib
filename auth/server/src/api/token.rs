@@ -65,7 +65,7 @@ use mogh_auth_client::{
   },
   config::{
     ExternalLoginProvider, ExternalLoginProviderConfig,
-    TrustedIssuer, WorkloadRule,
+    TrustedIssuer, TrustedIssuerKeys, WorkloadRule,
   },
 };
 use mogh_error::AddStatusCodeError as _;
@@ -93,7 +93,8 @@ use crate::{
     load_cache::LoadFailedRecently,
     token_exchange::{
       MAX_SUBJECT_TOKEN_LENGTH, TokenVerificationKeys,
-      authenticated_at, issuers_match, unverified_issuer,
+      authenticated_at, check_reviewed_payload, issuers_match,
+      unverified_issuer,
     },
     workload::{
       Claims, WorkloadIdentity, hold_off_removal,
@@ -1041,24 +1042,61 @@ where
   let mut rejected = None;
   let mut unmatched_error = None;
   for trusted in candidates {
-    let keys = match load_keys(trusted.clone()).await {
-      Ok(keys) => keys,
-      // Already logged
-      Err(e) => {
-        unavailable.get_or_insert(e);
-        continue;
-      }
-    };
-    let claims = match keys.verify_payload(
-      token,
-      &trusted.audiences,
-      trusted.max_token_age_secs,
+    let claims = if matches!(
+      trusted.keys,
+      TrustedIssuerKeys::TokenReview(_)
     ) {
-      Ok(claims) => claims,
-      Err(e) => {
-        // Only describes the token the caller presented
-        rejected = Some(invalid_grant(format!("{e:#}")));
-        continue;
+      // The cluster which issued the token verifies it. The claims
+      // are authentic once it does, and checked here like the keys
+      // path checks them ([check_reviewed_payload]).
+      match auth
+        .review_workload_token(trusted.clone(), token.to_string())
+        .await
+      {
+        Ok(_reviewed) => {}
+        // Only a client error describes the token itself; everything
+        // else means the cluster could not be asked (already logged).
+        Err(e) if e.status.is_client_error() => {
+          rejected = Some(invalid_grant(format!("{:#}", e.error)));
+          continue;
+        }
+        Err(e) => {
+          unavailable.get_or_insert(e);
+          continue;
+        }
+      }
+      match check_reviewed_payload(
+        token,
+        &trusted.audiences,
+        trusted.max_token_age_secs,
+      ) {
+        Ok(claims) => claims,
+        Err(e) => {
+          // Only describes the token the caller presented
+          rejected = Some(invalid_grant(format!("{e:#}")));
+          continue;
+        }
+      }
+    } else {
+      let keys = match load_keys(trusted.clone()).await {
+        Ok(keys) => keys,
+        // Already logged
+        Err(e) => {
+          unavailable.get_or_insert(e);
+          continue;
+        }
+      };
+      match keys.verify_payload(
+        token,
+        &trusted.audiences,
+        trusted.max_token_age_secs,
+      ) {
+        Ok(claims) => claims,
+        Err(e) => {
+          // Only describes the token the caller presented
+          rejected = Some(invalid_grant(format!("{e:#}")));
+          continue;
+        }
       }
     };
     let rules = trusted

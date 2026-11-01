@@ -11,12 +11,15 @@ use std::{
 
 use anyhow::{Context as _, anyhow};
 use mogh_auth_client::config::{
-  TrustedIssuer, TrustedIssuerKeys, WorkloadClaim, WorkloadRule,
+  REDACTED, TokenReviewConfig, TrustedIssuer, TrustedIssuerKeys,
+  WorkloadClaim, WorkloadRule,
 };
+use mogh_error::{AddStatusCodeError as _, StatusCode};
 use mogh_logger::redact_url_credentials;
 use openidconnect::{IssuerUrl, core::CoreJsonWebKeySet};
 use serde_json::{Map, Value};
 use tracing::{error, warn};
+use zeroize::Zeroize as _;
 
 use crate::{
   AuthImpl,
@@ -248,6 +251,12 @@ async fn load_jwks(
   issuer: &TrustedIssuer,
 ) -> anyhow::Result<CoreJsonWebKeySet> {
   let jwks_uri = match &issuer.keys {
+    // Guarded by [load_verification_keys]
+    TrustedIssuerKeys::TokenReview(_) => {
+      return Err(anyhow!(
+        "A TokenReview issuer has no keys to load"
+      ));
+    }
     TrustedIssuerKeys::Static(jwks) => return parse_jwks(jwks),
     TrustedIssuerKeys::JwksUri(url) => url.clone(),
     TrustedIssuerKeys::Discovery {} => {
@@ -291,6 +300,14 @@ fn keys_fingerprint(issuer: &TrustedIssuer) -> u64 {
 pub async fn load_verification_keys(
   issuer: &TrustedIssuer,
 ) -> anyhow::Result<Arc<TokenVerificationKeys>> {
+  // A TokenReview issuer has no keys: the cluster verifies its own
+  // tokens ([AuthImpl::review_workload_token]).
+  if matches!(issuer.keys, TrustedIssuerKeys::TokenReview(_)) {
+    return Err(anyhow!(
+      "Trusted issuer '{}' verifies through token reviews and has no keys",
+      issuer.name
+    ));
+  }
   // Static keys only change with the configuration
   let valid_for = match issuer.keys {
     TrustedIssuerKeys::Static(_) => None,
@@ -309,6 +326,260 @@ pub async fn load_verification_keys(
 
 pub fn evict_verification_keys(issuer_id: &str) {
   keys_cache().evict(issuer_id);
+  review_clients().evict(issuer_id);
+}
+
+// ================
+// = TOKEN REVIEW =
+// ================
+
+/// The outcome of a token review: the issuing cluster authenticated
+/// the token for at least one of the issuer's audiences.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ReviewedToken {
+  /// The username the cluster reports, eg.
+  /// `system:serviceaccount:<namespace>:<name>`.
+  pub username: String,
+  /// The issuer audiences the cluster found the token valid for.
+  pub audiences: Vec<String>,
+}
+
+impl ReviewedToken {
+  /// An authenticated review, for [AuthImpl::review_workload_token]
+  /// overrides which review through a channel of the app's own.
+  pub fn new(username: String, audiences: Vec<String>) -> Self {
+    Self {
+      username,
+      audiences,
+    }
+  }
+}
+
+/// Checks a [TrustedIssuerKeys::TokenReview] source: `url` or
+/// `device` (not both), a reviewer credential with `url`, and a CA
+/// which parses. A `device` reviews with its own credentials, so the
+/// token and CA have no place there and are dropped.
+fn normalize_token_review(
+  config: &mut TokenReviewConfig,
+) -> anyhow::Result<()> {
+  config.url = config.url.trim().to_string();
+  config.ca = config.ca.trim().to_string();
+  config.token = config.token.trim().to_string();
+  config.device = config.device.trim().to_string();
+  match (config.url.is_empty(), config.device.is_empty()) {
+    (true, true) => Err(anyhow!(
+      "A TokenReview source needs the cluster api server 'url', \
+       or a 'device' to review through"
+    )),
+    (false, false) => Err(anyhow!(
+      "A TokenReview source takes either 'url' or 'device', not both"
+    )),
+    (false, true) => {
+      validate_public_http_url("token review url", &config.url)?;
+      if config.token.is_empty() {
+        return Err(anyhow!(
+          "A reviewer credential ('token') is required with 'url'"
+        ));
+      }
+      if config.token == REDACTED {
+        return Err(anyhow!(
+          "The redacted reviewer credential cannot be used as the credential"
+        ));
+      }
+      if !config.ca.is_empty() {
+        let certificates =
+          reqwest::Certificate::from_pem_bundle(
+            config.ca.as_bytes(),
+          )
+          .context("'ca' is not a valid PEM certificate bundle")?;
+        if certificates.is_empty() {
+          return Err(anyhow!(
+            "'ca' holds no PEM certificate"
+          ));
+        }
+      }
+      Ok(())
+    }
+    (true, false) => {
+      // The device reviews with its own service account and CA.
+      config.token.zeroize();
+      config.ca.clear();
+      Ok(())
+    }
+  }
+}
+
+/// Far larger than any real TokenReview response.
+const MAX_REVIEW_RESPONSE: usize = 256 * 1024;
+
+/// The http clients reviews are sent with, one per issuer, rebuilt
+/// when its url or CA changes. A client holds the issuer's CA roots.
+fn review_clients() -> &'static LoadCache<reqwest::Client> {
+  static CACHE: OnceLock<LoadCache<reqwest::Client>> =
+    OnceLock::new();
+  CACHE.get_or_init(Default::default)
+}
+
+fn review_client_fingerprint(config: &TokenReviewConfig) -> u64 {
+  let mut hasher = DefaultHasher::new();
+  config.url.hash(&mut hasher);
+  config.ca.hash(&mut hasher);
+  hasher.finish()
+}
+
+async fn review_client(
+  issuer_id: &str,
+  config: &TokenReviewConfig,
+) -> anyhow::Result<Arc<reqwest::Client>> {
+  review_clients()
+    .load(
+      issuer_id,
+      review_client_fingerprint(config),
+      None,
+      || async {
+        let mut builder = reqwest::Client::builder()
+          .redirect(reqwest::redirect::Policy::none())
+          .timeout(FETCH_TIMEOUT)
+          .user_agent(concat!(
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+          ));
+        if !config.ca.is_empty() {
+          let certificates = reqwest::Certificate::from_pem_bundle(
+            config.ca.as_bytes(),
+          )
+          .context("The 'ca' is not a valid PEM certificate bundle")?;
+          for certificate in certificates {
+            builder = builder.add_root_certificate(certificate);
+          }
+        }
+        builder
+          .build()
+          .context("Failed to build the token review client")
+      },
+    )
+    .await
+}
+
+/// Reviews a workload token with the cluster which issued it, through
+/// the Kubernetes TokenReview API at the source's `url`, presenting
+/// the stored reviewer credential. This is the default of
+/// [AuthImpl::review_workload_token]; an app routing reviews through
+/// a channel of its own (a `device`) calls it for its direct issuers.
+///
+/// The cluster checks the signature with its current keys, the
+/// expiry, the token's binding to its pod, and that the token is
+/// valid for one of `audiences`. A token the cluster does not
+/// authenticate is a `400`; a cluster which cannot be asked (network,
+/// or the reviewer credential refused) is a `503`, logged with the
+/// detail while the error only names the issuer.
+pub async fn direct_token_review(
+  issuer: &TrustedIssuer,
+  config: &TokenReviewConfig,
+  token: &str,
+) -> mogh_error::Result<ReviewedToken> {
+  let unavailable = |context: String| {
+    warn!(
+      issuer_id = issuer.id,
+      issuer = issuer.name,
+      "Token review failed | {context}"
+    );
+    anyhow!("Trusted issuer '{}' is not available", issuer.name)
+      .status_code(StatusCode::SERVICE_UNAVAILABLE)
+  };
+
+  let client = review_client(&issuer.id, config)
+    .await
+    .map_err(|e| unavailable(format!("{e:#}")))?;
+
+  let url = format!(
+    "{}/apis/authentication.k8s.io/v1/tokenreviews",
+    config.url.trim_end_matches('/')
+  );
+  let body = serde_json::json!({
+    "apiVersion": "authentication.k8s.io/v1",
+    "kind": "TokenReview",
+    "spec": { "token": token, "audiences": issuer.audiences },
+  });
+  let response = client
+    .post(&url)
+    .bearer_auth(&config.token)
+    .json(&body)
+    .send()
+    .await
+    .map_err(|e| {
+      unavailable(format!(
+        "{:#}",
+        anyhow::Error::new(reqwest::Error::without_url(e))
+      ))
+    })?;
+
+  let status = response.status();
+  let body = read_review_body(response).await;
+  if !status.is_success() {
+    // 401/403 mean the reviewer credential was refused: the
+    // operator's problem, never the presented token's.
+    return Err(unavailable(format!(
+      "The cluster answered the review with {status}: {}",
+      truncate_review(&body)
+    )));
+  }
+
+  let review: Value = serde_json::from_str(&body).map_err(|e| {
+    unavailable(format!("The review answer is not json: {e:#}"))
+  })?;
+  let review_status = &review["status"];
+  if review_status["authenticated"].as_bool() != Some(true) {
+    let detail = review_status["error"]
+      .as_str()
+      .filter(|error| !error.is_empty())
+      .map(|error| format!(": {}", truncate_review(error)))
+      .unwrap_or_default();
+    return Err(
+      anyhow!("The cluster did not authenticate the token{detail}")
+        .status_code(StatusCode::BAD_REQUEST),
+    );
+  }
+  Ok(ReviewedToken {
+    username: review_status["user"]["username"]
+      .as_str()
+      .unwrap_or_default()
+      .to_string(),
+    audiences: review_status["audiences"]
+      .as_array()
+      .map(|audiences| {
+        audiences
+          .iter()
+          .filter_map(|audience| audience.as_str())
+          .map(str::to_string)
+          .collect()
+      })
+      .unwrap_or_default(),
+  })
+}
+
+/// Reads at most [MAX_REVIEW_RESPONSE], whatever the cluster sends.
+async fn read_review_body(response: reqwest::Response) -> String {
+  let mut body = Vec::new();
+  let mut response = response;
+  while let Ok(Some(chunk)) = response.chunk().await {
+    if body.len() + chunk.len() > MAX_REVIEW_RESPONSE {
+      break;
+    }
+    body.extend_from_slice(&chunk);
+  }
+  String::from_utf8_lossy(&body).into_owned()
+}
+
+/// Cluster errors end up in the log, and are as long as it likes.
+fn truncate_review(value: &str) -> String {
+  const MAX: usize = 300;
+  match value.char_indices().nth(MAX) {
+    Some((index, _)) => format!("{}...", &value[..index]),
+    None => value.to_string(),
+  }
 }
 
 // =========
@@ -828,6 +1099,9 @@ pub(crate) fn normalize_trusted_issuer(
   if let TrustedIssuerKeys::JwksUri(url) = &issuer.keys {
     validate_public_http_url("keys url", url)?;
   }
+  if let TrustedIssuerKeys::TokenReview(config) = &mut issuer.keys {
+    normalize_token_review(config)?;
+  }
 
   if issuer.rules.len() > MAX_RULES {
     return Err(anyhow!(
@@ -925,6 +1199,84 @@ pub async fn list_trusted_issuers<I: AuthImpl + ?Sized>(
     issuers.push(ResolvedIssuer { issuer, is_static });
   }
   Ok(issuers)
+}
+
+#[cfg(test)]
+pub(crate) mod test_reviews {
+  //! A mock cluster TokenReview endpoint for tests.
+
+  use std::sync::{Arc, Mutex};
+
+  use axum::{Json, Router, routing::post};
+  use serde_json::Value;
+
+  /// The requests the mock cluster received: the bearer credential
+  /// presented, and the TokenReview body.
+  pub type ReviewRequests = Arc<Mutex<Vec<(String, Value)>>>;
+
+  /// Serves `POST /apis/authentication.k8s.io/v1/tokenreviews`,
+  /// answering `status` with `answer`, and returns the server's
+  /// address with the requests it receives.
+  pub async fn serve_cluster(
+    status: u16,
+    answer: Value,
+  ) -> (String, ReviewRequests) {
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address =
+      format!("http://{}", listener.local_addr().unwrap());
+    let requests = ReviewRequests::default();
+    let seen = requests.clone();
+    let router = Router::new().route(
+      "/apis/authentication.k8s.io/v1/tokenreviews",
+      post(
+        move |headers: axum::http::HeaderMap,
+              Json(body): Json<Value>| {
+          let seen = seen.clone();
+          let answer = answer.clone();
+          async move {
+            let bearer = headers
+              .get("authorization")
+              .and_then(|value| value.to_str().ok())
+              .and_then(|value| value.strip_prefix("Bearer "))
+              .unwrap_or_default()
+              .to_string();
+            seen.lock().unwrap().push((bearer, body));
+            (
+              axum::http::StatusCode::from_u16(status).unwrap(),
+              Json(answer),
+            )
+          }
+        },
+      ),
+    );
+    tokio::spawn(async move {
+      axum::serve(listener, router).await.unwrap();
+    });
+    (address, requests)
+  }
+
+  /// A cluster which authenticates every token as `username`.
+  pub fn authenticated(username: &str) -> Value {
+    serde_json::json!({
+      "apiVersion": "authentication.k8s.io/v1",
+      "kind": "TokenReview",
+      "status": {
+        "authenticated": true,
+        "user": { "username": username },
+        "audiences": ["app"],
+      },
+    })
+  }
+
+  /// A cluster which rejects every token with `error`.
+  pub fn rejected(error: &str) -> Value {
+    serde_json::json!({
+      "apiVersion": "authentication.k8s.io/v1",
+      "kind": "TokenReview",
+      "status": { "authenticated": false, "error": error },
+    })
+  }
 }
 
 #[cfg(test)]
@@ -1851,5 +2203,161 @@ mod tests {
         "{url}"
       );
     }
+  }
+
+  fn review_config(url: &str, token: &str) -> TokenReviewConfig {
+    TokenReviewConfig {
+      url: url.to_string(),
+      ca: String::new(),
+      token: token.to_string(),
+      device: String::new(),
+    }
+  }
+
+  fn review_issuer(url: &str, token: &str) -> TrustedIssuer {
+    fetched_issuer(
+      "review-issuer",
+      "https://kubernetes.default.svc.cluster.local",
+      TrustedIssuerKeys::TokenReview(review_config(url, token)),
+    )
+  }
+
+  #[test]
+  fn test_normalize_token_review() {
+    // Direct mode: url + token
+    let mut config = review_config("https://10.0.0.1:6443 ", " reviewer ");
+    normalize_token_review(&mut config).unwrap();
+    assert_eq!(config.url, "https://10.0.0.1:6443");
+    assert_eq!(config.token, "reviewer");
+
+    // Device mode drops the credential and CA
+    let mut config = TokenReviewConfig {
+      url: String::new(),
+      ca: "stale".to_string(),
+      token: "stale".to_string(),
+      device: " dev_123 ".to_string(),
+    };
+    normalize_token_review(&mut config).unwrap();
+    assert_eq!(config.device, "dev_123");
+    assert!(config.token.is_empty());
+    assert!(config.ca.is_empty());
+
+    for (what, config) in [
+      ("neither", review_config("", "")),
+      (
+        "both",
+        TokenReviewConfig {
+          device: "dev_123".to_string(),
+          ..review_config("https://10.0.0.1:6443", "reviewer")
+        },
+      ),
+      ("no token", review_config("https://10.0.0.1:6443", "")),
+      (
+        "redacted token",
+        review_config("https://10.0.0.1:6443", REDACTED),
+      ),
+      ("not a url", review_config("10.0.0.1:6443", "reviewer")),
+      (
+        "credentials in the url",
+        review_config("https://user:pw@10.0.0.1:6443", "reviewer"),
+      ),
+      (
+        "bad ca",
+        TokenReviewConfig {
+          ca: "not pem".to_string(),
+          ..review_config("https://10.0.0.1:6443", "reviewer")
+        },
+      ),
+    ] {
+      let mut config = config;
+      assert!(
+        normalize_token_review(&mut config).is_err(),
+        "{what}"
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn test_direct_token_review() {
+    use super::test_reviews::{authenticated, serve_cluster};
+
+    let (address, requests) = serve_cluster(
+      201,
+      authenticated("system:serviceaccount:ns:app"),
+    )
+    .await;
+    let issuer = review_issuer(&address, "reviewer-secret");
+    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
+    else {
+      unreachable!()
+    };
+
+    let reviewed = direct_token_review(&issuer, config, "the-token")
+      .await
+      .unwrap();
+    assert_eq!(reviewed.username, "system:serviceaccount:ns:app");
+    assert_eq!(reviewed.audiences, ["app"]);
+
+    // The request carried the reviewer credential, the token, and
+    // the issuer's audiences.
+    let (bearer, body) = requests.lock().unwrap()[0].clone();
+    assert_eq!(bearer, "reviewer-secret");
+    assert_eq!(body["spec"]["token"], "the-token");
+    assert_eq!(body["spec"]["audiences"], json!(["app"]));
+    assert_eq!(body["kind"], "TokenReview");
+  }
+
+  #[tokio::test]
+  async fn test_rejected_and_unavailable_reviews() {
+    use super::test_reviews::{rejected, serve_cluster};
+
+    // The cluster rejects the token: a 400 describing the token
+    let (address, _) =
+      serve_cluster(201, rejected("token has expired")).await;
+    let issuer = review_issuer(&address, "reviewer-secret");
+    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
+    else {
+      unreachable!()
+    };
+    let error = direct_token_review(&issuer, config, "the-token")
+      .await
+      .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+      format!("{:#}", error.error).contains("token has expired"),
+      "{:#}",
+      error.error
+    );
+
+    // The reviewer credential is refused: the operator's problem,
+    // a 503 which names the issuer and nothing else.
+    let (address, _) =
+      serve_cluster(401, json!({"message": "Unauthorized"})).await;
+    let issuer = review_issuer(&address, "wrong");
+    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
+    else {
+      unreachable!()
+    };
+    let error = direct_token_review(&issuer, config, "the-token")
+      .await
+      .unwrap_err();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    let shown = format!("{:#}", error.error);
+    assert!(shown.contains("not available"), "{shown}");
+    assert!(!shown.contains("Unauthorized"), "{shown}");
+
+    // The cluster cannot be reached at all
+    let issuer = review_issuer("http://127.0.0.1:1", "reviewer");
+    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
+    else {
+      unreachable!()
+    };
+    let error = direct_token_review(&issuer, config, "the-token")
+      .await
+      .unwrap_err();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+
+    // A TokenReview issuer has no keys to load
+    assert!(load_verification_keys(&issuer).await.is_err());
   }
 }

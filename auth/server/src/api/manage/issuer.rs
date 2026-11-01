@@ -9,7 +9,9 @@ use mogh_auth_client::{
     DeleteTrustedIssuerResponse, ListTrustedIssuers,
     TrustedIssuerListItem, UpdateTrustedIssuer,
   },
-  config::{TrustedIssuer, TrustedIssuerKeys, WorkloadRule},
+  config::{
+    REDACTED, TrustedIssuer, TrustedIssuerKeys, WorkloadRule,
+  },
 };
 use std::sync::Arc;
 
@@ -85,9 +87,13 @@ pub async fn list_issuers<I: AuthImpl + ?Sized>(
   let issuers = list_trusted_issuers(auth)
     .await?
     .into_iter()
-    .map(|resolved| TrustedIssuerListItem {
-      issuer: resolved.issuer,
-      read_only: resolved.is_static,
+    .map(|resolved| {
+      let mut issuer = resolved.issuer;
+      issuer.redact_secrets();
+      TrustedIssuerListItem {
+        issuer,
+        read_only: resolved.is_static,
+      }
     })
     .collect();
   Ok(issuers)
@@ -126,6 +132,8 @@ pub async fn create_issuer<I: AuthImpl + ?Sized>(
     "Trusted issuer created"
   );
 
+  let mut issuer = issuer;
+  issuer.redact_secrets();
   Ok(TrustedIssuerListItem {
     issuer,
     read_only: false,
@@ -148,6 +156,45 @@ impl Resolve<ManageArgs> for CreateTrustedIssuer {
 }
 
 //
+
+/// An empty or redacted reviewer credential keeps the stored one,
+/// like the login providers' client secret. The stored credential is
+/// only kept for the url it was entered for: a changed url needs the
+/// credential entered again, so it is never sent anywhere else. An
+/// issuer naming a `device` reviews with the device's own
+/// credentials, so there is nothing to keep.
+fn keep_existing_review_token(
+  issuer: &mut TrustedIssuer,
+  existing: &TrustedIssuer,
+) -> mogh_error::Result<()> {
+  let TrustedIssuerKeys::TokenReview(config) = &mut issuer.keys
+  else {
+    return Ok(());
+  };
+  if !config.device.trim().is_empty() {
+    return Ok(());
+  }
+  let token = config.token.trim();
+  if !token.is_empty() && token != REDACTED {
+    // A new credential
+    return Ok(());
+  }
+  let (existing_token, existing_url) = match &existing.keys {
+    TrustedIssuerKeys::TokenReview(existing) => {
+      (existing.token.as_str(), existing.url.as_str())
+    }
+    _ => ("", ""),
+  };
+  if !existing_token.is_empty()
+    && config.url.trim() != existing_url
+  {
+    return Err(bad_request(
+      "The cluster api server url changed: enter the reviewer credential again",
+    ));
+  }
+  config.token = existing_token.to_string();
+  Ok(())
+}
 
 /// Finds an issuer which can be managed over the API.
 async fn resolve_managed_issuer<I: AuthImpl + ?Sized>(
@@ -198,6 +245,8 @@ pub async fn update_issuer<I: AuthImpl + ?Sized>(
   let lock = lock_trusted_issuer(&issuer.id).await;
   let existing =
     resolve_managed_issuer(auth.as_ref(), &issuer.id).await?;
+  let mut issuer = issuer;
+  keep_existing_review_token(&mut issuer, &existing)?;
   let mut issuer = validate_issuer(issuer, Some(&existing))?;
   issuer.id = existing.id;
 
@@ -236,6 +285,8 @@ pub async fn update_issuer<I: AuthImpl + ?Sized>(
     }
     drop(lock);
 
+    let mut issuer = issuer;
+    issuer.redact_secrets();
     Ok(TrustedIssuerListItem {
       issuer,
       read_only: false,
@@ -1167,5 +1218,253 @@ mod tests {
       .id;
     delete_issuer(&auth, &ADMIN, &id).await.unwrap();
     assert!(auth.stored.lock().unwrap().is_empty());
+  }
+
+  use mogh_auth_client::config::TokenReviewConfig;
+
+  fn review_issuer(url: &str, token: &str) -> TrustedIssuer {
+    let mut issuer = issuer(vec![WorkloadRule {
+      id: String::new(),
+      name: "Pods".to_string(),
+      enabled: true,
+      claims: vec![WorkloadClaim {
+        claim: "sub".to_string(),
+        pattern: "system:serviceaccount:ns:*".to_string(),
+      }],
+      groups: vec!["pods".to_string()],
+      admin: false,
+      token_ttl_secs: 0,
+    }]);
+    issuer.issuer =
+      "https://kubernetes.default.svc.cluster.local".to_string();
+    issuer.keys =
+      TrustedIssuerKeys::TokenReview(TokenReviewConfig {
+        url: url.to_string(),
+        ca: String::new(),
+        token: token.to_string(),
+        device: String::new(),
+      });
+    issuer
+  }
+
+  fn stored_review_token(auth: &TestAuth) -> String {
+    let stored = auth.stored.lock().unwrap();
+    match &stored[0].keys {
+      TrustedIssuerKeys::TokenReview(config) => {
+        config.token.clone()
+      }
+      _ => unreachable!(),
+    }
+  }
+
+  #[tokio::test]
+  async fn test_review_credential_is_redacted_and_kept() {
+    let auth = TestAuth::default();
+    let created = create_issuer(
+      &auth,
+      &ADMIN,
+      review_issuer("https://10.0.0.1:6443", "reviewer-secret"),
+    )
+    .await
+    .unwrap()
+    .issuer;
+
+    // Stored in full, never shown again
+    assert_eq!(created.keys.review_token(), Some(REDACTED));
+    assert_eq!(stored_review_token(&auth), "reviewer-secret");
+    let listed = list_issuers(&auth, &ADMIN).await.unwrap();
+    assert_eq!(
+      listed[0].issuer.keys.review_token(),
+      Some(REDACTED)
+    );
+
+    // An empty or redacted credential keeps the stored one
+    for kept in ["", REDACTED] {
+      let mut update =
+        review_issuer("https://10.0.0.1:6443", kept);
+      update.id = created.id.clone();
+      let updated =
+        update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+          .await
+          .unwrap()
+          .issuer;
+      assert_eq!(updated.keys.review_token(), Some(REDACTED));
+      assert_eq!(stored_review_token(&auth), "reviewer-secret");
+    }
+
+    // A new credential replaces it
+    let mut update =
+      review_issuer("https://10.0.0.1:6443", "new-secret");
+    update.id = created.id.clone();
+    update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+      .await
+      .unwrap();
+    assert_eq!(stored_review_token(&auth), "new-secret");
+
+    // A changed url needs the credential entered again
+    let mut update = review_issuer("https://10.0.0.2:6443", "");
+    update.id = created.id.clone();
+    let error =
+      update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+      format!("{:#}", error.error)
+        .contains("enter the reviewer credential again"),
+      "{:#}",
+      error.error
+    );
+    assert_eq!(stored_review_token(&auth), "new-secret");
+
+    // With the credential, the new url is fine
+    let mut update =
+      review_issuer("https://10.0.0.2:6443", "third-secret");
+    update.id = created.id.clone();
+    update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+      .await
+      .unwrap();
+    assert_eq!(stored_review_token(&auth), "third-secret");
+  }
+
+  #[tokio::test]
+  async fn test_review_validation() {
+    let auth = TestAuth::default();
+    for (what, issuer) in [
+      ("neither url nor device", review_issuer("", "")),
+      ("url without a credential", {
+        review_issuer("https://10.0.0.1:6443", "")
+      }),
+      ("a redacted credential on create", {
+        review_issuer("https://10.0.0.1:6443", REDACTED)
+      }),
+      ("url and device", {
+        let mut issuer =
+          review_issuer("https://10.0.0.1:6443", "reviewer");
+        if let TrustedIssuerKeys::TokenReview(config) =
+          &mut issuer.keys
+        {
+          config.device = "dev_123".to_string();
+        }
+        issuer
+      }),
+    ] {
+      let error = create_issuer(&auth, &ADMIN, issuer)
+        .await
+        .unwrap_err();
+      assert_eq!(error.status, StatusCode::BAD_REQUEST, "{what}");
+    }
+    assert!(auth.stored.lock().unwrap().is_empty());
+
+    // A device reviews with its own credentials: the stale ones
+    // of the form are dropped
+    let mut issuer = review_issuer("", "stale");
+    if let TrustedIssuerKeys::TokenReview(config) =
+      &mut issuer.keys
+    {
+      config.device = "dev_123".to_string();
+      config.ca = "stale".to_string();
+    }
+    create_issuer(&auth, &ADMIN, issuer).await.unwrap();
+    let stored = auth.stored.lock().unwrap();
+    let TrustedIssuerKeys::TokenReview(config) = &stored[0].keys
+    else {
+      unreachable!()
+    };
+    assert_eq!(config.device, "dev_123");
+    assert!(config.token.is_empty());
+    assert!(config.ca.is_empty());
+  }
+
+  #[tokio::test]
+  async fn test_review_exchange() {
+    use crate::{
+      api::token::verify_workload_token,
+      provider::{
+        token_exchange::test_tokens::TestToken,
+        workload::test_reviews::{
+          authenticated, rejected, serve_cluster,
+        },
+      },
+    };
+    let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    let mint = || {
+      let mut token = TestToken::new(
+        openidconnect::EmptyAdditionalClaims {},
+      );
+      token.issuer =
+        "https://kubernetes.default.svc.cluster.local".to_string();
+      token.subject = "system:serviceaccount:ns:app".to_string();
+      token.audiences = vec!["https://app.example.com".to_string()];
+      token.mint()
+    };
+
+    // The cluster authenticates the token: the rule matches
+    let (address, requests) = serve_cluster(
+      201,
+      authenticated("system:serviceaccount:ns:app"),
+    )
+    .await;
+    let auth = TestAuth::default();
+    create_issuer(
+      &auth,
+      &ADMIN,
+      review_issuer(&address, "reviewer-secret"),
+    )
+    .await
+    .unwrap();
+    let verified =
+      verify_workload_token(&auth, ip, &mint(), |_, _| true)
+        .await
+        .unwrap();
+    assert_eq!(verified.rule.name, "Pods");
+    assert_eq!(
+      verified.claims["sub"],
+      "system:serviceaccount:ns:app"
+    );
+    // The review carried the issuer's audiences and credential
+    let (bearer, body) = requests.lock().unwrap()[0].clone();
+    assert_eq!(bearer, "reviewer-secret");
+    assert_eq!(
+      body["spec"]["audiences"],
+      serde_json::json!(["https://app.example.com"])
+    );
+
+    // The cluster rejects the token: a 400 describing it
+    let (address, _) =
+      serve_cluster(201, rejected("token has expired")).await;
+    let auth = TestAuth::default();
+    create_issuer(
+      &auth,
+      &ADMIN,
+      review_issuer(&address, "reviewer-secret"),
+    )
+    .await
+    .unwrap();
+    let error =
+      verify_workload_token(&auth, ip, &mint(), |_, _| true)
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+      format!("{:#}", error.error).contains("token has expired"),
+      "{:#}",
+      error.error
+    );
+
+    // The cluster cannot be asked: the issuer is unavailable
+    let auth = TestAuth::default();
+    create_issuer(
+      &auth,
+      &ADMIN,
+      review_issuer("http://127.0.0.1:1", "reviewer-secret"),
+    )
+    .await
+    .unwrap();
+    let error =
+      verify_workload_token(&auth, ip, &mint(), |_, _| true)
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
   }
 }
