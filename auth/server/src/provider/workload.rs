@@ -356,10 +356,11 @@ impl ReviewedToken {
   }
 }
 
-/// Checks a [TrustedIssuerKeys::TokenReview] source: `url` or
-/// `device` (not both), a reviewer credential with `url`, and a CA
-/// which parses. A `device` reviews with its own credentials, so the
-/// token and CA have no place there and are dropped.
+/// Checks a [TrustedIssuerKeys::TokenReview] source: one of `url`,
+/// `device` or `in_cluster`, a reviewer credential with `url`, and a
+/// CA which parses. A `device` and the app's own cluster review with
+/// their own credentials, so the token and CA have no place there
+/// and are dropped.
 fn normalize_token_review(
   config: &mut TokenReviewConfig,
 ) -> anyhow::Result<()> {
@@ -367,47 +368,49 @@ fn normalize_token_review(
   config.ca = config.ca.trim().to_string();
   config.token = config.token.trim().to_string();
   config.device = config.device.trim().to_string();
-  match (config.url.is_empty(), config.device.is_empty()) {
-    (true, true) => Err(anyhow!(
+  let selected = usize::from(!config.url.is_empty())
+    + usize::from(!config.device.is_empty())
+    + usize::from(config.in_cluster);
+  if selected == 0 {
+    return Err(anyhow!(
       "A TokenReview source needs the cluster api server 'url', \
-       or a 'device' to review through"
-    )),
-    (false, false) => Err(anyhow!(
-      "A TokenReview source takes either 'url' or 'device', not both"
-    )),
-    (false, true) => {
-      validate_public_http_url("token review url", &config.url)?;
-      if config.token.is_empty() {
-        return Err(anyhow!(
-          "A reviewer credential ('token') is required with 'url'"
-        ));
-      }
-      if config.token == REDACTED {
-        return Err(anyhow!(
-          "The redacted reviewer credential cannot be used as the credential"
-        ));
-      }
-      if !config.ca.is_empty() {
-        let certificates =
-          reqwest::Certificate::from_pem_bundle(
-            config.ca.as_bytes(),
-          )
-          .context("'ca' is not a valid PEM certificate bundle")?;
-        if certificates.is_empty() {
-          return Err(anyhow!(
-            "'ca' holds no PEM certificate"
-          ));
-        }
-      }
-      Ok(())
-    }
-    (true, false) => {
-      // The device reviews with its own service account and CA.
-      config.token.zeroize();
-      config.ca.clear();
-      Ok(())
+       a 'device' to review through, or 'in_cluster'"
+    ));
+  }
+  if selected > 1 {
+    return Err(anyhow!(
+      "A TokenReview source takes one of 'url', 'device' or \
+       'in_cluster', not several"
+    ));
+  }
+  if config.url.is_empty() {
+    // The device or the app's own service account reviews with its
+    // own credentials and CA.
+    config.token.zeroize();
+    config.ca.clear();
+    return Ok(());
+  }
+  validate_public_http_url("token review url", &config.url)?;
+  if config.token.is_empty() {
+    return Err(anyhow!(
+      "A reviewer credential ('token') is required with 'url'"
+    ));
+  }
+  if config.token == REDACTED {
+    return Err(anyhow!(
+      "The redacted reviewer credential cannot be used as the credential"
+    ));
+  }
+  if !config.ca.is_empty() {
+    let certificates = reqwest::Certificate::from_pem_bundle(
+      config.ca.as_bytes(),
+    )
+    .context("'ca' is not a valid PEM certificate bundle")?;
+    if certificates.is_empty() {
+      return Err(anyhow!("'ca' holds no PEM certificate"));
     }
   }
+  Ok(())
 }
 
 /// Far larger than any real TokenReview response.
@@ -421,21 +424,22 @@ fn review_clients() -> &'static LoadCache<reqwest::Client> {
   CACHE.get_or_init(Default::default)
 }
 
-fn review_client_fingerprint(config: &TokenReviewConfig) -> u64 {
+fn review_client_fingerprint(url: &str, ca: &str) -> u64 {
   let mut hasher = DefaultHasher::new();
-  config.url.hash(&mut hasher);
-  config.ca.hash(&mut hasher);
+  url.hash(&mut hasher);
+  ca.hash(&mut hasher);
   hasher.finish()
 }
 
 async fn review_client(
   issuer_id: &str,
-  config: &TokenReviewConfig,
+  url: &str,
+  ca: &str,
 ) -> anyhow::Result<Arc<reqwest::Client>> {
   review_clients()
     .load(
       issuer_id,
-      review_client_fingerprint(config),
+      review_client_fingerprint(url, ca),
       None,
       || async {
         let mut builder = reqwest::Client::builder()
@@ -446,11 +450,12 @@ async fn review_client(
             "/",
             env!("CARGO_PKG_VERSION")
           ));
-        if !config.ca.is_empty() {
-          let certificates = reqwest::Certificate::from_pem_bundle(
-            config.ca.as_bytes(),
-          )
-          .context("The 'ca' is not a valid PEM certificate bundle")?;
+        if !ca.is_empty() {
+          let certificates =
+            reqwest::Certificate::from_pem_bundle(ca.as_bytes())
+              .context(
+                "The 'ca' is not a valid PEM certificate bundle",
+              )?;
           for certificate in certificates {
             builder = builder.add_root_certificate(certificate);
           }
@@ -463,11 +468,108 @@ async fn review_client(
     .await
 }
 
+/// A review failure which is the operator's or the cluster's, never
+/// the presented token's: logged with the detail, answered `503`
+/// naming only the issuer.
+fn review_unavailable(
+  issuer: &TrustedIssuer,
+  context: String,
+) -> mogh_error::Error {
+  warn!(
+    issuer_id = issuer.id,
+    issuer = issuer.name,
+    "Token review failed | {context}"
+  );
+  anyhow!("Trusted issuer '{}' is not available", issuer.name)
+    .status_code(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+/// Where a pod finds its own cluster: the api server from the
+/// environment the kubelet injects, the reviewer credential and the
+/// CA from the mounted service account, the way official Kubernetes
+/// clients resolve it. The kubelet keeps the mounted token fresh, so
+/// it is read again for every review.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InClusterEnv {
+  /// `https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT`.
+  pub url: String,
+  /// `/var/run/secrets/kubernetes.io/serviceaccount/token`.
+  pub token_path: std::path::PathBuf,
+  /// `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`.
+  pub ca_path: std::path::PathBuf,
+}
+
+/// Where the kubelet mounts a pod's service account.
+pub const SERVICE_ACCOUNT_PATH: &str =
+  "/var/run/secrets/kubernetes.io/serviceaccount";
+
+impl InClusterEnv {
+  /// The standard pod environment, or None outside a cluster (the
+  /// kubelet sets the variables in every pod).
+  pub fn detect() -> Option<Self> {
+    let host = std::env::var("KUBERNETES_SERVICE_HOST")
+      .ok()
+      .filter(|host| !host.is_empty())?;
+    let port = std::env::var("KUBERNETES_SERVICE_PORT")
+      .ok()
+      .filter(|port| !port.is_empty())?;
+    let url = if host.contains(':') {
+      // An IPv6 address.
+      format!("https://[{host}]:{port}")
+    } else {
+      format!("https://{host}:{port}")
+    };
+    Some(Self {
+      url,
+      token_path: format!("{SERVICE_ACCOUNT_PATH}/token").into(),
+      ca_path: format!("{SERVICE_ACCOUNT_PATH}/ca.crt").into(),
+    })
+  }
+}
+
+/// Refuses (400) an `in_cluster` TokenReview source when the app is
+/// not running in a Kubernetes cluster, or its service account is
+/// not mounted ([AuthImpl::in_cluster_env] resolves `env`). Such an
+/// issuer could only ever answer reviews with `503`, so the manage
+/// api refuses the configuration up front instead.
+pub fn ensure_in_cluster_review(
+  issuer: &TrustedIssuer,
+  env: Option<&InClusterEnv>,
+) -> mogh_error::Result<()> {
+  let TrustedIssuerKeys::TokenReview(config) = &issuer.keys else {
+    return Ok(());
+  };
+  if !config.in_cluster {
+    return Ok(());
+  }
+  let Some(env) = env else {
+    return Err(
+      anyhow!(
+        "An 'in_cluster' token review needs the server running in \
+         a Kubernetes cluster, and it is not in one"
+      )
+      .status_code(StatusCode::BAD_REQUEST),
+    );
+  };
+  if let Err(e) = std::fs::metadata(&env.token_path) {
+    return Err(
+      anyhow!(
+        "The server's own service account token ({}) could not be \
+         read ({e}): is `automountServiceAccountToken` disabled?",
+        env.token_path.display()
+      )
+      .status_code(StatusCode::BAD_REQUEST),
+    );
+  }
+  Ok(())
+}
+
 /// Reviews a workload token with the cluster which issued it, through
 /// the Kubernetes TokenReview API at the source's `url`, presenting
-/// the stored reviewer credential. This is the default of
-/// [AuthImpl::review_workload_token]; an app routing reviews through
-/// a channel of its own (a `device`) calls it for its direct issuers.
+/// the stored reviewer credential. The default of
+/// [AuthImpl::review_workload_token] comes here for direct issuers;
+/// an app routing reviews through a channel of its own (a `device`)
+/// calls it for them too.
 ///
 /// The cluster checks the signature with its current keys, the
 /// expiry, the token's binding to its pod, and that the token is
@@ -480,23 +582,70 @@ pub async fn direct_token_review(
   config: &TokenReviewConfig,
   token: &str,
 ) -> mogh_error::Result<ReviewedToken> {
-  let unavailable = |context: String| {
-    warn!(
-      issuer_id = issuer.id,
-      issuer = issuer.name,
-      "Token review failed | {context}"
-    );
-    anyhow!("Trusted issuer '{}' is not available", issuer.name)
-      .status_code(StatusCode::SERVICE_UNAVAILABLE)
-  };
+  review_with(issuer, &config.url, &config.ca, &config.token, token)
+    .await
+}
 
-  let client = review_client(&issuer.id, config)
+/// Reviews a workload token with the cluster the app itself runs in
+/// (an `in_cluster` TokenReview source), presenting the app's own
+/// mounted service account, which needs the `system:auth-delegator`
+/// cluster role. The credential is read from `env` for every review:
+/// the kubelet keeps it fresh. Errors answer as in
+/// [direct_token_review].
+pub async fn in_cluster_token_review(
+  issuer: &TrustedIssuer,
+  env: &InClusterEnv,
+  token: &str,
+) -> mogh_error::Result<ReviewedToken> {
+  // Without the CA the api server's certificate cannot be verified
+  // and the review fails closed at the TLS handshake, so a missing
+  // file only surfaces a step later.
+  let ca = tokio::fs::read_to_string(&env.ca_path)
+    .await
+    .unwrap_or_default();
+  let reviewer = tokio::fs::read_to_string(&env.token_path)
+    .await
+    .map(zeroize::Zeroizing::new)
+    .map_err(|e| {
+      review_unavailable(
+        issuer,
+        format!(
+          "The server's own service account token ({}) could not \
+           be read: {e}",
+          env.token_path.display()
+        ),
+      )
+    })?;
+  let reviewer = reviewer.trim();
+  if reviewer.is_empty() {
+    return Err(review_unavailable(
+      issuer,
+      format!(
+        "The server's own service account token ({}) is empty",
+        env.token_path.display()
+      ),
+    ));
+  }
+  review_with(issuer, &env.url, &ca, reviewer, token).await
+}
+
+async fn review_with(
+  issuer: &TrustedIssuer,
+  cluster_url: &str,
+  ca: &str,
+  reviewer: &str,
+  token: &str,
+) -> mogh_error::Result<ReviewedToken> {
+  let unavailable =
+    |context: String| review_unavailable(issuer, context);
+
+  let client = review_client(&issuer.id, cluster_url, ca)
     .await
     .map_err(|e| unavailable(format!("{e:#}")))?;
 
   let url = format!(
     "{}/apis/authentication.k8s.io/v1/tokenreviews",
-    config.url.trim_end_matches('/')
+    cluster_url.trim_end_matches('/')
   );
   let body = serde_json::json!({
     "apiVersion": "authentication.k8s.io/v1",
@@ -505,7 +654,7 @@ pub async fn direct_token_review(
   });
   let response = client
     .post(&url)
-    .bearer_auth(&config.token)
+    .bearer_auth(reviewer)
     .json(&body)
     .send()
     .await
@@ -557,6 +706,53 @@ pub async fn direct_token_review(
           .collect()
       })
       .unwrap_or_default(),
+  })
+}
+
+/// The default of [AuthImpl::review_workload_token]: direct issuers
+/// review through [direct_token_review], `in_cluster` ones with the
+/// cluster [AuthImpl::in_cluster_env] resolves, and a `device` is
+/// refused — reviewing through a channel of the app's own is the
+/// app's to implement. An override delegates back here for the modes
+/// it does not handle itself.
+pub fn default_review_workload_token<I: AuthImpl + ?Sized>(
+  auth: &I,
+  issuer: TrustedIssuer,
+  token: String,
+) -> crate::DynFuture<mogh_error::Result<ReviewedToken>> {
+  let env = auth.in_cluster_env();
+  Box::pin(async move {
+    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
+    else {
+      return Err(
+        anyhow!(
+          "Trusted issuer '{}' does not verify through token reviews",
+          issuer.name
+        )
+        .into(),
+      );
+    };
+    if !config.device.is_empty() {
+      return Err(
+        anyhow!(
+          "Trusted issuer '{}' reviews through a device, which is not supported here",
+          issuer.name
+        )
+        .status_code(StatusCode::NOT_IMPLEMENTED),
+      );
+    }
+    if config.in_cluster {
+      let Some(env) = env else {
+        return Err(review_unavailable(
+          &issuer,
+          String::from(
+            "The server is not running in a Kubernetes cluster",
+          ),
+        ));
+      };
+      return in_cluster_token_review(&issuer, &env, &token).await;
+    }
+    direct_token_review(&issuer, config, &token).await
   })
 }
 
@@ -2211,6 +2407,7 @@ mod tests {
       ca: String::new(),
       token: token.to_string(),
       device: String::new(),
+      in_cluster: false,
     }
   }
 
@@ -2236,9 +2433,22 @@ mod tests {
       ca: "stale".to_string(),
       token: "stale".to_string(),
       device: " dev_123 ".to_string(),
+      in_cluster: false,
     };
     normalize_token_review(&mut config).unwrap();
     assert_eq!(config.device, "dev_123");
+    assert!(config.token.is_empty());
+    assert!(config.ca.is_empty());
+
+    // In-cluster mode drops the credential and CA the same way
+    let mut config = TokenReviewConfig {
+      ca: "stale".to_string(),
+      token: "stale".to_string(),
+      in_cluster: true,
+      ..Default::default()
+    };
+    normalize_token_review(&mut config).unwrap();
+    assert!(config.in_cluster);
     assert!(config.token.is_empty());
     assert!(config.ca.is_empty());
 
@@ -2249,6 +2459,21 @@ mod tests {
         TokenReviewConfig {
           device: "dev_123".to_string(),
           ..review_config("https://10.0.0.1:6443", "reviewer")
+        },
+      ),
+      (
+        "in_cluster with url",
+        TokenReviewConfig {
+          in_cluster: true,
+          ..review_config("https://10.0.0.1:6443", "reviewer")
+        },
+      ),
+      (
+        "in_cluster with device",
+        TokenReviewConfig {
+          in_cluster: true,
+          device: "dev_123".to_string(),
+          ..Default::default()
         },
       ),
       ("no token", review_config("https://10.0.0.1:6443", "")),
@@ -2305,6 +2530,67 @@ mod tests {
     assert_eq!(body["spec"]["token"], "the-token");
     assert_eq!(body["spec"]["audiences"], json!(["app"]));
     assert_eq!(body["kind"], "TokenReview");
+  }
+
+  #[tokio::test]
+  async fn test_in_cluster_token_review() {
+    use super::test_reviews::{authenticated, serve_cluster};
+
+    let (address, requests) = serve_cluster(
+      201,
+      authenticated("system:serviceaccount:ns:app"),
+    )
+    .await;
+    let issuer = fetched_issuer(
+      "in-cluster-issuer",
+      "https://kubernetes.default.svc.cluster.local",
+      TrustedIssuerKeys::TokenReview(TokenReviewConfig {
+        in_cluster: true,
+        ..Default::default()
+      }),
+    );
+    let dir = std::env::temp_dir().join(format!(
+      "in-cluster-review-{}",
+      crate::rand::random_string(12)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let token_path = dir.join("token");
+    std::fs::write(&token_path, "mounted-reviewer\n").unwrap();
+    let env = InClusterEnv {
+      url: address.clone(),
+      token_path: token_path.clone(),
+      // Absent, like any file read the review makes best-effort.
+      ca_path: dir.join("ca.crt"),
+    };
+
+    let reviewed =
+      in_cluster_token_review(&issuer, &env, "the-token")
+        .await
+        .unwrap();
+    assert_eq!(reviewed.username, "system:serviceaccount:ns:app");
+    let (bearer, body) = requests.lock().unwrap()[0].clone();
+    assert_eq!(bearer, "mounted-reviewer");
+    assert_eq!(body["spec"]["token"], "the-token");
+
+    // The kubelet rotates the mounted token, so every review reads
+    // it again.
+    std::fs::write(&token_path, "rotated-reviewer").unwrap();
+    in_cluster_token_review(&issuer, &env, "the-token")
+      .await
+      .unwrap();
+    let (bearer, _) = requests.lock().unwrap()[1].clone();
+    assert_eq!(bearer, "rotated-reviewer");
+
+    // A missing token answers unavailable, naming only the issuer.
+    std::fs::remove_file(&token_path).unwrap();
+    let error =
+      in_cluster_token_review(&issuer, &env, "the-token")
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    let shown = format!("{:#}", error.error);
+    assert!(shown.contains("not available"), "{shown}");
+    std::fs::remove_dir_all(&dir).ok();
   }
 
   #[tokio::test]

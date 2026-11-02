@@ -25,7 +25,8 @@ use crate::{
   provider::{
     external::PROVIDER_ID_LENGTH,
     workload::{
-      WorkloadAccess, evict_verification_keys, list_trusted_issuers,
+      WorkloadAccess, ensure_in_cluster_review,
+      evict_verification_keys, list_trusted_issuers,
       lock_trusted_issuer, normalize_trusted_issuer, parse_jwks,
     },
   },
@@ -118,6 +119,7 @@ pub async fn create_issuer<I: AuthImpl + ?Sized>(
   check_admin(user)?;
 
   let mut issuer = validate_issuer(issuer, None)?;
+  ensure_in_cluster_review(&issuer, auth.in_cluster_env().as_ref())?;
   // Random ids are never reused, so a new issuer
   // can't inherit the users of a deleted one.
   issuer.id = random_string(PROVIDER_ID_LENGTH);
@@ -171,7 +173,8 @@ fn keep_existing_review_token(
   else {
     return Ok(());
   };
-  if !config.device.trim().is_empty() {
+  if !config.device.trim().is_empty() || config.in_cluster {
+    // These modes review with their own credentials: nothing kept.
     return Ok(());
   }
   let token = config.token.trim();
@@ -248,6 +251,7 @@ pub async fn update_issuer<I: AuthImpl + ?Sized>(
   let mut issuer = issuer;
   keep_existing_review_token(&mut issuer, &existing)?;
   let mut issuer = validate_issuer(issuer, Some(&existing))?;
+  ensure_in_cluster_review(&issuer, auth.in_cluster_env().as_ref())?;
   issuer.id = existing.id;
 
   let admin_id = user.id().to_string();
@@ -421,6 +425,9 @@ mod tests {
     store_delay: std::time::Duration,
     /// The request context the last sync_workload_users ran in.
     sync_context: Arc<Mutex<Option<crate::RequestContext>>>,
+    /// The cluster the server runs in, None outside one. Tests
+    /// always answer from here, never from the real environment.
+    in_cluster: Option<crate::provider::workload::InClusterEnv>,
   }
 
   /// Whether an exchange of a rule of the issuer has to wait.
@@ -452,6 +459,12 @@ mod tests {
   impl AuthImpl for TestAuth {
     fn new() -> Self {
       Self::default()
+    }
+
+    fn in_cluster_env(
+      &self,
+    ) -> Option<crate::provider::workload::InClusterEnv> {
+      self.in_cluster.clone()
     }
 
     fn static_trusted_issuers(&self) -> Vec<TrustedIssuer> {
@@ -1243,8 +1256,37 @@ mod tests {
         ca: String::new(),
         token: token.to_string(),
         device: String::new(),
+        in_cluster: false,
       });
     issuer
+  }
+
+  fn in_cluster_issuer() -> TrustedIssuer {
+    let mut issuer = review_issuer("", "");
+    issuer.keys =
+      TrustedIssuerKeys::TokenReview(TokenReviewConfig {
+        in_cluster: true,
+        ..Default::default()
+      });
+    issuer
+  }
+
+  /// A TestAuth running inside a mock cluster: the api server is
+  /// `url`, the mounted token lives in the returned directory.
+  fn in_cluster_auth(url: &str) -> (TestAuth, std::path::PathBuf) {
+    let dir = std::env::temp_dir()
+      .join(format!("in-cluster-{}", random_string(12)));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("token"), "mounted-reviewer").unwrap();
+    let auth = TestAuth {
+      in_cluster: Some(crate::provider::workload::InClusterEnv {
+        url: url.to_string(),
+        token_path: dir.join("token"),
+        ca_path: dir.join("ca.crt"),
+      }),
+      ..Default::default()
+    };
+    (auth, dir)
   }
 
   fn stored_review_token(auth: &TestAuth) -> String {
@@ -1461,6 +1503,147 @@ mod tests {
     )
     .await
     .unwrap();
+    let error =
+      verify_workload_token(&auth, ip, &mint(), |_, _| true)
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+  }
+
+  #[tokio::test]
+  async fn test_in_cluster_review_needs_a_cluster() {
+    // Outside a cluster the configuration is refused up front.
+    let auth = TestAuth::default();
+    let error = create_issuer(&auth, &ADMIN, in_cluster_issuer())
+      .await
+      .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+      format!("{:#}", error.error)
+        .contains("running in a Kubernetes cluster"),
+      "{:#}",
+      error.error
+    );
+
+    // So is a service account which is not mounted.
+    let (auth, dir) = in_cluster_auth("https://unused");
+    std::fs::remove_file(dir.join("token")).unwrap();
+    let error = create_issuer(&auth, &ADMIN, in_cluster_issuer())
+      .await
+      .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+      format!("{:#}", error.error)
+        .contains("automountServiceAccountToken"),
+      "{:#}",
+      error.error
+    );
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[tokio::test]
+  async fn test_in_cluster_review_stores_no_credential() {
+    let (auth, dir) = in_cluster_auth("https://unused");
+
+    // A credential pasted along anyway is dropped, not stored.
+    let mut issuer = in_cluster_issuer();
+    if let TrustedIssuerKeys::TokenReview(config) = &mut issuer.keys
+    {
+      config.token = "pasted-by-mistake".to_string();
+    }
+    let created = create_issuer(&auth, &ADMIN, issuer)
+      .await
+      .unwrap()
+      .issuer;
+    assert_eq!(created.keys.review_token(), Some(""));
+    assert_eq!(stored_review_token(&auth), "");
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[tokio::test]
+  async fn test_switch_to_in_cluster_drops_the_credential() {
+    let (auth, dir) = in_cluster_auth("https://unused");
+    let created = create_issuer(
+      &auth,
+      &ADMIN,
+      review_issuer("https://10.0.0.1:6443", "reviewer-secret"),
+    )
+    .await
+    .unwrap()
+    .issuer;
+    assert_eq!(stored_review_token(&auth), "reviewer-secret");
+
+    // The switch needs no credential entry, unlike a url change,
+    // and clears the stored one.
+    let mut update = in_cluster_issuer();
+    update.id = created.id.clone();
+    update.rules = created.rules.clone();
+    update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+      .await
+      .unwrap();
+    assert_eq!(stored_review_token(&auth), "");
+    let stored = auth.stored.lock().unwrap()[0].clone();
+    let TrustedIssuerKeys::TokenReview(config) = &stored.keys
+    else {
+      unreachable!()
+    };
+    assert!(config.in_cluster);
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[tokio::test]
+  async fn test_in_cluster_review_exchange() {
+    use crate::{
+      api::token::verify_workload_token,
+      provider::{
+        token_exchange::test_tokens::TestToken,
+        workload::test_reviews::{authenticated, serve_cluster},
+      },
+    };
+    let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    let mint = || {
+      let mut token = TestToken::new(
+        openidconnect::EmptyAdditionalClaims {},
+      );
+      token.issuer =
+        "https://kubernetes.default.svc.cluster.local".to_string();
+      token.subject = "system:serviceaccount:ns:app".to_string();
+      token.audiences = vec!["https://app.example.com".to_string()];
+      token.mint()
+    };
+
+    // The server's own mounted credential reviews the token.
+    let (address, requests) = serve_cluster(
+      201,
+      authenticated("system:serviceaccount:ns:app"),
+    )
+    .await;
+    let (auth, dir) = in_cluster_auth(&address);
+    create_issuer(&auth, &ADMIN, in_cluster_issuer())
+      .await
+      .unwrap();
+    let verified =
+      verify_workload_token(&auth, ip, &mint(), |_, _| true)
+        .await
+        .unwrap();
+    assert_eq!(verified.rule.name, "Pods");
+    let (bearer, body) = requests.lock().unwrap()[0].clone();
+    assert_eq!(bearer, "mounted-reviewer");
+    assert_eq!(
+      body["spec"]["audiences"],
+      serde_json::json!(["https://app.example.com"])
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    // Stored, but the server no longer runs in a cluster: the
+    // issuer is unavailable, never the token's fault.
+    let auth = TestAuth::default();
+    auth.stored.lock().unwrap().push({
+      let mut issuer = in_cluster_issuer();
+      issuer.id = "icl".to_string();
+      issuer.rules[0].id = "rule".to_string();
+      issuer
+    });
     let error =
       verify_workload_token(&auth, ip, &mint(), |_, _| true)
         .await

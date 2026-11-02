@@ -53,6 +53,7 @@ test("a stored issuer's values pass, and make the same issuer", () => {
       review_token: "",
       review_token_stored: false,
       review_device: "",
+      review_in_cluster: false,
       audiences: [],
       max_token_age_secs: 0,
       rules: [],
@@ -134,6 +135,36 @@ test("a token review issuer round-trips, its credential write-only", () => {
     Object.keys(issuerFormErrors(values({ keys_source: "TokenReview" }))),
     ["review_url"],
   );
+});
+
+test("an in-cluster review stores nothing and quiets the hidden fields", () => {
+  // Stored: the toggle reads back, no credential is stored.
+  const read = issuerFormValues({
+    id: "i4",
+    name: "Cluster",
+    enabled: true,
+    issuer: "https://kubernetes.default.svc.cluster.local",
+    keys: { source: "TokenReview", params: { in_cluster: true } },
+    audiences: ["https://cicada.example.com"],
+  });
+  assert.equal(read.review_in_cluster, true);
+  assert.equal(read.review_token_stored, false);
+
+  // Saved: only the toggle goes out, whatever lingers in the hidden
+  // fields, and none of their checks fire.
+  const lingering = values({
+    keys_source: "TokenReview",
+    review_in_cluster: true,
+    review_url: "not a url",
+    review_token: "pasted",
+    review_ca: "pem",
+    review_device: "dev_123",
+  });
+  assert.deepEqual(issuerFormErrors(lingering), {});
+  assert.deepEqual(trustedIssuer("i4", lingering).keys, {
+    source: "TokenReview",
+    params: { in_cluster: true },
+  });
 });
 
 test("emptied number fields are errors, not 0", () => {

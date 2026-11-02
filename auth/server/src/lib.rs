@@ -8,9 +8,7 @@ use anyhow::{Context as _, anyhow};
 use axum::{extract::Request, http::StatusCode};
 use mogh_auth_client::{
   api::manage::CreateApiKey,
-  config::{
-    ExternalLoginProvider, TrustedIssuer, TrustedIssuerKeys,
-  },
+  config::{ExternalLoginProvider, TrustedIssuer},
 };
 use mogh_error::{AddStatusCode, AddStatusCodeError};
 use mogh_rate_limit::RateLimiter;
@@ -40,8 +38,8 @@ use crate::{
     jwt::JwtProvider,
     passkey::PasskeyProvider,
     workload::{
-      ReviewedToken, WorkloadAccess, WorkloadIdentity,
-      direct_token_review,
+      InClusterEnv, ReviewedToken, WorkloadAccess, WorkloadIdentity,
+      default_review_workload_token,
     },
   },
   user::BoxAuthUser,
@@ -1146,44 +1144,35 @@ pub trait AuthImpl: Send + Sync + 'static {
     Box::pin(async { Ok(Vec::new()) })
   }
 
-  /// Reviews the token of a [TrustedIssuerKeys::TokenReview] issuer:
+  /// The Kubernetes cluster the app itself runs in, for `in_cluster`
+  /// token reviews: the standard pod environment
+  /// ([InClusterEnv::detect]) by default. Tests, and apps whose
+  /// service account is mounted somewhere else, override it.
+  fn in_cluster_env(&self) -> Option<InClusterEnv> {
+    InClusterEnv::detect()
+  }
+
+  /// Reviews the token of a
+  /// [TokenReview](mogh_auth_client::config::TrustedIssuerKeys::TokenReview)
+  /// issuer:
   /// asks the cluster which issued it whether it is valid for one of
   /// the issuer's audiences. The exchange treats a client error
   /// (4xx) as the token's rejection, and anything else as the issuer
   /// being unavailable (503).
   ///
-  /// The default posts a TokenReview to the source's `url` with the
-  /// stored reviewer credential ([direct_token_review]), and refuses
-  /// an issuer naming a `device`: reviewing through a channel of the
-  /// app's own is the app's to implement, direct issuers included
-  /// (call [direct_token_review] for them).
+  /// The default ([default_review_workload_token]) posts a
+  /// TokenReview to the source's `url` with the stored reviewer
+  /// credential, or to the cluster [AuthImpl::in_cluster_env]
+  /// resolves, and refuses an issuer naming a `device`: reviewing
+  /// through a channel of the app's own is the app's to implement.
+  /// An override handles its devices and delegates the rest back to
+  /// [default_review_workload_token].
   fn review_workload_token(
     &self,
     issuer: TrustedIssuer,
     token: String,
   ) -> DynFuture<mogh_error::Result<ReviewedToken>> {
-    Box::pin(async move {
-      let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
-      else {
-        return Err(
-          anyhow!(
-            "Trusted issuer '{}' does not verify through token reviews",
-            issuer.name
-          )
-          .into(),
-        );
-      };
-      if !config.device.is_empty() {
-        return Err(
-          anyhow!(
-            "Trusted issuer '{}' reviews through a device, which is not supported here",
-            issuer.name
-          )
-          .status_code(StatusCode::NOT_IMPLEMENTED),
-        );
-      }
-      direct_token_review(&issuer, config, &token).await
-    })
+    default_review_workload_token(self, issuer, token)
   }
 
   /// Store a new trusted issuer. The ids of the issuer and its

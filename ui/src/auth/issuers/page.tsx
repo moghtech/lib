@@ -360,12 +360,20 @@ function TrustedIssuerConfig({
                 ) : (
                   <></>
                 ),
+              review_in_cluster: {
+                label: "Review with this cluster",
+                description:
+                  "Cicada runs in the cluster itself and reviews the tokens with its own service account, storing no credential.",
+                hidden: values.keys_source !== "TokenReview",
+              },
               review_url: {
                 label: "API Server URL",
                 description:
                   "The cluster api server the reviews go to. Leave empty to review through a device instead.",
                 placeholder: "https://10.0.0.1:6443",
-                hidden: values.keys_source !== "TokenReview",
+                hidden:
+                  values.keys_source !== "TokenReview" ||
+                  values.review_in_cluster,
                 error: shown.review_url,
               },
               review_token: {
@@ -377,13 +385,15 @@ function TrustedIssuerConfig({
                   : "Enter the reviewer credential",
                 hidden:
                   values.keys_source !== "TokenReview" ||
-                  !!values.review_device.trim(),
+                  !!values.review_device.trim() ||
+                  values.review_in_cluster,
                 secret: true,
                 error: shown.review_token,
               },
               review_ca: (value, set) =>
                 values.keys_source === "TokenReview" &&
-                !values.review_device.trim() ? (
+                !values.review_device.trim() &&
+                !values.review_in_cluster ? (
                   <ConfigItem
                     label="API Server CA"
                     description="The PEM bundle the api server's certificate is verified against. Empty: the system roots."
@@ -412,7 +422,9 @@ function TrustedIssuerConfig({
                 description:
                   "The device (periphery) in the cluster that reviews the tokens with its own service account, by id. The server then stores no cluster credential.",
                 placeholder: "dev_...",
-                hidden: values.keys_source !== "TokenReview",
+                hidden:
+                  values.keys_source !== "TokenReview" ||
+                  values.review_in_cluster,
                 error: shown.review_device,
               },
               audiences: (value, set) => (

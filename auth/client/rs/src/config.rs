@@ -250,7 +250,7 @@ impl TrustedIssuer {
 pub struct TokenReviewConfig {
   /// The url of the cluster's api server, eg. `https://10.0.0.1:6443`.
   /// Empty: the review goes through the app's own channel named by
-  /// `device` instead.
+  /// `device`, or the app's own cluster (`in_cluster`), instead.
   #[serde(default)]
   pub url: String,
   /// The PEM bundle the api server's certificate is verified
@@ -270,6 +270,14 @@ pub struct TokenReviewConfig {
   /// credential.
   #[serde(default)]
   pub device: String,
+  /// Review with the cluster the app itself runs in, instead of
+  /// `url` or `device`. The api server, the reviewer credential and
+  /// the CA are taken from the pod's environment and mounted
+  /// service account, which needs the `system:auth-delegator`
+  /// cluster role. Nothing is stored, and the kubelet keeps the
+  /// mounted credential fresh.
+  #[serde(default)]
+  pub in_cluster: bool,
 }
 
 /// The reviewer credential is redacted.
@@ -280,6 +288,7 @@ impl std::fmt::Debug for TokenReviewConfig {
       .field("ca", &self.ca)
       .field("token", &empty_or_redacted(&self.token))
       .field("device", &self.device)
+      .field("in_cluster", &self.in_cluster)
       .finish()
   }
 }

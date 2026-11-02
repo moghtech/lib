@@ -17,10 +17,10 @@
     "@mantine/hooks": "^9.7.4",
     "@mantine/notifications": "^9.7.4",
     "@monaco-editor/react": "^4.7.0",
-    "@tanstack/react-query": "^5.105.0",
+    "@tanstack/react-query": "^5.105.1",
     "@tanstack/react-table": "^9.3.1",
     "example_client": "file:../client/ts",
-    "lucide-react": "^1.62.0",
+    "lucide-react": "^1.66.0",
     "mogh_auth_client": "file:../../auth/client/ts",
     "mogh_supporter": "file:../../supporter/ts",
     "mogh_ui": "file:../../ui",
@@ -29,11 +29,11 @@
     "prettier": "^3.9.10",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "react-router-dom": "^7.18.4"
+    "react-router-dom": "^7.18.5"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",
-    "@types/node": "^26.6.5",
+    "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
@@ -41,7 +41,7 @@
     "postcss": "^8.5.32",
     "postcss-preset-mantine": "^1.18.0",
     "postcss-simple-vars": "^7.0.1",
-    "sass-embedded": "^1.106.1",
+    "sass-embedded": "^1.107.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.5"
   }

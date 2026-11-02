@@ -911,7 +911,7 @@ export interface TokenReviewConfig {
 	/**
 	 * The url of the cluster's api server, eg. `https://10.0.0.1:6443`.
 	 * Empty: the review goes through the app's own channel named by
-	 * `device` instead.
+	 * `device`, or the app's own cluster (`in_cluster`), instead.
 	 */
 	url?: string;
 	/**
@@ -934,6 +934,15 @@ export interface TokenReviewConfig {
 	 * credential.
 	 */
 	device?: string;
+	/**
+	 * Review with the cluster the app itself runs in, instead of
+	 * `url` or `device`. The api server, the reviewer credential and
+	 * the CA are taken from the pod's environment and mounted
+	 * service account, which needs the `system:auth-delegator`
+	 * cluster role. Nothing is stored, and the kubelet keeps the
+	 * mounted credential fresh.
+	 */
+	in_cluster?: boolean;
 }
 
 /**

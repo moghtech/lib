@@ -40,6 +40,12 @@ export interface IssuerFormValues {
   review_token_stored: boolean;
   /** The device (periphery) a TokenReview source reviews through. */
   review_device: string;
+  /**
+   * Review with the cluster the app itself runs in: its own service
+   * account posts the reviews, nothing is stored. The other review
+   * fields are hidden and left out of the save while this is on.
+   */
+  review_in_cluster: boolean;
   audiences: string[];
   /**
    * 0 for no limit. `""` while the field is emptied, which is no value
@@ -93,6 +99,8 @@ export function issuerFormValues(issuer: TrustedIssuer): IssuerFormValues {
       keys?.source === "TokenReview" && !!keys.params.token,
     review_device:
       keys?.source === "TokenReview" ? (keys.params.device ?? "") : "",
+    review_in_cluster:
+      keys?.source === "TokenReview" && (keys.params.in_cluster ?? false),
     audiences: issuer.audiences ?? [],
     max_token_age_secs: issuer.max_token_age_secs ?? 0,
     rules: (issuer.rules ?? []).map((rule) => ({
@@ -123,13 +131,17 @@ export function trustedIssuer(
         : values.keys_source === "TokenReview"
           ? {
               source: "TokenReview",
-              params: {
-                url: values.review_url.trim(),
-                ca: values.review_ca.trim(),
-                // Empty (or the redacted listing) keeps the stored one
-                token: values.review_token,
-                device: values.review_device.trim(),
-              },
+              // The other review fields are hidden while the app's
+              // own cluster reviews: they are not sent either.
+              params: values.review_in_cluster
+                ? { in_cluster: true }
+                : {
+                    url: values.review_url.trim(),
+                    ca: values.review_ca.trim(),
+                    // Empty (or the redacted listing) keeps the stored one
+                    token: values.review_token,
+                    device: values.review_device.trim(),
+                  },
             }
           : { source: "Discovery", params: {} };
   return {
@@ -203,12 +215,14 @@ export function issuerFormErrors(
       errors.keys_static = "The static keys must be valid JSON";
     }
   }
-  if (values.keys_source === "TokenReview") {
+  // With the app's own cluster reviewing, the other review fields
+  // are hidden and not saved: nothing of theirs to check.
+  if (values.keys_source === "TokenReview" && !values.review_in_cluster) {
     const url = values.review_url.trim();
     const device = values.review_device.trim();
     if (!url && !device) {
       errors.review_url =
-        "A token review needs the cluster api server URL, or a device to review through";
+        "A token review needs the cluster api server URL, a device to review through, or this cluster";
     } else if (url && device) {
       errors.review_device =
         "A token review goes to the URL or through the device, not both";
