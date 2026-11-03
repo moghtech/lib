@@ -118,6 +118,14 @@ export function SupporterBrandIcon({
 const BADGE_HEIGHT = 36;
 
 /**
+ * The line height of the badge's text. A button's own is 1, and the
+ * span which truncates the text clips what overflows it: inherited,
+ * it cut the descenders (a g, a p) off the name. `normal` is the
+ * font's own height, which fits its glyphs.
+ */
+const TEXT_LINE_HEIGHT = "normal";
+
+/**
  * Besides its own, the props of the button the badge is (eg.
  * `visibleFrom`, to leave it out on a small screen).
  */
@@ -227,7 +235,7 @@ export function SupporterBadge({
         data-testid="become-supporter"
         {...buttonProps}
       >
-        <Text span inherit truncate>
+        <Text span inherit truncate lh={TEXT_LINE_HEIGHT}>
           Become a supporter
         </Text>
       </Button>
@@ -283,6 +291,7 @@ export function SupporterBadge({
             span
             inherit
             truncate
+            lh={TEXT_LINE_HEIGHT}
             // In capitals when an organization's branding says so.
             tt={brand?.uppercaseName ? "uppercase" : undefined}
           >

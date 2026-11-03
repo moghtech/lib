@@ -1,6 +1,6 @@
 {
   "name": "mogh_ui",
-  "version": "4.4.1",
+  "version": "4.4.2",
   "description": "Common UI components and styling used across Mogh apps.",
   "type": "module",
   "main": "./dist/index.js",
