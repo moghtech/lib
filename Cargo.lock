@@ -449,17 +449,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "base64urlsafedata"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b08e33815c87d8cadcddb1e74ac307368a3751fbe40c961538afa21a1899f21c"
-dependencies = [
- "base64 0.21.7",
- "pastey",
- "serde",
-]
-
-[[package]]
 name = "bcrypt"
 version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -692,9 +681,9 @@ dependencies = [
 
 [[package]]
 name = "cicada_client"
-version = "0.25.0"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b35e235f8f56081a48afaffef9eea9588a5dc5025c295dff552d52b94d55280"
+checksum = "19e9e414e0455e016d8a2ef6fc1ee6c5f06f5011ec734c47825b0f84d377ae45"
 dependencies = [
  "async_timing_util",
  "chrono",
@@ -702,7 +691,7 @@ dependencies = [
  "futures-util",
  "http",
  "hyper-util",
- "mogh_auth_client 8.0.0",
+ "mogh_auth_client",
  "mogh_error",
  "mogh_logger",
  "mogh_pki",
@@ -723,9 +712,9 @@ dependencies = [
 
 [[package]]
 name = "cicada_loader"
-version = "0.25.3"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05da048db79c355173c773bc261647155d0b5f862a796ade72f55bc84fe42023"
+checksum = "65b1599cd28b05cb80c20a1bc96c65a316a4683409e2682f33a86e803d8c23e1"
 dependencies = [
  "anyhow",
  "cicada_client",
@@ -1503,7 +1492,7 @@ name = "example_client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "mogh_auth_client 9.2.0",
+ "mogh_auth_client",
  "mogh_error",
  "mogh_resolver",
  "mogh_supporter",
@@ -1539,7 +1528,7 @@ dependencies = [
  "envy",
  "example_client",
  "example_mock_idp",
- "mogh_auth_client 9.2.0",
+ "mogh_auth_client",
  "mogh_auth_server",
  "mogh_cache",
  "mogh_config",
@@ -2600,27 +2589,6 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_client"
-version = "8.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dbaa0ac739016a28ed6d8f9be869d67f9af1ce480ae7d949aa44b04581bf870"
-dependencies = [
- "anyhow",
- "mogh_error",
- "mogh_pki",
- "mogh_resolver",
- "rand 0.10.3",
- "reqwest 0.13.5",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "strum",
- "typeshare",
- "webauthn-rs-proto 0.5.5",
- "zeroize",
-]
-
-[[package]]
-name = "mogh_auth_client"
 version = "9.2.0"
 dependencies = [
  "anyhow",
@@ -2636,7 +2604,7 @@ dependencies = [
  "tokio",
  "typeshare",
  "utoipa",
- "webauthn-rs-proto 0.6.2",
+ "webauthn-rs-proto",
  "zeroize",
 ]
 
@@ -2651,7 +2619,7 @@ dependencies = [
  "data-encoding",
  "http-body-util",
  "jsonwebtoken",
- "mogh_auth_client 9.2.0",
+ "mogh_auth_client",
  "mogh_error",
  "mogh_logger",
  "mogh_pki",
@@ -2688,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_config"
-version = "4.3.3"
+version = "4.4.0"
 dependencies = [
  "cicada_loader",
  "colored",
@@ -3241,12 +3209,6 @@ dependencies = [
  "rand_core 0.6.4",
  "subtle",
 ]
-
-[[package]]
-name = "pastey"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
 name = "pbkdf2"
@@ -5655,21 +5617,8 @@ dependencies = [
  "url",
  "uuid",
  "webauthn-attestation-ca",
- "webauthn-rs-proto 0.6.2",
+ "webauthn-rs-proto",
  "x509-parser",
-]
-
-[[package]]
-name = "webauthn-rs-proto"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c37393beac9c1ed1ca6dbb30b1e01783fb316ab3a45d90ecd48c99052dd7ef1e"
-dependencies = [
- "base64 0.21.7",
- "base64urlsafedata",
- "serde",
- "serde_json",
- "url",
 ]
 
 [[package]]
