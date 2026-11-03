@@ -770,12 +770,17 @@ async fn read_review_body(response: reqwest::Response) -> String {
 }
 
 /// Cluster errors end up in the log, and are as long as it likes.
+/// A review response excerpt for a log line / error context:
+/// capped, with control characters escaped — the body is the
+/// cluster's (or a middlebox's) to choose, and a raw line break
+/// would forge log lines.
 fn truncate_review(value: &str) -> String {
   const MAX: usize = 300;
-  match value.char_indices().nth(MAX) {
+  let capped = match value.char_indices().nth(MAX) {
     Some((index, _)) => format!("{}...", &value[..index]),
     None => value.to_string(),
-  }
+  };
+  capped.escape_debug().to_string()
 }
 
 // =========

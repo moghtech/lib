@@ -1463,7 +1463,12 @@ pub(crate) async fn verify_stored_api_key(
     Some(stored) if !expired(stored.expires, unix_timestamp_ms()) => {
       Ok(stored)
     }
-    _ => Err(invalid_client_credentials()),
+    // The secret verified, the key just aged out: an authentic
+    // credential is no guess (uncounted), like an expired session
+    // jwt — a script polling with its expired key must not lock
+    // its whole ip out.
+    Some(_) => Err(invalid_client_credentials().uncounted()),
+    None => Err(invalid_client_credentials()),
   }
 }
 
@@ -1481,7 +1486,11 @@ pub fn verify_signing_key(
     Some(stored) if !expired(stored.expires, unix_timestamp_ms()) => {
       Ok(stored)
     }
-    _ => Err(invalid_client_credentials()),
+    // The request's signature verified for the stored key before
+    // this ran: an aged-out key is no guess (uncounted), like an
+    // expired session jwt.
+    Some(_) => Err(invalid_client_credentials().uncounted()),
+    None => Err(invalid_client_credentials()),
   }
 }
 
