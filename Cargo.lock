@@ -681,9 +681,9 @@ dependencies = [
 
 [[package]]
 name = "cicada_client"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19e9e414e0455e016d8a2ef6fc1ee6c5f06f5011ec734c47825b0f84d377ae45"
+checksum = "4c83490e532089379aa61a47e510b6e775166db86593a17143147228709f554c"
 dependencies = [
  "async_timing_util",
  "chrono",
@@ -712,9 +712,9 @@ dependencies = [
 
 [[package]]
 name = "cicada_loader"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65b1599cd28b05cb80c20a1bc96c65a316a4683409e2682f33a86e803d8c23e1"
+checksum = "57e08ede2ed36b715c451aa48ed59c0f016a8bb2d74443794d982945e3fafeff"
 dependencies = [
  "anyhow",
  "cicada_client",
@@ -2656,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_config"
-version = "4.4.0"
+version = "4.4.1"
 dependencies = [
  "cicada_loader",
  "colored",
@@ -4962,9 +4962,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.8+spec-1.1.0"
+version = "1.2.0+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20489e00e4d8741d6be680764cc12e270655e375a20d1011e844a9c3379e678d"
+checksum = "c5ffcdf8f50436dbbfd675c1fe1b8e0854f42b7defea8584bdebe1aee900e561"
 dependencies = [
  "indexmap 2.14.2",
  "serde_core",
@@ -4995,9 +4995,9 @@ dependencies = [
 
 [[package]]
 name = "toml_writer"
-version = "1.1.3+spec-1.1.0"
+version = "1.2.0+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
+checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 
 [[package]]
 name = "totp-rs"
