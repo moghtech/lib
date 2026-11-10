@@ -15,10 +15,9 @@ use openidconnect::{
   IdTokenFields, IssuerUrl, Nonce, OAuth2TokenResponse,
   PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
   RequestTokenError, Scope, StandardErrorResponse,
-  StandardTokenResponse, TokenResponse as _,
-  core::*,
-  reqwest::{self, Url},
+  StandardTokenResponse, TokenResponse as _, core::*,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -62,6 +61,11 @@ pub type TokenResponse = StandardTokenResponse<
 /// Redirects are not followed: the token request carries the
 /// client credentials and the PKCE verifier, which a redirect
 /// would send on.
+///
+/// It uses the crate's reqwest, not openidconnect's: a provider
+/// behind a private CA is trusted like every other TLS peer of the
+/// server, through the system store (`SSL_CERT_FILE` / `SSL_CERT_DIR`),
+/// where openidconnect's default client trusts the bundled public roots only.
 pub(crate) fn http_client(
   app_user_agent: &str,
   timeout: Duration,

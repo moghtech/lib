@@ -19,7 +19,7 @@ repository = "https://github.com/moghtech/lib"
 [workspace.dependencies]
 # MOGH API
 mogh_auth_client = "9.2.0"
-mogh_auth_server = "9.2.1"
+mogh_auth_server = "9.2.2"
 
 # MOGH
 mogh_cache = "2.0.0"
@@ -27,7 +27,7 @@ mogh_config = "4.4.1"
 mogh_encryption = "3.0.0"
 mogh_env_parser = "1.0.1"
 mogh_error = "2.0.0"
-mogh_logger = { version = "2.0.0", default-features = false }
+mogh_logger = { version = "2.1.0", default-features = false }
 mogh_pki = "4.0.0"
 mogh_rate_limit = "3.0.0"
 mogh_request_ip = "3.0.0"
@@ -44,11 +44,11 @@ cicada_loader = "0.27.0"
 # ASYNC
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "form", "rustls"] }
 tokio = { version = "1.54.1", features = ["full"] }
-arc-swap = "1.9.3"
+arc-swap = "1.9.5"
 
 # SERVER
 tower-http = { version = "0.7.1", features = ["fs", "cors", "set-header"] }
-axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+axum-server = { version = "0.9.0", features = ["tls-rustls"] }
 axum = { version = "0.8.9", features = ["macros"] }
 http-body-util = "0.1.5"
 http-body = "1.1.0"
@@ -67,7 +67,7 @@ serde_yaml_ng = "0.10.0"
 serde_json = "1.0.154"
 serde_path_to_error = "0.1.20"
 serde_qs = "1.1.3"
-toml = "1.2.0"
+toml = "1.2.1"
 url = "2.5.8"
 
 # CRYPTO
@@ -79,11 +79,14 @@ zeroize = { version = "1.9.1", features = ["derive"] }
 sha2 = "0.11.1"
 subtle = "2.6.1"
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
+rustls-native-certs = "0.8.5"
 
 # AUTH
 webauthn-rs = { version = "0.6.2", features = ["danger-allow-state-serialisation"] }
 webauthn-rs-proto = "0.6.2"
-openidconnect = { version = "4.1.0", features = ["accept-rfc3339-timestamps"] }
+# Disables openidconnect's own reqwest feature to use
+# with the reqwest above, which uses the system store for certs.
+openidconnect = { version = "4.1.0", default-features = false, features = ["accept-rfc3339-timestamps"] }
 # Only to mint test tokens, openidconnect uses it for token timestamps.
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
@@ -125,11 +128,11 @@ tracing = "0.1.44"
 # MACRO
 quote = "1.0.47"
 proc-macro2 = "1.0.107"
-syn = "3.0.9"
+syn = "3.0.10"
 
 # MISC
 clap = { version = "4.6.7", features = ["derive"] }
-uuid = { version = "1.29.0", features = ["v4"] }
+uuid = { version = "1.29.2", features = ["v4"] }
 typeshare = "1.0.5"
 libc = "0.2.191"
 wildcard = "0.3.0"
@@ -137,7 +140,7 @@ ipnet = "2.12.2"
 colored = "3.1.1"
 utoipa = "6.0.0"
 regex = "1.13.1"
-flate2 = "1.1.10"
+flate2 = "1.1.11"
 
 
 [patch.crates-io]

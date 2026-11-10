@@ -124,6 +124,41 @@ OpenTelemetry collector:
   res
   ```
 
+## Custom root CAs
+
+The `custom_ca` feature makes `init` say which custom root CAs the TLS
+clients of the process trust, for a binary shipped in a container image. The
+clients built on `rustls-native-certs` (reqwest's verifier on Linux,
+tokio-tungstenite's native roots) load their root certificates on their own,
+from the bundle `SSL_CERT_FILE` names and from every file directly inside the
+directories of `SSL_CERT_DIR`. Two lines in the Dockerfile point them at the
+system bundle and at the directory custom root CAs are mounted to, so the
+certificates are trusted as mounted, without `update-ca-certificates`: also
+as another user than root, or on a read-only root filesystem.
+
+```dockerfile
+ENV SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+ENV SSL_CERT_DIR="/usr/local/share/ca-certificates"
+```
+
+What the clients skip there (a file unreadable for the container's user,
+DER encoded, a directory) they skip without a line the app's logger shows:
+the mistake only shows as `UnknownIssuer` on the request which needed the
+certificate. So `init` reads the directory as the clients do, and logs what
+they find:
+
+```text
+INFO Custom CAs: 2 certificate(s) trusted from /usr/local/share/ca-certificates
+WARN Custom CAs: /usr/local/share/ca-certificates | failed to read PEM from file: Permission denied (os error 13) at '/usr/local/share/ca-certificates/ca.crt'
+WARN Custom CAs: nothing trusted from /usr/local/share/ca-certificates | no readable PEM certificate directly inside
+```
+
+Nothing is logged without `SSL_CERT_DIR`, nor for a directory holding no
+file (dot entries aside). The lines are the logger's own, logged at the
+app's level without a target to list. Database drivers are not among these
+clients: sqlx and the MongoDB driver verify against their built-in roots and
+the CA file the connection uri names.
+
 ## Urls in logs
 
 `redact_url_credentials` is the one rule for showing a url which may carry

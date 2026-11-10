@@ -1,13 +1,15 @@
 //! Configurable application level logger using tracing: stdio
 //! (standard / pretty / json) and an OTLP/HTTP trace export.
 //!
-//! The `init` feature (default) is the logger itself: `init`,
-//! `shutdown` and the trace context propagation. Without it
+//! The `init` feature (default) includes the logger methods `init`,
+//! `shutdown`, and the trace context propagation. Without it
 //! (`default-features = false`) the crate is only the config types
 //! ([LoggingConfig], [LogLevel], [StdioLogMode], the [LogConfig]
 //! trait) and [redact_url_credentials], without the OpenTelemetry
 //! crates, for a crate which holds an application's config without
-//! installing its logger (eg. its API client).
+//! installing its logger (eg. its API client). The `custom_ca`
+//! feature logs on `init` the custom root CAs the TLS clients trust
+//! from `SSL_CERT_DIR`, for a binary shipped in a container image.
 
 #[cfg(feature = "init")]
 use {
@@ -20,6 +22,8 @@ use {
 };
 
 mod config;
+#[cfg(feature = "custom_ca")]
+mod custom_ca;
 mod endpoint;
 #[cfg(feature = "init")]
 mod otel;
@@ -139,6 +143,9 @@ pub fn init(config: impl config::LogConfig) -> anyhow::Result<()> {
     otel::install(provider);
   }
 
+  #[cfg(feature = "custom_ca")]
+  custom_ca::log();
+
   Ok(())
 }
 
@@ -157,16 +164,18 @@ pub fn shutdown() -> anyhow::Result<()> {
 }
 
 /// Only the configured targets are logged, at the configured
-/// level. While exporting, the OpenTelemetry crates' own warnings
-/// and errors (eg. a failed export) are let through too, unless the
-/// app configures those targets itself.
+/// level, and the logger's own lines (the custom root CAs on
+/// `init`) with them. While exporting, the OpenTelemetry crates' own
+/// warnings and errors (eg. a failed export) are let through too,
+/// unless the app configures those targets itself.
 #[cfg(feature = "init")]
 fn filter_targets(
   config: &impl config::LogConfig,
   use_otel: bool,
 ) -> Targets {
-  let mut filter_targets =
-    Targets::new().with_default(LevelFilter::OFF);
+  let mut filter_targets = Targets::new()
+    .with_default(LevelFilter::OFF)
+    .with_target(env!("CARGO_CRATE_NAME"), config.level());
 
   if use_otel
     && !config.targets().iter().any(|target| {
@@ -257,6 +266,19 @@ mod tests {
     assert!(!tracing::dispatcher::has_been_set());
     // Nothing installed to shut down.
     shutdown().unwrap();
+  }
+
+  #[test]
+  fn the_loggers_own_lines_are_logged_at_the_app_level() {
+    let filter =
+      filter_targets(&config(Level::WARN, &["my_app"]), false);
+    assert!(
+      filter.would_enable("mogh_logger::custom_ca", &Level::WARN)
+    );
+    assert!(
+      !filter.would_enable("mogh_logger::custom_ca", &Level::INFO)
+    );
+    assert!(!filter.would_enable("mogh_server", &Level::ERROR));
   }
 
   #[test]
