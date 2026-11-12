@@ -67,6 +67,27 @@ a:focus {
   background-color: var(--mantine-color-accent-9);
 }
 
+// Accordion backgrounds Mantine takes from its own gray / dark palette,
+// by state. The border, fill and radius are set in the theme.
+// Like Mantine, only these two variants have a control hover.
+.mantine-Accordion-root:where([data-variant="default"], [data-variant="contained"])
+  .accordion-control:where(:not(:disabled, [data-disabled])) {
+  @media (hover: hover) {
+    &:hover {
+      background-color: var(--mantine-color-accent-2);
+    }
+  }
+  @media (hover: none) {
+    &:active {
+      background-color: var(--mantine-color-accent-2);
+    }
+  }
+}
+// An open "separated" item is a card on the body.
+.mantine-Accordion-root:where([data-variant="separated"]) .accordion-item[data-active] {
+  background-color: var(--mantine-color-body);
+}
+
 .select-nondimmed-placeholder .mantine-Input-input::placeholder {
   color: inherit;
   opacity: 1;

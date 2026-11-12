@@ -1,4 +1,5 @@
 import {
+  Accordion,
   ActionIcon,
   Badge,
   Button,
@@ -40,8 +41,7 @@ export const DARK_BODY = "#0f1115";
 const DEFAULT_COLOR_SCHEME: MantineColorScheme = "auto";
 
 export type AdditionalColors =
-  | Partial<Record<DefaultMantineColor, MantineColorsTuple>>
-  | undefined;
+  Partial<Record<DefaultMantineColor, MantineColorsTuple>> | undefined;
 
 export interface ThemeProviderProps {
   primaryColor?: DefaultMantineColor;
@@ -317,6 +317,21 @@ function theme({
             borderRadius: theme.radius.sm,
           },
         }),
+      }),
+      Accordion: Accordion.extend({
+        defaultProps: {
+          radius: "md",
+        },
+        styles: (theme) => ({
+          item: {
+            // Same as .bordered-light at rest
+            "--item-border-color":
+              "color-mix(in srgb, var(--mantine-color-accent-border-1) 50%, transparent)",
+            "--item-filled-color": theme.colors.accent[0],
+          },
+        }),
+        // The hover and open backgrounds, see ./index.scss
+        classNames: { item: "accordion-item", control: "accordion-control" },
       }),
     },
   });
