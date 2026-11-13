@@ -15,6 +15,14 @@ export interface PageBreadcrumbsProps extends Omit<
   commonTextProps?: TextProps;
 }
 
+/**
+ * The line height of a crumb's text. `Breadcrumbs` gives each crumb a
+ * line height of 1, and a truncated crumb clips what overflows it:
+ * that cut the descenders (a g, a p) off the label. `normal` is the
+ * font's own height, which fits its glyphs.
+ */
+const CRUMB_LINE_HEIGHT = "normal";
+
 export function PageBreadcrumbs({
   items,
   commonTextProps,
@@ -29,6 +37,7 @@ export function PageBreadcrumbs({
             className="hover-underline"
             c="dimmed"
             fz="md"
+            lh={CRUMB_LINE_HEIGHT}
             maw={200}
             truncate
             renderRoot={(props) => <Link to={to} {...props} />}
@@ -41,6 +50,7 @@ export function PageBreadcrumbs({
           <Text
             key={i}
             fz="md"
+            lh={CRUMB_LINE_HEIGHT}
             maw={200}
             truncate
             {...commonTextProps}
