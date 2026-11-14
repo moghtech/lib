@@ -104,10 +104,17 @@ async fn variant_handler(
 ```
 
 An unknown variant or params of the wrong shape answer
-`422 Unprocessable Entity`, as axum's `Json` does for the tagged body. The
-error names the field and what was expected (`title: invalid type, expected
-a string`), never the params' values, which can be secrets, and shows at most
-64 characters of the variant.
+`422 Unprocessable Entity`, as `Json` does for the tagged body. The error names
+the field and what was expected (`title: invalid type, expected a string`),
+never the params' values, which can be secrets, and shows at most 64 characters
+of the variant.
+
+`Json` answers a body which doesn't deserialize the same way, for any route:
+`Failed to deserialize the JSON body into the target type`, with the field path
+and the value-free message as its trace (`params.title: invalid type, expected
+a string`), where axum's own text names the value and its position. Its other
+rejections (not JSON, not declared as JSON, too large) name no value and keep
+axum's text.
 
 `variant_request_raw(&variant, &params)` takes the params as JSON text (a
 `&serde_json::value::RawValue`, eg. borrowed from a websocket frame which

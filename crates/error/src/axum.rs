@@ -10,7 +10,10 @@ use std::{
 use anyhow::{Context as _, anyhow};
 use axum::{
   body::Body,
-  extract::{FromRequest, OriginalUri, rejection::JsonRejection},
+  extract::{
+    FromRequest, OriginalUri,
+    rejection::{JsonDataError, JsonRejection},
+  },
   http::{Method, Request, Uri},
   response::IntoResponse,
 };
@@ -588,15 +591,60 @@ impl<T: Serialize> IntoResponse for Json<T> {
 
 pub struct JsonError(Error);
 
-/// Convert the JsonRejection into JsonError(serror::Error)
+/// The top message of a body which is JSON but doesn't deserialize
+/// into the target type (axum's own text for it).
+const JSON_DATA_ERROR: &str =
+  "Failed to deserialize the JSON body into the target type";
+
+/// Convert the JsonRejection into JsonError(serror::Error).
+///
+/// A body which doesn't deserialize is answered as [variant_request]
+/// answers the same mistake in the params of a `/{variant}` route:
+/// the field and what was expected, never the value, which can be a
+/// secret (`params.password: invalid type, expected a string`, where
+/// axum's text is ``params.password: invalid type: integer
+/// `12345678`, expected a string at line 1 column 52``). The other
+/// rejections (not JSON, not declared as JSON, too large) name no
+/// value: axum's text.
 impl From<JsonRejection> for JsonError {
   fn from(rejection: JsonRejection) -> Self {
+    let error = match &rejection {
+      JsonRejection::JsonDataError(e) => json_data_error(e),
+      _ => anyhow::Error::msg(rejection.body_text()),
+    };
     Self(Error {
       status: rejection.status(),
       headers: Default::default(),
-      error: anyhow::Error::msg(rejection.body_text()),
+      error,
     })
   }
+}
+
+/// The error of a [JsonDataError]: its field path and its serde
+/// message, without values or position (see [data_error_message]).
+fn json_data_error(rejection: &JsonDataError) -> anyhow::Error {
+  // axum keeps the serde_path_to_error error it read the body with
+  // as the rejection's source.
+  let mut source = std::error::Error::source(rejection);
+  while let Some(e) = source {
+    if let Some(e) = e
+      .downcast_ref::<serde_path_to_error::Error<serde_json::Error>>()
+    {
+      let path = e.path().to_string();
+      let message = data_error_message(e.inner());
+      // `.` is the body itself.
+      let message = if path == "." {
+        message
+      } else {
+        format!("{path}: {message}")
+      };
+      return anyhow!(message).context(JSON_DATA_ERROR);
+    }
+    source = e.source();
+  }
+  // Not where axum keeps it (a changed axum): the message alone,
+  // rather than axum's text with the value in it.
+  anyhow!(JSON_DATA_ERROR)
 }
 
 impl IntoResponse for JsonError {
@@ -713,6 +761,21 @@ pub fn variant_request_raw<R: DeserializeOwned>(
     .map_err(|e| variant_request_error(variant, e))
 }
 
+/// The message of a serde_json error, without the value it may name
+/// (see [without_values]) and without its position in the text: the
+/// field path names the place, and the position would count in the
+/// text of the params alone for [variant_request_raw].
+fn data_error_message(e: &serde_json::Error) -> String {
+  let mut message = e.to_string();
+  let at = format!(" at line {} column {}", e.line(), e.column());
+  if e.line() != 0
+    && let Some(len) = message.strip_suffix(&at).map(str::len)
+  {
+    message.truncate(len);
+  }
+  without_values(&message)
+}
+
 /// The most characters of a request's variant an error shows: it
 /// comes from the caller, as long as they like.
 const MAX_SHOWN_VARIANT_CHARS: usize = 64;
@@ -724,17 +787,7 @@ fn variant_request_error(
   e: serde_path_to_error::Error<serde_json::Error>,
 ) -> Error {
   let path = e.path().to_string();
-  let e = e.into_inner();
-  let mut message = e.to_string();
-  // Read from JSON text, the error has its position in the text of
-  // the tag or of the params alone: the field names the place.
-  let at = format!(" at line {} column {}", e.line(), e.column());
-  if e.line() != 0
-    && let Some(len) = message.strip_suffix(&at).map(str::len)
-  {
-    message.truncate(len);
-  }
-  let message = without_values(&message);
+  let message = data_error_message(e.inner());
   let variant = variant
     .chars()
     .take(MAX_SHOWN_VARIANT_CHARS)
@@ -1365,6 +1418,166 @@ mod tests {
       assert!(!shown.contains("hunter2"), "{shown}");
       assert!(!shown.contains("2023"), "{shown}");
       assert!(!shown.contains(" column "), "{shown}");
+    }
+  }
+
+  /// What the [Json] extractor answers for `body`: the status and
+  /// the whole error chain.
+  fn json_rejection<T: DeserializeOwned>(
+    body: &str,
+    content_type: Option<&str>,
+  ) -> (StatusCode, String) {
+    let mut request =
+      Request::builder().method(Method::POST).uri("/");
+    if let Some(content_type) = content_type {
+      request = request.header(header::CONTENT_TYPE, content_type);
+    }
+    let request = request.body(Body::from(body.to_string())).unwrap();
+    match block_on(Json::<T>::from_request(request, &())) {
+      Err(JsonError(e)) => (e.status, format!("{:#}", e.error)),
+      std::result::Result::Ok(_) => panic!("accepted {body}"),
+    }
+  }
+
+  /// The tagged body and the `/{variant}` form of one request answer
+  /// the same mistake with the same text: the field and what was
+  /// expected, never the value (which can be a secret) or its
+  /// position.
+  #[test]
+  fn json_data_errors_answer_like_variant_request() {
+    // (params, the field in them, the message)
+    for (params, field, message) in [
+      (
+        serde_json::json!({ "limit": "hunter2", "ids": [] }),
+        Some("limit"),
+        "invalid type, expected u64",
+      ),
+      (
+        serde_json::json!({ "limit": "hunter2, expected x", "ids": [] }),
+        Some("limit"),
+        "invalid type, expected u64",
+      ),
+      (
+        serde_json::json!({ "limit": -2023, "ids": [] }),
+        Some("limit"),
+        "invalid value, expected u64",
+      ),
+      (
+        serde_json::json!({ "limit": 1, "kind": "hunter2", "ids": [] }),
+        Some("kind"),
+        "unknown variant, expected `Soft` or `Hard`",
+      ),
+      (
+        serde_json::json!({ "limit": 1, "ids": [1, "hunter2"] }),
+        Some("ids[1]"),
+        "invalid type, expected u64",
+      ),
+      (
+        serde_json::json!({ "ids": [] }),
+        None,
+        "missing field `limit`",
+      ),
+      (
+        serde_json::json!("hunter2"),
+        None,
+        "invalid type, expected struct SetLimit",
+      ),
+    ] {
+      let variant = variant_error("SetLimit", params.clone());
+      let in_params = match field {
+        Some(field) => format!("{field}: {message}"),
+        None => message.to_string(),
+      };
+      assert_eq!(
+        variant,
+        (
+          StatusCode::UNPROCESSABLE_ENTITY,
+          format!("Invalid SetLimit params: {in_params}")
+        ),
+        "{params}"
+      );
+      // The type first, as clients send it: given the params
+      // first, serde's derive buffers them and the field is lost.
+      let body =
+        format!(r#"{{"type":"SetLimit","params":{params}}}"#);
+      let tagged = json_rejection::<TestRequest>(
+        &body,
+        Some("application/json"),
+      );
+      let in_body = match field {
+        Some(field) => format!("params.{field}: {message}"),
+        None => format!("params: {message}"),
+      };
+      assert_eq!(
+        tagged,
+        (
+          StatusCode::UNPROCESSABLE_ENTITY,
+          format!("{JSON_DATA_ERROR}: {in_body}")
+        ),
+        "{body}"
+      );
+      for shown in [&variant.1, &tagged.1] {
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(!shown.contains("2023"), "{shown}");
+        assert!(!shown.contains(" column "), "{shown}");
+      }
+    }
+    // An unknown type: the tag is the field.
+    let (status, shown) = json_rejection::<TestRequest>(
+      r#"{"type":"hunter2","params":{}}"#,
+      Some("application/json"),
+    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+      shown,
+      format!(
+        "{JSON_DATA_ERROR}: type: unknown variant, expected `GetUser` or `SetLimit`"
+      )
+    );
+    // A body of the wrong shape altogether has no field.
+    let (_, shown) = json_rejection::<GetUser>(
+      r#""hunter2""#,
+      Some("application/json"),
+    );
+    assert_eq!(
+      shown,
+      format!(
+        "{JSON_DATA_ERROR}: invalid type, expected struct GetUser"
+      )
+    );
+  }
+
+  /// The rejections which name no value (the body isn't JSON, or not
+  /// declared as JSON) answer axum's text unchanged.
+  #[test]
+  fn json_other_rejections_keep_axums_text() {
+    for (body, content_type) in [
+      (r#"{"type":"#, Some("application/json")),
+      (r#"{"id":"1"} trailing"#, Some("application/json")),
+      (r#"{"id":"1"}"#, None),
+      (r#"{"id":"1"}"#, Some("text/plain")),
+    ] {
+      let mut request =
+        Request::builder().method(Method::POST).uri("/");
+      if let Some(content_type) = content_type {
+        request = request.header(header::CONTENT_TYPE, content_type);
+      }
+      let request =
+        request.body(Body::from(body.to_string())).unwrap();
+      let Err(rejection) =
+        block_on(axum::Json::<GetUser>::from_request(request, &()))
+      else {
+        panic!("accepted {body}");
+      };
+      assert!(
+        !matches!(rejection, JsonRejection::JsonDataError(_)),
+        "{body}"
+      );
+      assert_eq!(
+        json_rejection::<GetUser>(body, content_type),
+        (rejection.status(), rejection.body_text()),
+        "{body}"
+      );
     }
   }
 
