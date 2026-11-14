@@ -107,27 +107,49 @@ pub(crate) fn deserialize_final_with_env<T: DeserializeOwned>(
   value: &serde_json::Value,
   env: Option<&crate::env::EnvValues>,
 ) -> crate::Result<T> {
-  serde_path_to_error::deserialize(Lenient(value.clone())).map_err(
-    |e| {
-      let path = e.path();
-      let message = redact_serde_error(e.inner());
-      if let Some(variable) =
-        env.and_then(|env| env.variable_at(path))
-      {
-        return Error::ParseEnv {
-          variable: variable.to_string(),
-          path: path.to_string(),
-          message,
-        };
-      }
-      let found = value_at(value, path).map(value_type);
-      Error::ParseFinalJson {
-        path: path.to_string(),
-        found,
-        message,
-      }
-    },
+  serde_path_to_error::deserialize(Lenient(value.clone()))
+    .map_err(|e| final_error(&e, value, env))
+}
+
+/// [deserialize_final_with_env], with the paths of the values the
+/// config type skipped (keys no field takes, see
+/// [crate::UnknownKey]), also when it fails: those found before the
+/// failure.
+pub(crate) fn deserialize_final_tracked<T: DeserializeOwned>(
+  value: &serde_json::Value,
+  env: Option<&crate::env::EnvValues>,
+) -> (crate::Result<T>, Vec<crate::unknown::Path>) {
+  let ignored = std::cell::RefCell::new(Vec::new());
+  let config = serde_path_to_error::deserialize(
+    crate::unknown::Tracked::new(Lenient(value.clone()), &ignored),
   )
+  .map_err(|e| final_error(&e, value, env));
+  (config, ignored.into_inner())
+}
+
+/// The error of a final deserialization: naming the variable of
+/// `env` which set the value it is about ([Error::ParseEnv]), else
+/// the path and the type found there ([Error::ParseFinalJson]).
+fn final_error(
+  e: &serde_path_to_error::Error<serde_json::Error>,
+  value: &serde_json::Value,
+  env: Option<&crate::env::EnvValues>,
+) -> Error {
+  let path = e.path();
+  let message = redact_serde_error(e.inner());
+  if let Some(variable) = env.and_then(|env| env.variable_at(path)) {
+    return Error::ParseEnv {
+      variable: variable.to_string(),
+      path: path.to_string(),
+      message,
+    };
+  }
+  let found = value_at(value, path).map(value_type);
+  Error::ParseFinalJson {
+    path: path.to_string(),
+    found,
+    message,
+  }
 }
 
 /// The value at a serde error path, if the path resolves.

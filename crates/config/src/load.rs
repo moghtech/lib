@@ -16,6 +16,7 @@ use crate::{
   includes::read_includes,
   interpolate::{interpolate_value, unsupported_interpolations},
   merge::merge_source,
+  unknown::CheckedSource,
 };
 
 /// Whether a config path is a cicada source: it starts with
@@ -331,14 +332,20 @@ pub(crate) fn load_config_files(
 ///
 /// Returns the merged sources, for the final deserialization
 /// ([crate::deserialize_final]), after the environment's values
-/// when there is an [crate::EnvSource].
+/// when there is an [crate::EnvSource], and the keys of each local
+/// toml / yaml / json source, to name the file of a key the config
+/// type doesn't take ([crate::UnknownKey]). Env files and cicada
+/// sources are left out of those: keys of other programs are normal
+/// there (an env file shared with a compose project, the secrets of
+/// an environment).
 pub(crate) fn load_parse_config_files(
   files: &[FoundFile],
   merge_nested: bool,
   extend_array: bool,
   flat: &FlatPrefixes,
-) -> Result<serde_json::Map<String, serde_json::Value>> {
+) -> Result<LoadedSources> {
   let mut target = serde_json::Map::new();
+  let mut checked = Vec::new();
 
   for FoundFile { path: file, named } in files {
     // The source, whether to interpolate it, and whether it is an
@@ -412,6 +419,9 @@ pub(crate) fn load_parse_config_files(
       }
     };
     flat.fold(file, &mut source)?;
+    if !env_file {
+      checked.push(CheckedSource::new(file.clone(), &source));
+    }
 
     merge_source(
       &mut target,
@@ -422,7 +432,18 @@ pub(crate) fn load_parse_config_files(
     );
   }
 
-  Ok(target)
+  Ok(LoadedSources {
+    merged: target,
+    checked,
+  })
+}
+
+/// See [load_parse_config_files].
+pub(crate) struct LoadedSources {
+  /// The sources merged.
+  pub(crate) merged: serde_json::Map<String, serde_json::Value>,
+  /// The keys of the local toml / yaml / json sources.
+  pub(crate) checked: Vec<CheckedSource>,
 }
 
 /// A `cicada:` source which didn't load ([Error::CicadaLoad]): the

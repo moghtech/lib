@@ -1,5 +1,5 @@
-//! A loader configured by the `CONFIG_*` variables
-//! (`ConfigLoader::from_env`, `ConfigLoader::from_vars`).
+//! A loader configured by the variables of `LoaderEnv` without a
+//! prefix (`ConfigLoader::from_env`, `ConfigLoader::from_vars`).
 
 // Integration test binaries only use a subset
 // of the library dependencies.
@@ -68,13 +68,18 @@ fn scratch_dir(name: &str) -> PathBuf {
 #[test]
 fn nothing_set_is_the_default() {
   assert_eq!(from_vars(&[]).unwrap(), Fields::default());
-  // Other variables are ignored, `CONFIG_` ones of no field too.
+  // Other variables are ignored, `CONFIG_` ones of no field too,
+  // and the names before 5.0.
   let fields = from_vars(&[
     ("CONFIG_UNKNOWN", "x"),
-    ("CONFIG_PATH", "/etc/app"),
     ("PATHS", "/etc/app"),
     ("APP_CONFIG_PATHS", "/etc/app"),
     ("CONFIG_UNKNOWN_FILE", "/not/read"),
+    ("CONFIG_MATCH_WILDCARDS", "*.toml"),
+    ("CONFIG_INCLUDE_FILE_NAME", ".appinclude"),
+    ("CONFIG_MERGE_NESTED", "true"),
+    ("CONFIG_EXTEND_ARRAY", "true"),
+    ("CONFIG_DEBUG_PRINT", "true"),
   ])
   .unwrap();
   assert_eq!(fields, Fields::default());
@@ -84,11 +89,10 @@ fn nothing_set_is_the_default() {
 fn every_field_has_its_variable() {
   let fields = from_vars(&[
     ("CONFIG_PATHS", " /etc/app, ./app.local.toml ,"),
-    ("CONFIG_MATCH_WILDCARDS", "*config.*,*.env"),
-    ("CONFIG_INCLUDE_FILE_NAME", ".appinclude"),
-    ("CONFIG_MERGE_NESTED", "true"),
-    ("CONFIG_EXTEND_ARRAY", " TRUE "),
-    ("CONFIG_DEBUG_PRINT", "True"),
+    ("CONFIG_KEYWORDS", "*config.*,*.env"),
+    ("MERGE_NESTED_CONFIG", "true"),
+    ("EXTEND_CONFIG_ARRAYS", " TRUE "),
+    ("CONFIG_DEBUG", "True"),
   ])
   .unwrap();
   assert_eq!(
@@ -99,19 +103,22 @@ fn every_field_has_its_variable() {
         PathBuf::from("./app.local.toml")
       ],
       match_wildcards: vec!["*config.*".into(), "*.env".into()],
-      include_file_name: ".appinclude".into(),
+      // The default's, no variable sets it.
+      include_file_name: ".include".into(),
       merge_nested: true,
       extend_array: true,
       debug_print: true,
     }
   );
-  // Names in any case, `false` too.
+  // Names in any case, `false` too, and the singular names.
   let fields = from_vars(&[
-    ("config_paths", "/etc/app"),
-    ("Config_Merge_Nested", "FALSE"),
+    ("config_path", "/etc/app"),
+    ("Config_Keyword", "*.toml"),
+    ("Merge_Nested_Config", "FALSE"),
   ])
   .unwrap();
   assert_eq!(fields.paths, [PathBuf::from("/etc/app")]);
+  assert_eq!(fields.match_wildcards, ["*.toml"]);
   assert!(!fields.merge_nested);
 }
 
@@ -121,10 +128,9 @@ fn every_field_has_its_variable() {
 fn a_blank_variable_is_unset() {
   let fields = from_vars(&[
     ("CONFIG_PATHS", ""),
-    ("CONFIG_MATCH_WILDCARDS", " , "),
-    ("CONFIG_INCLUDE_FILE_NAME", "  "),
-    ("CONFIG_MERGE_NESTED", ""),
-    ("CONFIG_DEBUG_PRINT", "\t"),
+    ("CONFIG_KEYWORDS", " , "),
+    ("MERGE_NESTED_CONFIG", ""),
+    ("CONFIG_DEBUG", "\t"),
   ])
   .unwrap();
   assert_eq!(fields, Fields::default());
@@ -163,9 +169,13 @@ fn a_file_holds_the_value() {
 #[test]
 fn a_value_the_field_cant_take_names_the_variable() {
   for (name, value, field) in [
-    ("CONFIG_MERGE_NESTED", "hunter2", "merge_nested"),
-    ("CONFIG_EXTEND_ARRAY", "yes-hunter2", "extend_array"),
-    ("config_debug_print", "1hunter2", "debug_print"),
+    ("MERGE_NESTED_CONFIG", "hunter2", "merge_nested_config"),
+    (
+      "EXTEND_CONFIG_ARRAYS",
+      "yes-hunter2",
+      "extend_config_arrays",
+    ),
+    ("config_debug", "1hunter2", "config_debug"),
   ] {
     let err = from_vars(&[(name, value)]).unwrap_err();
     let Error::ParseEnv {
@@ -194,7 +204,7 @@ fn a_value_the_field_cant_take_names_the_variable() {
 }
 
 /// The loader loads what the variables name: the paths, with the
-/// wildcards, the include file and the merge flags.
+/// wildcards and the merge flags.
 #[test]
 fn the_loader_loads_what_the_variables_name() {
   let dir = scratch_dir("load");
@@ -208,13 +218,12 @@ fn the_loader_loads_what_the_variables_name() {
   std::fs::create_dir_all(&extra).unwrap();
   std::fs::write(extra.join("more.config.json"), r#"{ "c": 3 }"#)
     .unwrap();
-  write(".appinclude", &extra.display().to_string());
+  write(".include", &extra.display().to_string());
 
   let config = ConfigLoader::from_vars([
     ("CONFIG_PATHS", dir.display().to_string()),
-    ("CONFIG_MATCH_WILDCARDS", String::from("*config.*")),
-    ("CONFIG_INCLUDE_FILE_NAME", String::from(".appinclude")),
-    ("CONFIG_MERGE_NESTED", String::from("true")),
+    ("CONFIG_KEYWORDS", String::from("*config.*")),
+    ("MERGE_NESTED_CONFIG", String::from("true")),
   ])
   .unwrap()
   .load::<serde_json::Value>()
@@ -224,7 +233,7 @@ fn the_loader_loads_what_the_variables_name() {
     serde_json::json!({ "a": 1, "c": 3, "nested": { "x": 1, "y": 2 } })
   );
 
-  // The defaults: `*config*`, `.include` (none here), no merging.
+  // The defaults: `*config*`, `.include`, no merging.
   let config = ConfigLoader::from_vars([(
     "CONFIG_PATHS",
     dir.display().to_string(),
@@ -234,13 +243,13 @@ fn the_loader_loads_what_the_variables_name() {
   .unwrap();
   assert_eq!(
     config,
-    serde_json::json!({ "a": 1, "nested": { "y": 2 } })
+    serde_json::json!({ "a": 1, "c": 3, "nested": { "y": 2 } })
   );
 
   // A wildcard which doesn't compile is the loader's error, as ever.
   let err = ConfigLoader::from_vars([
     ("CONFIG_PATHS", dir.display().to_string()),
-    ("CONFIG_MATCH_WILDCARDS", String::from("*config\\.toml")),
+    ("CONFIG_KEYWORDS", String::from("*config\\.toml")),
   ])
   .unwrap()
   .load::<serde_json::Value>()

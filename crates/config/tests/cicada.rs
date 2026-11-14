@@ -90,13 +90,21 @@ fn a_cicada_source_which_fails_to_load_is_an_error() {
         std::env::remove_var(name);
       }
     }
-    // Nothing listens on port 1: Core is unreachable.
-    std::env::set_var("CICADA_CORE_ADDRESS", "http://127.0.0.1:1");
-    std::env::set_var("CICADA_CORE_CONNECT_TIMEOUT_SECS", "1");
-    std::env::set_var("CICADA_CORE_REQUEST_TIMEOUT_SECS", "1");
+    // Nothing listens on port 1: Core is unreachable. The names
+    // the loader reads (cicada_loader 0.26 on): with the older
+    // `CICADA_CORE_...` ones, the load failed on "CICADA_ADDRESS is
+    // not set" before asking Core anything.
+    std::env::set_var("CICADA_ADDRESS", "http://127.0.0.1:1");
+    std::env::set_var("CICADA_CONNECT_TIMEOUT_SECS", "1");
+    std::env::set_var("CICADA_REQUEST_TIMEOUT_SECS", "1");
+    // An existing key (inline: exactly 32 raw bytes), which the
+    // device asks Core about. A key file generated at this start
+    // would be one Core can't know: the device would go straight to
+    // onboarding, and fail on the missing onboarding key without a
+    // request either.
     std::env::set_var(
-      "CICADA_PRIVATE_KEY_FILE",
-      dir.join("device.key"),
+      "CICADA_PRIVATE_KEY",
+      "mogh-config-cicada-test-key-0001",
     );
   }
 
@@ -136,15 +144,27 @@ fn a_cicada_source_which_fails_to_load_is_an_error() {
     panic!("expected a cicada load error, got {err}");
   };
   assert_eq!(path, Path::new("cicada://app/secrets.env?env=prod"));
-  assert!(!message.is_empty());
+  assert_core_unreachable(message);
   assert!(
     err.to_string().contains("cicada://app/secrets.env"),
     "{err}"
   );
 
   let err = included.unwrap_err();
-  let Error::CicadaLoad { path, .. } = &err else {
+  let Error::CicadaLoad { path, message } = &err else {
     panic!("expected a cicada load error, got {err}");
   };
   assert_eq!(path, Path::new("cicada://app/included.env?env=prod"));
+  assert_core_unreachable(message);
+}
+
+/// The load failed asking Core, not on the loader's configuration.
+#[track_caller]
+fn assert_core_unreachable(message: &str) {
+  assert!(
+    message.contains("Failed to reach Cicada Core"),
+    "{message}"
+  );
+  assert!(message.contains("127.0.0.1:1"), "{message}");
+  assert!(!message.contains("is not set"), "{message}");
 }

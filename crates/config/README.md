@@ -34,6 +34,23 @@ directory scan finds which is no config file type (a `config.toml.bak` matching
 `*config.*`) is skipped with a warning; listed, or named in an include file, it
 is an error (`Error::UnsupportedFileType`).
 
+Unknown keys: a key of a toml, yaml or json file which no field of the config
+type takes (a typo such as `disable_user_registraton`, a renamed or removed
+field) is ignored, with a warning naming the file and the key's path, never the
+value: `WARN: "/config/core.config.toml" | 'disable_user_registraton' is no
+config field, it is ignored (...)`. The warnings go to stdout like the loader's
+others, as the loader runs before an app's logger. Env files, `cicada:` sources
+and the process environment are not checked: keys of other programs are normal
+there (a compose project's `.env`, the secrets of an environment). A table the
+files may spell flat (`EnvSource::flat_prefix`) is checked in its table: an
+unknown `oidc_enabeld` is reported as `oidc.enabeld`. A key only an earlier file
+holds, which a later file replaced (without `merge_nested`), is no longer in the
+config and not reported. `load_reporting` / `load_with_env_reporting` print
+nothing and return the keys with the config (`Loaded { config, unknown_keys }`,
+each a `mogh_config::UnknownKey` with its `file` and `path`): an app logs them
+through its own logger once it is up (`warn!("{key}")`, the `Display` is the
+warning's text), and a test asserts that a config file the app ships has none.
+
 ```rust,no_run
 use std::path::Path;
 
@@ -135,17 +152,72 @@ The rules:
 | Flat tables | `flat_prefix("oidc", "oidc_")` lets a config file spell the fields of the table `oidc` as top-level keys `oidc_enabled`, `oidc_client_id`, ... (an env file's `OIDC_ENABLED=true` too). Each source is rewritten as it is parsed, before the sources merge, so files may spell a field differently. The longest prefix wins, a top-level key which is a field of the config (the first segment of a variable's path, or a rule's path) is never a flat spelling, and one file spelling a field both ways is `Error::FlatKeyTwice`, naming the file and both keys. The variables are named after the field's path either way. |
 | The table | Checked when it is read: a name twice, a path inside another's, an alias of no variable is `Error::InvalidEnvSource`, the app's mistake. `names()` lists the table's variables (eg. for docs, or a test that a renamed field kept its variable). |
 
-The loader's own settings can come from the environment too, with
-`ConfigLoader::from_env()`: one variable per field, named after it with the
-prefix `CONFIG_`. `CONFIG_PATHS` and `CONFIG_MATCH_WILDCARDS` are comma
-separated lists, `CONFIG_INCLUDE_FILE_NAME` a name, `CONFIG_MERGE_NESTED`,
-`CONFIG_EXTEND_ARRAY` and `CONFIG_DEBUG_PRINT` `true` or `false` in any case,
-each read by the rules above (names in any case, blank is unset, `_FILE`, a
-value the field can't take is `Error::ParseEnv` naming the variable). A field
-whose variable is unset keeps `ConfigLoader::default()`'s value. The loader
-borrows its lists, so what is read is kept for the rest of the process: read
-the environment once, at startup. `ConfigLoader::from_vars` reads given
-variables instead (tests).
+## The loader's own settings
+
+The settings of the loading itself (which files) come from the environment too,
+read before the config files. `LoaderEnv::new(prefix)` is the one table every
+app reads them with, named with the app's prefix:
+
+| Variable | Setting | Default |
+| --- | --- | --- |
+| `<P>CONFIG_PATHS`, or `<P>CONFIG_PATH` | `config_paths`: the files or directories, a comma separated list | none, `default_paths([..])` |
+| `<P>CONFIG_KEYWORDS`, or `<P>CONFIG_KEYWORD` | `config_keywords`: the wildcards of the files in the directories, a comma separated list | `*config.*`, `default_keywords([..])` |
+| `<P>MERGE_NESTED_CONFIG` | `merge_nested_config` | `true`, `default_merge_nested(..)` |
+| `<P>EXTEND_CONFIG_ARRAYS` | `extend_config_arrays` | `true`, `default_extend_arrays(..)` |
+| `<P>CONFIG_DEBUG` | `config_debug`: the loading prints what it loads | `false` |
+
+Each is read by the rules of the table above (names in any case, blank is
+unset, `_FILE`, a value the setting can't take is `Error::ParseEnv` naming the
+variable). The singular names are read while the plural ones are unset.
+`allow_empty_paths()` makes a blank `<P>CONFIG_PATHS` load no config file rather
+than the default paths (an image's `/config`). `debug(LoaderDebug::..)` picks
+what sets `config_debug`: `<P>CONFIG_DEBUG` (the default), the app's own log
+level `<P>LOGGING_LEVEL` at `debug` or `trace` (one of mogh_logger's levels,
+else an error), or no variable (the app decides, eg. from a command line
+argument). `names()` and `alias_names()` list the variables, eg. for a test
+that the documented variables are read.
+
+```rust
+use std::path::PathBuf;
+
+use mogh_config::{ConfigLoader, LoaderEnv};
+
+let settings = LoaderEnv::new("APP_")
+  .default_paths(["/config"])
+  .allow_empty_paths()
+  // `.read()` reads the process environment.
+  .read_vars([("APP_CONFIG_KEYWORDS", "*config.*, *.env")])
+  .expect("Failed to read the config loading variables");
+let paths = settings
+  .config_paths
+  .iter()
+  .map(PathBuf::as_path)
+  .collect::<Vec<_>>();
+let keywords = settings
+  .config_keywords
+  .iter()
+  .map(String::as_str)
+  .collect::<Vec<_>>();
+let loader = ConfigLoader {
+  paths: &paths,
+  match_wildcards: &keywords,
+  include_file_name: ".appinclude",
+  merge_nested: settings.merge_nested_config,
+  extend_array: settings.extend_config_arrays,
+  debug_print: settings.config_debug,
+};
+# let _ = loader;
+```
+
+`ConfigLoader::from_env()` is a loader of the same variables without a prefix
+(`CONFIG_PATHS`, `CONFIG_KEYWORDS`, `MERGE_NESTED_CONFIG`,
+`EXTEND_CONFIG_ARRAYS`, `CONFIG_DEBUG`), with `ConfigLoader::default()`'s values
+as the defaults and its include file name. The loader borrows its lists, so what
+is read is kept for the rest of the process: read the environment once, at
+startup. `ConfigLoader::from_vars` reads given variables instead (tests). Before
+5.0 it read `CONFIG_MATCH_WILDCARDS`, `CONFIG_INCLUDE_FILE_NAME`,
+`CONFIG_MERGE_NESTED`, `CONFIG_EXTEND_ARRAY` and `CONFIG_DEBUG_PRINT`, which are
+no longer read.
 
 ```rust,no_run
 use mogh_config::ConfigLoader;
@@ -155,9 +227,9 @@ struct Config {
   title: String,
 }
 
-// CONFIG_PATHS=/etc/app CONFIG_MATCH_WILDCARDS=*config.* CONFIG_MERGE_NESTED=true
+// CONFIG_PATHS=/etc/app CONFIG_KEYWORDS=*config.* MERGE_NESTED_CONFIG=true
 let config = ConfigLoader::from_env()
-  .expect("Failed to read the CONFIG_* variables")
+  .expect("Failed to read the loader variables")
   .load::<Config>()
   .expect("Failed to load the config");
 ```
@@ -166,7 +238,7 @@ let config = ConfigLoader::from_env()
 
 An env file is a flat configuration source: `NAME=value` lines, `#`
 comments, optional `export`, values unquoted, single quoted (literal) or
-double quoted with `\n` / `\r` / `\t` / `\"` / `\\` escapes. Names are lowercased
+double quoted with `\n` / `\r` / `\t` / `\"` / `\\` / `\uXXXX` escapes. Names are lowercased
 to match struct fields (`DB_PASSWORD=x` fills `db_password`) and dots
 nest (`DATABASE.ADDRESS=x` fills `database.address`), values are strings
 coerced into the field's type, so the same struct reads a toml file, an
@@ -208,7 +280,9 @@ above the entry (a blank line detaches them). `mogh_config::serialize_env_file`
 writes entries back, each description as comment lines above its entry, a value
 holding `$` single quoted when it can be (Compose, systemd and dotenv libraries
 take it literally then), any other value double quoted when it wouldn't survive
-unquoted. A serialized file parses back to the same entries, each description
+unquoted, a character another dotenv parser ends a line at (VT, FF, FS, GS, RS,
+NEL, U+2028, U+2029) written as its `\uXXXX` escape. A serialized file parses
+back to the same entries, each description
 as `mogh_config::normalize_env_description` has it: every line break a `\n`
 (`\r\n`, and a lone `\r` or another character some dotenv parser ends a line
 at, so no text of a description is an entry to them), no line ending in

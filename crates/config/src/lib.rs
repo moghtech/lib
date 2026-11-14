@@ -21,13 +21,18 @@
 //! environment with too, so a secret environment reads the same
 //! here and there.
 //!
+//! A key of a toml / yaml / json file which no field of the config
+//! type takes is ignored with a warning naming the file and the key,
+//! never the value ([UnknownKey], see [ConfigLoader::load]).
+//!
 //! The process environment is a source too, over the files:
 //! [ConfigLoader::load_with_env] with an [EnvSource], whose table
 //! names the variable of each field (`APP_DATABASE_ADDRESS` for
 //! `database.address`), each also taking a file (`APP_X_FILE`).
-//! The loader's own settings can come from it too:
-//! [ConfigLoader::from_env] reads one `CONFIG_*` variable per field
-//! (`CONFIG_PATHS`, `CONFIG_MATCH_WILDCARDS`, ...).
+//! The loader's own settings can come from it too: [LoaderEnv]
+//! reads them with an app's prefix (`APP_CONFIG_PATHS`,
+//! `APP_CONFIG_KEYWORDS`, ...), and [ConfigLoader::from_env] is a
+//! loader of them without a prefix (`CONFIG_PATHS`, ...).
 //!
 //! With the `cicada` feature, a `cicada:` path among the paths (or
 //! on a line of an include file) is a source loaded from Cicada by
@@ -41,7 +46,7 @@
 //! network I/O, to run outside an async runtime (see
 //! [ConfigLoader::load]).
 //!
-//! The loader is re-exported as [`cicada_loader`] with the feature,
+//! The loader is re-exported as `cicada_loader` with the feature,
 //! so an application reaches its own API (its background, the
 //! `on_change` / `subscribe` change hooks, `load_path_as`,
 //! `load_env_as`) as `mogh_config::cicada_loader::...`, at the one
@@ -66,7 +71,9 @@ mod flat;
 mod includes;
 mod interpolate;
 mod load;
+mod loader_env;
 mod merge;
+mod unknown;
 
 /// The Cicada loader behind `cicada:` paths, for an application
 /// that wants its own API: the background ([cicada_loader::spawn]),
@@ -79,7 +86,9 @@ pub use cicada_loader;
 pub use env::{EnvSource, FILE_SUFFIX};
 pub use error::{Error, deserialize_final};
 pub use interpolate::interpolate_env_and_shell;
+pub use loader_env::{LoaderDebug, LoaderEnv, LoaderSettings};
 pub use merge::{merge_config, merge_objects};
+pub use unknown::UnknownKey;
 // The env file grammar is `mogh_env_parser`'s since 4.1 (shared
 // with `cicada_loader`); re-exported so 4.0 callers keep compiling.
 pub use mogh_env_parser::{
@@ -94,6 +103,14 @@ pub type Result<T> = ::core::result::Result<T, Error>;
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
+
+/// Prints the loader's warning for each of `unknown_keys`, see
+/// [ConfigLoader::load].
+fn warn_unknown_keys(unknown_keys: &[UnknownKey]) {
+  for key in unknown_keys {
+    println!("{}: {key}", "WARN".yellow());
+  }
+}
 
 /// The key deduping a file reached by several paths (as given,
 /// through a directory scan, an include, a symlink): its canonical
@@ -191,84 +208,38 @@ impl Default for ConfigLoader<'_, '_> {
   }
 }
 
-/// The settings of a [ConfigLoader] as the `CONFIG_*` variables give
-/// them, see [ConfigLoader::from_env]. The defaults are
-/// [ConfigLoader::default]'s.
-#[derive(serde::Deserialize)]
-#[serde(default)]
-struct LoaderEnv {
-  paths: Vec<PathBuf>,
-  match_wildcards: Vec<String>,
-  include_file_name: String,
-  merge_nested: bool,
-  extend_array: bool,
-  debug_print: bool,
-}
-
-impl Default for LoaderEnv {
-  fn default() -> Self {
-    let ConfigLoader {
-      paths,
-      match_wildcards,
-      include_file_name,
-      merge_nested,
-      extend_array,
-      debug_print,
-    } = ConfigLoader::default();
-    LoaderEnv {
-      paths: paths.iter().map(|path| path.to_path_buf()).collect(),
-      match_wildcards: match_wildcards
-        .iter()
-        .map(|wildcard| wildcard.to_string())
-        .collect(),
-      include_file_name: include_file_name.to_string(),
-      merge_nested,
-      extend_array,
-      debug_print,
-    }
-  }
-}
-
-/// The table of [ConfigLoader::from_env]: a variable per field of
-/// [LoaderEnv], named after it.
-fn loader_env_source() -> EnvSource {
-  EnvSource::new("CONFIG_").fields([
-    "paths",
-    "match_wildcards",
-    "include_file_name",
-    "merge_nested",
-    "extend_array",
-    "debug_print",
-  ])
-}
-
 /// A loader configured by the environment, see [Self::from_env].
 impl ConfigLoader<'static, 'static> {
-  /// A loader configured by the process environment: a variable per
-  /// field, named after the field with the prefix `CONFIG_`, read by
-  /// the rules of [EnvSource].
+  /// A loader configured by the process environment: the variables
+  /// of [LoaderEnv] without a prefix, over [Self::default]'s values.
   ///
-  /// - `CONFIG_PATHS`: [paths][Self::paths], a comma separated list
-  ///   (`/etc/app,./app.local.toml`; entries trimmed and empty ones
-  ///   dropped, so a path holding a comma can't be listed).
-  /// - `CONFIG_MATCH_WILDCARDS`:
+  /// - `CONFIG_PATHS` (or `CONFIG_PATH`): [paths][Self::paths], a
+  ///   comma separated list (`/etc/app,./app.local.toml`; entries
+  ///   trimmed and empty ones dropped, so a path holding a comma
+  ///   can't be listed).
+  /// - `CONFIG_KEYWORDS` (or `CONFIG_KEYWORD`):
   ///   [match_wildcards][Self::match_wildcards], a comma separated
   ///   list (`*config.*,*.env`).
-  /// - `CONFIG_INCLUDE_FILE_NAME`:
-  ///   [include_file_name][Self::include_file_name].
-  /// - `CONFIG_MERGE_NESTED`, `CONFIG_EXTEND_ARRAY`,
-  ///   `CONFIG_DEBUG_PRINT`: [merge_nested][Self::merge_nested],
+  /// - `MERGE_NESTED_CONFIG`, `EXTEND_CONFIG_ARRAYS`, `CONFIG_DEBUG`:
+  ///   [merge_nested][Self::merge_nested],
   ///   [extend_array][Self::extend_array] and
   ///   [debug_print][Self::debug_print], `true` or `false` in any
   ///   case.
   ///
+  /// The [include_file_name][Self::include_file_name] is
+  /// [Self::default]'s, `.include`. Since 5.0 the variables are
+  /// [LoaderEnv]'s, the names every app reads with its own prefix
+  /// (`CONFIG_MATCH_WILDCARDS`, `CONFIG_INCLUDE_FILE_NAME`,
+  /// `CONFIG_MERGE_NESTED`, `CONFIG_EXTEND_ARRAY` and
+  /// `CONFIG_DEBUG_PRINT` are no longer read).
+  ///
   /// A variable unset, or set blank (nothing but whitespace and
   /// commas), leaves its field at [Self::default]'s value. Names
   /// match in any case (`config_paths`), `CONFIG_X_FILE` names a
-  /// file holding the value of `CONFIG_X`, and every other
-  /// `CONFIG_*` variable is ignored. A value a field can't take
-  /// (`CONFIG_MERGE_NESTED=yes`) is [Error::ParseEnv], naming the
-  /// variable and the field, never the value; a value which isn't
+  /// file holding the value of `CONFIG_X`, and every other variable
+  /// is ignored. A value a field can't take
+  /// (`MERGE_NESTED_CONFIG=yes`) is [Error::ParseEnv], naming the
+  /// variable and the setting, never the value; a value which isn't
   /// UTF-8 is [Error::EnvNotUnicode], a variable set twice in two
   /// cases [Error::EnvVarSetTwice], and a `_FILE` which can't be
   /// read [Error::EnvFile].
@@ -278,17 +249,20 @@ impl ConfigLoader<'static, 'static> {
   /// freed): read the environment once, at startup, then
   /// [load][Self::load] or [load_with_env][Self::load_with_env].
   /// [Self::from_vars] reads given variables instead, eg. in tests.
+  /// An app with variables of its own prefix (`APP_CONFIG_PATHS`)
+  /// reads them with [LoaderEnv] and builds its loader from the
+  /// [LoaderSettings].
   ///
   /// ```no_run
   /// # #[derive(serde::Deserialize)]
   /// # struct Config { title: String }
-  /// // CONFIG_PATHS=/etc/app CONFIG_MATCH_WILDCARDS=*config.* app
+  /// // CONFIG_PATHS=/etc/app CONFIG_KEYWORDS=*config.* app
   /// let config = mogh_config::ConfigLoader::from_env()?
   ///   .load::<Config>()?;
   /// # Ok::<(), mogh_config::Error>(())
   /// ```
   pub fn from_env() -> Result<Self> {
-    Self::read_env(&loader_env_source())
+    Ok(Self::leaked(default_loader_env().read()?))
   }
 
   /// [Self::from_env] reading these variables (names and values,
@@ -301,56 +275,82 @@ impl ConfigLoader<'static, 'static> {
     K: Into<OsString>,
     V: Into<OsString>,
   {
-    Self::read_env(&loader_env_source().with_vars(vars))
+    Ok(Self::leaked(default_loader_env().read_vars(vars)?))
   }
 
-  /// The loader the `CONFIG_*` table `env` reads, its lists kept
-  /// for the rest of the process.
-  fn read_env(env: &EnvSource) -> Result<Self> {
-    // No source but the environment: its values over the defaults.
-    let LoaderEnv {
-      paths,
-      match_wildcards,
-      include_file_name,
-      merge_nested,
-      extend_array,
-      debug_print,
-    } = ConfigLoader {
-      paths: &[],
-      match_wildcards: &[],
-      include_file_name: "",
-      merge_nested: false,
-      extend_array: false,
-      debug_print: false,
-    }
-    .load_with_env(env)?;
+  /// A loader of `settings`, its lists kept for the rest of the
+  /// process.
+  fn leaked(settings: LoaderSettings) -> Self {
+    let LoaderSettings {
+      config_paths,
+      config_keywords,
+      merge_nested_config,
+      extend_config_arrays,
+      config_debug,
+    } = settings;
     // Leaked: the loader borrows them, and nothing else could own
     // them. Once per startup, a few strings.
-    let paths: &'static [PathBuf] = Vec::leak(paths);
+    let paths: &'static [PathBuf] = Vec::leak(config_paths);
     let paths = paths
       .iter()
       .map(PathBuf::as_path)
       .collect::<Vec<&'static Path>>();
     let match_wildcards: &'static [String] =
-      Vec::leak(match_wildcards);
+      Vec::leak(config_keywords);
     let match_wildcards = match_wildcards
       .iter()
       .map(String::as_str)
       .collect::<Vec<&'static str>>();
-    Ok(ConfigLoader {
+    ConfigLoader {
       paths: Vec::leak(paths),
       match_wildcards: Vec::leak(match_wildcards),
-      include_file_name: String::leak(include_file_name),
-      merge_nested,
-      extend_array,
-      debug_print,
-    })
+      merge_nested: merge_nested_config,
+      extend_array: extend_config_arrays,
+      debug_print: config_debug,
+      ..ConfigLoader::default()
+    }
   }
+}
+
+/// The table of [ConfigLoader::from_env]: [LoaderEnv] without a
+/// prefix, with [ConfigLoader::default]'s values as its defaults.
+fn default_loader_env() -> LoaderEnv {
+  let ConfigLoader {
+    paths,
+    match_wildcards,
+    merge_nested,
+    extend_array,
+    ..
+  } = ConfigLoader::default();
+  LoaderEnv::new("")
+    .default_paths(paths.iter().copied())
+    .default_keywords(match_wildcards.iter().copied())
+    .default_merge_nested(merge_nested)
+    .default_extend_arrays(extend_array)
+}
+
+/// A config loaded with the keys of its files which no field of the
+/// config type takes, see [ConfigLoader::load_reporting].
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Loaded<T> {
+  pub config: T,
+  /// Each key once, by file in the order the files load.
+  pub unknown_keys: Vec<UnknownKey>,
 }
 
 impl ConfigLoader<'_, '_> {
   /// Loads the sources in [ConfigLoader::paths] and merges them
   /// into `T`, see [deserialize_final].
+  ///
+  /// A key of a toml / yaml / json source which no field of `T`
+  /// takes ([UnknownKey]: a typo such as `disable_user_registraton`,
+  /// a field renamed or removed) is ignored with a warning on
+  /// stdout, naming the file and the key, never the value: the
+  /// loader runs before an app's logger, like its other warnings.
+  /// Not for env files and `cicada:` sources, which may well hold
+  /// keys of other programs, nor the process environment.
+  /// [Self::load_reporting] returns them instead.
   ///
   /// A path which doesn't exist is skipped (deliberate: an app may
   /// list optional paths, eg. a mount which isn't always there).
@@ -386,8 +386,9 @@ impl ConfigLoader<'_, '_> {
   /// the worker thread in release builds. Local files are blocking
   /// file I/O too, which is short.
   pub fn load<T: DeserializeOwned>(self) -> Result<T> {
-    let config = self.load_sources(&flat::FlatPrefixes::default())?;
-    error::deserialize_final(&serde_json::Value::Object(config))
+    let (config, unknown_keys) = self.load_tracked(None)?;
+    warn_unknown_keys(&unknown_keys);
+    config
   }
 
   /// [Self::load], with the process environment as the last source:
@@ -401,28 +402,95 @@ impl ConfigLoader<'_, '_> {
   ///
   /// The files may spell the fields of a table flat where `env`
   /// says so ([EnvSource::flat_prefix]): each source is rewritten
-  /// as it is parsed, before the sources merge.
+  /// as it is parsed, before the sources merge, and a flat key is
+  /// unknown ([UnknownKey]) when its field in the table is.
   pub fn load_with_env<T: DeserializeOwned>(
     self,
     env: &EnvSource,
   ) -> Result<T> {
-    // The environment first: its mistakes (a file which can't be
-    // read) stop the load before any file does.
-    let flat = env.flat_prefixes()?;
-    let env = env.read(self.debug_print)?;
-    let mut config = self.load_sources(&flat)?;
-    env.apply(&mut config);
-    error::deserialize_final_with_env(
-      &serde_json::Value::Object(config),
-      Some(&env),
-    )
+    let (config, unknown_keys) = self.load_tracked(Some(env))?;
+    warn_unknown_keys(&unknown_keys);
+    config
+  }
+
+  /// [Self::load], printing no warning for the keys no field of `T`
+  /// takes: they are returned with the config ([Loaded]), for an app
+  /// to log them its own way once its logger is up, or for a test
+  /// that a config file the app ships holds none. A config which
+  /// doesn't load is the error [Self::load] returns.
+  ///
+  /// ```no_run
+  /// # #[derive(serde::Deserialize)]
+  /// # struct Config { title: String }
+  /// # let paths = [std::path::Path::new("/config")];
+  /// let loaded = mogh_config::ConfigLoader {
+  ///   paths: &paths,
+  ///   ..Default::default()
+  /// }
+  /// .load_reporting::<Config>()?;
+  /// // Once the logger is up:
+  /// for key in &loaded.unknown_keys {
+  ///   // eg. tracing::warn!("{key}")
+  ///   eprintln!("{key}");
+  /// }
+  /// # Ok::<(), mogh_config::Error>(())
+  /// ```
+  pub fn load_reporting<T: DeserializeOwned>(
+    self,
+  ) -> Result<Loaded<T>> {
+    let (config, unknown_keys) = self.load_tracked(None)?;
+    Ok(Loaded {
+      config: config?,
+      unknown_keys,
+    })
+  }
+
+  /// [Self::load_with_env], returning the keys no field of `T` takes
+  /// rather than printing them, as [Self::load_reporting] does.
+  pub fn load_with_env_reporting<T: DeserializeOwned>(
+    self,
+    env: &EnvSource,
+  ) -> Result<Loaded<T>> {
+    let (config, unknown_keys) = self.load_tracked(Some(env))?;
+    Ok(Loaded {
+      config: config?,
+      unknown_keys,
+    })
+  }
+
+  /// The sources merged (with `env` over them) into `T`, and the
+  /// keys of the sources `T` doesn't take, also when `T` fails to
+  /// deserialize (those found before the failure).
+  fn load_tracked<T: DeserializeOwned>(
+    self,
+    env: Option<&EnvSource>,
+  ) -> Result<(Result<T>, Vec<UnknownKey>)> {
+    let (sources, env) = match env {
+      Some(env) => {
+        // The environment first: its mistakes (a file which can't
+        // be read) stop the load before any file does.
+        let flat = env.flat_prefixes()?;
+        let env = env.read(self.debug_print)?;
+        let mut sources = self.load_sources(&flat)?;
+        env.apply(&mut sources.merged);
+        (sources, Some(env))
+      }
+      None => {
+        (self.load_sources(&flat::FlatPrefixes::default())?, None)
+      }
+    };
+    let (config, ignored) = error::deserialize_final_tracked(
+      &serde_json::Value::Object(sources.merged),
+      env.as_ref(),
+    );
+    Ok((config, unknown::unknown_keys(&sources.checked, &ignored)))
   }
 
   /// The sources in [ConfigLoader::paths] merged, see [Self::load].
   fn load_sources(
     self,
     flat: &flat::FlatPrefixes,
-  ) -> Result<serde_json::Map<String, serde_json::Value>> {
+  ) -> Result<load::LoadedSources> {
     let ConfigLoader {
       paths,
       match_wildcards,
