@@ -218,7 +218,10 @@ export interface SetSupporterBranding {
  * Response: [SetSupporterKeyResponse].
  */
 export interface SetSupporterKey {
-	/** The key as pasted. Whitespace in it is ignored. */
+	/**
+	 * The key as pasted. Whitespace in it is ignored. It holds the
+	 * instance private key: the `Debug` leaves it out.
+	 */
 	key: string;
 }
 

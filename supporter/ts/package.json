@@ -1,6 +1,6 @@
 {
   "name": "mogh_supporter",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Offline Mogh supporter key verification in the browser.",
   "repository": {
     "url": "https://github.com/moghtech/lib"
@@ -35,7 +35,7 @@
   "dependencies": {
     "@noble/ed25519": "3.2.0",
     "@noble/hashes": "2.4.0",
-    "mogh_auth_client": "^9.2.0"
+    "mogh_auth_client": "^10.0.0"
   },
   "devDependencies": {
     "typescript": "^7.0.2"
