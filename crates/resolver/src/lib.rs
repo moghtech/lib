@@ -1,3 +1,9 @@
+// The README's examples are compiled as this crate's doctests, so
+// they keep compiling. Their dependencies are dev-dependencies only
+// the doctests use.
+#![doc = include_str!("../README.md")]
+#![cfg_attr(test, allow(unused_crate_dependencies))]
+
 use std::future::Future;
 
 extern crate mogh_resolver_derive;

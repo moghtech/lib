@@ -172,3 +172,27 @@ fn enum_without_args_uses_unit_args() {
   .unwrap();
   assert_eq!(response, Response::Number(7));
 }
+
+/// What is in scope where a request is declared doesn't change its
+/// type name (sent as the `"type"` of a tagged request): the
+/// derive's expansion names every item by its full path.
+mod shadowed {
+  #[allow(unused_macros)]
+  macro_rules! stringify {
+    ($($tokens:tt)*) => {
+      "shadowed"
+    };
+  }
+
+  #[derive(mogh_resolver::Resolve)]
+  #[response(())]
+  pub struct ShadowedStringify {}
+}
+
+#[test]
+fn req_type_ignores_a_stringify_in_scope() {
+  assert_eq!(
+    shadowed::ShadowedStringify::req_type(),
+    "ShadowedStringify"
+  );
+}

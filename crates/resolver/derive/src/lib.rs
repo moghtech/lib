@@ -59,7 +59,10 @@ fn impl_derive_resolve(
       type Error = #error_type;
 
       fn req_type() -> &'static str {
-        stringify!(#ident)
+        // A path, as every item of the expansion: a `stringify`
+        // macro in scope where the request is declared would
+        // otherwise change the type name clients send.
+        ::core::stringify!(#ident)
       }
     }
     #(impl #empty_traits for #ident {})*

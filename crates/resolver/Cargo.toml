@@ -1,10 +1,17 @@
 [package]
 name = "mogh_resolver"
 description = "Traits to link Request / Response types, forming 'resolver' relationships"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
 mogh_resolver_derive.workspace = true
+
+[dev-dependencies]
+# The README's examples, compiled as doctests.
+serde.workspace = true
+axum.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
