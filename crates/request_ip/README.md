@@ -102,6 +102,12 @@ async fn restricted_request(
 }
 ```
 
+`cidr::whitelist_widened(stored, new)` tells whether a new whitelist lets in an
+address the stored one does not, as `check_cidr_whitelist` applies them (eg. to
+ask for a recent login before a credential's whitelist is widened): emptying
+one widens it, and so does an entry no stored entry contains, read as at request
+time (`::ffff:0:0/96` is `0.0.0.0/0`, which `::/0` does not contain).
+
 ## Since 3.0
 
 - Built on `mogh_error` 2.0: `get_client_ip`,

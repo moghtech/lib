@@ -71,7 +71,8 @@
 //! sending the headers itself triggers it too.
 //!
 //! The [cidr] module provides CIDR set parsing and matching,
-//! also used to restrict requests by source ip.
+//! also used to restrict requests by source ip, and tells whether a
+//! new whitelist widens a stored one ([cidr::whitelist_widened]).
 
 use std::{
   net::{IpAddr, SocketAddr},
@@ -1026,6 +1027,20 @@ mod tests {
     // address.
     let trusted = proxies(&["172.18.0.5"]);
     let nginx = ip("172.18.0.7");
+    // The warning's callsite is shared with the other tests of this
+    // binary, which run on other threads with no subscriber: the
+    // one which reaches it first decides (and caches) whether anyone
+    // listens, so a test with a scoped subscriber could find it off.
+    // Reach it once here, then have its interest asked again with
+    // this thread's subscriber set, and start from an empty log.
+    let _ = client_ip(
+      &headers(&[("x-forwarded-for", "203.0.113.7")]),
+      Some(nginx),
+      &trusted,
+      &Once::new(),
+    );
+    tracing::callsite::rebuild_interest_cache();
+    captured.0.lock().unwrap().clear();
     let logged = Once::new();
     // Nothing to log: no headers, a trusted peer, no peer.
     let forwarded = headers(&[("x-forwarded-for", "203.0.113.7")]);

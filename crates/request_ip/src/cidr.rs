@@ -141,6 +141,50 @@ where
   }
 }
 
+/// Whether the source ip whitelist `new` lets in an address `stored`
+/// does not, as [check_cidr_whitelist] applies them: eg. to ask for a
+/// recent login before a credential's whitelist is widened.
+///
+/// - An empty whitelist lets in every address: emptying a non-empty
+///   one widens it, and a whitelist replacing an empty one never
+///   does.
+/// - Otherwise an entry of `new` (a CIDR range or a bare ip) which no
+///   entry of `stored` contains widens it. Both sides are read with
+///   [parse_cidr], so an IPv4-mapped entry is the IPv4 network it
+///   matches at request time: `::ffff:0:0/96` is `0.0.0.0/0`, which
+///   `::/0` does not contain (an IPv4 client never matches an IPv6
+///   network).
+/// - An entry of `new` which doesn't parse widens it (a write refuses
+///   it anyway). A `stored` whitelist with an entry which doesn't
+///   parse lets nothing in ([check_cidr_whitelist] fails closed on
+///   it), so every `new` one widens it.
+///
+/// Each new entry is judged against the stored entries one by one: a
+/// range only several stored entries cover together (`10.0.0.0/8`
+/// over `10.0.0.0/9` and `10.128.0.0/9`) counts as widening. It errs
+/// that way only, never calling a widening none.
+pub fn whitelist_widened<S, N>(stored: &[S], new: &[N]) -> bool
+where
+  S: AsRef<str>,
+  N: AsRef<str>,
+{
+  if new.is_empty() {
+    return !stored.is_empty();
+  }
+  if stored.is_empty() {
+    return false;
+  }
+  let Ok(stored) = CidrSet::parse(stored) else {
+    return true;
+  };
+  new.iter().any(|entry| match parse_cidr(entry.as_ref()) {
+    Ok(net) => {
+      !stored.networks().iter().any(|range| range.contains(&net))
+    }
+    Err(_) => true,
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -265,6 +309,121 @@ mod tests {
     let proxies = crate::TrustedProxies::Cidrs(collected);
     assert!(proxies.trusts(ip("10.0.0.1")));
     assert!(proxies.trusts(ip("::ffff:10.0.0.1")));
+  }
+
+  /// Addresses of both families, plain and IPv4-mapped, in and
+  /// around the ranges the widening tests use.
+  const SAMPLE_IPS: [&str; 16] = [
+    "10.0.0.1",
+    "10.1.2.3",
+    "10.200.0.1",
+    "11.0.0.1",
+    "172.16.0.1",
+    "192.168.1.1",
+    "192.168.1.2",
+    "1.2.3.4",
+    "::ffff:10.1.2.3",
+    "::ffff:1.2.3.4",
+    "::1",
+    "fd00::1",
+    "fe80::1",
+    "2001:db8::1",
+    "::",
+    "::ffff:0:1",
+  ];
+
+  /// [whitelist_widened], checked against [check_cidr_whitelist]: a
+  /// list called no widening lets in none of the sample addresses
+  /// the stored one doesn't (an expected widening must let one in).
+  fn widened(stored: &[&str], new: &[&str]) -> bool {
+    let widened = whitelist_widened(stored, new);
+    let allowed = |list: &[&str], ip: IpAddr| {
+      check_cidr_whitelist(ip, list).is_ok()
+    };
+    for sample in SAMPLE_IPS {
+      let ip = ip(sample);
+      if !widened {
+        assert!(
+          !allowed(new, ip) || allowed(stored, ip),
+          "{stored:?} -> {new:?} lets in {sample}, called no widening"
+        );
+      }
+    }
+    widened
+  }
+
+  /// The cases of the apps' own copies (Komodo's credential.rs,
+  /// Cicada's api/write/mod.rs), which this replaces.
+  #[test]
+  fn whitelists_widen_when_they_let_more_in() {
+    let stored = ["10.0.0.0/8", "192.168.1.1"];
+    // Emptied: every address. From every address, any list
+    // narrows.
+    assert!(widened(&stored, &[]));
+    assert!(widened(&["10.0.0.0/8"], &[]));
+    assert!(!widened(&[], &["10.0.0.0/8"]));
+    assert!(!widened(&[], &[]));
+    // Narrower, equal, reordered: nothing new gets in.
+    assert!(!widened(&stored, &["10.1.0.0/16"]));
+    assert!(!widened(&stored, &["10.1.2.3"]));
+    assert!(!widened(&stored, &["192.168.1.1", "10.0.0.0/8"]));
+    assert!(!widened(&stored, &["192.168.1.1/32"]));
+    assert!(!widened(&["10.0.0.0/8"], &["10.1.0.0/16", "10.2.3.4"]));
+    assert!(!widened(&["10.0.0.1"], &["10.0.0.1"]));
+    assert!(!widened(&["10.0.0.0/8", "fd00::/8"], &["fd00::1"]));
+    assert!(!widened(&[" 10.0.0.0/8 "], &["10.1.2.3 "]));
+    // A wider range, an address outside, a host of another family.
+    assert!(widened(&stored, &["10.0.0.0/7"]));
+    assert!(widened(&["10.1.0.0/16"], &["10.0.0.0/8"]));
+    assert!(widened(&stored, &["192.168.1.2"]));
+    assert!(widened(&stored, &["::1"]));
+    assert!(widened(&stored, &["10.0.0.0/8", "172.16.0.0/12"]));
+    assert!(widened(&["10.0.0.0/8"], &["10.0.0.0/8", "192.168.1.1"]));
+    // What doesn't parse counts as widening.
+    assert!(widened(&stored, &["nope"]));
+    assert!(widened(&["10.0.0.0/8"], &["not an ip"]));
+    assert!(widened(&stored, &[""]));
+    // Covered only by two stored ranges together: widening (the
+    // safe way to err).
+    assert!(widened(
+      &["10.0.0.0/9", "10.128.0.0/9"],
+      &["10.0.0.0/8"]
+    ));
+    // As the apps hold them: `Vec<String>`s.
+    let stored = vec![String::from("10.0.0.0/8")];
+    let new = vec![String::from("10.1.2.3")];
+    assert!(!whitelist_widened(&stored, &new));
+  }
+
+  /// IPv4-mapped entries are the IPv4 networks they match at request
+  /// time, on either side.
+  #[test]
+  fn ipv4_mapped_entries_widen_as_the_ipv4_networks_they_are() {
+    // `::/0` lets in IPv6 clients only: the mapped range is every
+    // IPv4 client.
+    assert!(widened(&["::/0"], &["::/0", "::ffff:0:0/96"]));
+    assert!(widened(&["::/0"], &["::ffff:1.2.3.4"]));
+    assert!(widened(&["::/64"], &["::ffff:10.0.0.0/104"]));
+    // Within the stored IPv4 network, mapped or not.
+    assert!(!widened(&["::ffff:10.0.0.0/104"], &["10.1.2.3"]));
+    assert!(!widened(&["10.0.0.0/8"], &["::ffff:10.1.0.0/112"]));
+    assert!(!widened(&["0.0.0.0/0"], &["::ffff:0:0/96"]));
+    assert!(!widened(&["::ffff:0:0/96"], &["1.2.3.4", "10.0.0.0/8"]));
+    // IPv6 networks stay IPv6 (and let in no IPv4 client).
+    assert!(!widened(&["::/0"], &["::/64", "fd00::/8"]));
+    assert!(widened(&["0.0.0.0/0"], &["::/0"]));
+  }
+
+  /// A stored whitelist with an entry which doesn't parse lets
+  /// nothing in (check_cidr_whitelist fails closed), so every new
+  /// whitelist widens it.
+  #[test]
+  fn an_unparsable_stored_whitelist_lets_nothing_in() {
+    let stored = ["10.0.0.0/8", "garbage"];
+    assert!(widened(&stored, &["10.1.0.0/16"]));
+    assert!(widened(&stored, &["10.0.0.0/8"]));
+    assert!(widened(&stored, &[]));
+    assert!(check_cidr_whitelist(ip("10.1.2.3"), stored).is_err());
   }
 
   #[test]
