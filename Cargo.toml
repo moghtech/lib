@@ -18,24 +18,24 @@ repository = "https://github.com/moghtech/lib"
 
 [workspace.dependencies]
 # MOGH API
-mogh_auth_client = "9.2.0"
-mogh_auth_server = "9.2.2"
+mogh_auth_client = "9.2.1"
+mogh_auth_server = "10.0.0"
 
 # MOGH
-mogh_cache = "2.0.0"
-mogh_config = "4.4.1"
-mogh_encryption = "3.0.0"
-mogh_env_parser = "1.0.1"
-mogh_error = "2.0.0"
+mogh_cache = "3.0.0"
+mogh_config = "5.0.0"
+mogh_encryption = "3.1.0"
+mogh_env_parser = "1.1.0"
+mogh_error = "2.0.1"
 mogh_logger = { version = "2.1.0", default-features = false }
-mogh_pki = "4.0.0"
+mogh_pki = "4.1.0"
 mogh_rate_limit = "3.0.0"
-mogh_request_ip = "3.0.0"
-mogh_resolver = "2.0.0"
-mogh_resolver_derive = "2.0.0"
+mogh_request_ip = "3.1.0"
+mogh_resolver = "2.0.1"
+mogh_resolver_derive = "2.0.1"
 mogh_secret_file = "2.0.0"
-mogh_server = "3.0.0"
-mogh_supporter = "3.0.0"
+mogh_server = "4.0.0"
+mogh_supporter = "4.0.0"
 mogh_validations = "2.0.0"
 
 # CICADA
@@ -48,7 +48,7 @@ arc-swap = "1.9.5"
 
 # SERVER
 tower-http = { version = "0.7.1", features = ["fs", "cors", "set-header"] }
-axum-server = { version = "0.9.0", features = ["tls-rustls"] }
+axum-server = { version = "0.9.2", features = ["tls-rustls"] }
 axum = { version = "0.8.9", features = ["macros"] }
 http-body-util = "0.1.5"
 http-body = "1.1.0"
@@ -89,7 +89,7 @@ webauthn-rs-proto = "0.6.2"
 openidconnect = { version = "4.1.0", default-features = false, features = ["accept-rfc3339-timestamps"] }
 # Only to mint test tokens, openidconnect uses it for token timestamps.
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12.0.0", features = ["aws_lc_rs"] }
 totp-rs = { version = "6.0.0", features = ["qr", "serde"] }
 bcrypt = "0.19.3"
 

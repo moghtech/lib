@@ -392,9 +392,9 @@ dependencies = [
 
 [[package]]
 name = "axum-server"
-version = "0.9.0"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2c55b0e6ae7c8951bc27682e97934423357c1a8208886305290a3adb1ce3c14"
+checksum = "3766086d344b8f8d2a9cf6fb211b581de5b160e052d7bc75a92e58cc41909054"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -2410,18 +2410,18 @@ dependencies = [
 
 [[package]]
 name = "jsonwebtoken"
-version = "11.1.0"
+version = "12.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e75fe14a82d81e5f5af639997db37d8b96045938a7ac6ab18cdbe1c7467e05e1"
+checksum = "f347a975eb5fa8f5c4eadce6c1152c11c326cf32cf839fb64ff12d5cb8f4ce8b"
 dependencies = [
  "aws-lc-rs",
- "base64 0.22.1",
- "getrandom 0.2.17",
+ "base64 0.23.1",
+ "getrandom 0.4.3",
  "js-sys",
  "pem",
  "serde",
  "serde_json",
- "signature 2.2.0",
+ "signature 3.0.0",
  "simple_asn1",
  "zeroize",
 ]
@@ -2589,7 +2589,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_client"
-version = "9.2.0"
+version = "9.2.1"
 dependencies = [
  "anyhow",
  "mogh_error",
@@ -2610,10 +2610,11 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_server"
-version = "9.2.2"
+version = "10.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "axum-server",
  "bcrypt",
  "chrono",
  "data-encoding",
@@ -2630,8 +2631,10 @@ dependencies = [
  "openidconnect",
  "rand 0.10.3",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "strum",
  "subtle",
  "tokio",
@@ -2648,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_cache"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -2656,7 +2659,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_config"
-version = "4.4.1"
+version = "5.0.0"
 dependencies = [
  "cicada_loader",
  "colored",
@@ -2674,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_encryption"
-version = "3.0.0"
+version = "3.1.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "anyhow",
@@ -2689,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_env_parser"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "regex",
@@ -2701,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_error"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2737,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_pki"
-version = "4.0.0"
+version = "4.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2774,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_request_ip"
-version = "3.0.0"
+version = "3.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2787,14 +2790,18 @@ dependencies = [
 
 [[package]]
 name = "mogh_resolver"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
+ "axum",
  "mogh_resolver_derive",
+ "reqwest",
+ "serde",
+ "tokio",
 ]
 
 [[package]]
 name = "mogh_resolver_derive"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2812,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_server"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2840,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_supporter"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3223,11 +3230,11 @@ dependencies = [
 
 [[package]]
 name = "pem"
-version = "3.0.6"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "serde_core",
 ]
 
