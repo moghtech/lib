@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createPublicKey, verify as nodeVerify } from "node:crypto";
+import http from "node:http";
 import { afterEach, describe, it } from "node:test";
 import { setLocalStorage } from "./helpers.mjs";
 
@@ -113,6 +114,32 @@ async function rejection(promise) {
     return e;
   }
   assert.fail("expected the request to fail");
+}
+
+/**
+ * A local http server answering with `handle(req, res)`, and the
+ * requests it received. A response `handle` holds open is cut when
+ * the test ends.
+ */
+async function serve(t, handle) {
+  const received = [];
+  const server = http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    received.push({
+      method: req.method,
+      url: req.url,
+      headers: req.headers,
+      body,
+    });
+    handle(req, res);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  return { url: `http://127.0.0.1:${server.address().port}`, received };
 }
 
 describe("the signature", () => {
@@ -386,6 +413,20 @@ describe("hosts and nonces", () => {
       "/read?x=1",
     );
     assert.equal(urlPathAndQuery("https://example.com/a b"), "/a%20b");
+    // An empty query is one: `fetch` sends `/read?`, which the server
+    // and the Rust client sign, though `URL.search` is "" for it.
+    for (const [url, pathAndQuery] of [
+      ["https://example.com/read?", "/read?"],
+      [new URL("https://example.com/read?"), "/read?"],
+      ["https://example.com?", "/?"],
+      ["https://example.com/read?#frag", "/read?"],
+      // A `?` in the fragment is no query.
+      ["https://example.com/read#a?b", "/read"],
+      ["https://example.com/read#?", "/read"],
+      ["https://example.com/read?x=1#a?b", "/read?x=1"],
+    ]) {
+      assert.equal(urlPathAndQuery(url), pathAndQuery, String(url));
+    }
   });
 
   it("validates hosts and nonces as the server does", () => {
@@ -477,6 +518,28 @@ describe("signed request headers", () => {
         headers[API_SIGNATURE_HEADER],
       ),
     );
+    // An empty query is signed as sent, by the url signer and the
+    // request signer alike.
+    for (const emptyQuery of [
+      await signedRequestHeadersForUrl(
+        keys,
+        "POST",
+        "https://example.com/read?",
+        "",
+      ),
+      await requestSigner(keys)({
+        method: "POST",
+        url: "https://example.com/read?",
+      }),
+    ]) {
+      assert.ok(
+        verifies(
+          VECTOR_PUBLIC,
+          await messageOf(emptyQuery, "POST", "/read?", ""),
+          emptyQuery[API_SIGNATURE_HEADER],
+        ),
+      );
+    }
     await assert.rejects(
       signedRequestHeadersForUrl(
         keys,
@@ -518,14 +581,122 @@ describe("signed request headers", () => {
         root[API_SIGNATURE_HEADER],
       ),
     );
-    await assert.rejects(
-      sign({ method: "POST", url: "https://example.com/other/read" }),
-      /not under the address/,
-    );
-    await assert.rejects(
-      sign({ method: "POST", url: "https://example.com/approved" }),
-      /not under the address/,
-    );
+    for (const url of [
+      "https://example.com/other/read",
+      "https://example.com/approved",
+      // Sent as `/read`, which isn't under the address.
+      "https://example.com/app/../read",
+      "https://example.com/app/%2e%2e/read",
+      // Another origin.
+      "http://example.com/app/read",
+      "https://example.com:8443/app/read",
+      "https://other.example.com/app/read",
+    ]) {
+      await assert.rejects(
+        sign({ method: "POST", url }),
+        /not under the address/,
+        url,
+      );
+    }
+  });
+
+  it("signs the path after an address as fetch sends it, not the url's text", async () => {
+    const keys = signingKeys(VECTOR_PRIVATE);
+    /** Whether `url` under `address` is signed over `pathAndQuery`. */
+    const signsOver = async (address, url, pathAndQuery) => {
+      const headers = await requestSigner(keys, { address })({
+        method: "POST",
+        url,
+      });
+      return verifies(
+        VECTOR_PUBLIC,
+        await messageOf(headers, "POST", pathAndQuery, ""),
+        headers[API_SIGNATURE_HEADER],
+      );
+    };
+    for (const [address, url, pathAndQuery] of [
+      // fetch removes dot segments, turns `\` into `/` and percent
+      // encodes what the path and query don't take as is.
+      ["https://example.com/app", "https://example.com/app/x/../read", "/read"],
+      [
+        "https://example.com/app",
+        "https://example.com/app/read^1",
+        "/read%5E1",
+      ],
+      [
+        "https://example.com/app",
+        "https://example.com/app/read/{id}",
+        "/read/%7Bid%7D",
+      ],
+      [
+        "https://example.com/app",
+        "https://example.com/app/read?q=a'b",
+        "/read?q=a%27b",
+      ],
+      ["https://example.com/app", "https://example.com/app\\read", "/read"],
+      ["https://example.com/app", "https://example.com/app/read?", "/read?"],
+      ["https://example.com/app", "https://example.com/app?x=1", "/?x=1"],
+      ["https://example.com/app", "https://example.com/app/read#f", "/read"],
+      // The address with a trailing slash, as the host, or as the
+      // origin with another spelling.
+      ["https://example.com/app/", "https://example.com/app/read", "/read"],
+      ["https://example.com", "https://example.com/read?x=1", "/read?x=1"],
+      ["https://example.com/", "https://example.com/read", "/read"],
+      ["https://Example.com:443/app", "https://example.com/app/read", "/read"],
+      ["https://example.com/a b", "https://example.com/a%20b/read", "/read"],
+    ]) {
+      assert.ok(await signsOver(address, url, pathAndQuery), url);
+    }
+    // An address which is no prefix of a path.
+    for (const [address, reason] of [
+      ["https://example.com/app?x=1", /query or a fragment/],
+      ["https://example.com/app?", /query or a fragment/],
+      ["https://example.com/app#f", /query or a fragment/],
+      ["https://u:p@example.com/app", /carries credentials/],
+      ["example.com/app", /Invalid url/],
+    ]) {
+      assert.throws(() => requestSigner(keys, { address }), reason, address);
+    }
+  });
+
+  it("signs what a server receives, with an address and without", async (t) => {
+    // A proxy in front of the server strips `/app`: the server sees the
+    // path after it.
+    const { url: origin, received } = await serve(t, (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    });
+    const keys = signingKeys(VECTOR_PRIVATE);
+    for (const [address, prefix] of [
+      [`${origin}/app`, "/app"],
+      [undefined, ""],
+    ]) {
+      const sign = requestSigner(keys, { address });
+      for (const path of [
+        "/x/../read",
+        "/read^1",
+        "/read/{id}",
+        "/read?q=a'b",
+        "/read?",
+        "/read?x=1#frag",
+      ]) {
+        await fetchSignedJson(
+          `${origin}${prefix}${path}`,
+          { method: "POST", body: VECTOR_BODY },
+          sign,
+        );
+        const { url, headers, body } = received.at(-1);
+        assert.ok(url.startsWith(prefix), url);
+        assert.ok(
+          verifies(
+            VECTOR_PUBLIC,
+            await messageOf(headers, "POST", url.slice(prefix.length), body),
+            headers[API_SIGNATURE_HEADER],
+          ),
+          `${address}: ${path} sent as ${url}`,
+        );
+      }
+    }
   });
 
   it("signs for a configured host, and for the url's by default", async () => {
@@ -637,8 +808,13 @@ describe("fetchSignedJson", () => {
       new Response(null, { status: 200 }),
       Response.json({ ok: true }),
     );
+    const signal = new AbortController().signal;
     assert.deepEqual(
-      await fetchSignedJson("https://example.com/read", init, sign),
+      await fetchSignedJson(
+        "https://example.com/read",
+        { ...init, signal },
+        sign,
+      ),
       { ok: true },
     );
     assert.equal(sent.length, 3);
@@ -646,6 +822,9 @@ describe("fetchSignedJson", () => {
     assert.equal(head.init.method, "HEAD");
     assert.equal(head.init.redirect, "error");
     assert.equal(head.init.credentials, "omit");
+    // The caller's signal stops the warm-up too.
+    assert.equal(head.init.signal, signal);
+    assert.equal(second.init.signal, signal);
     assert.equal(second.init.method, "POST");
     assert.equal(second.init.body, VECTOR_BODY);
     assert.notEqual(
@@ -660,6 +839,40 @@ describe("fetchSignedJson", () => {
       ),
     );
   });
+
+  it(
+    "gives up when the caller aborts during the warm-up",
+    { timeout: 10000 },
+    async (t) => {
+      // Eg. a proxy holding the `HEAD` open past the caller's timeout.
+      const controller = new AbortController();
+      const server = await serve(t, (req, res) => {
+        if (req.method === "HEAD") {
+          // Held open: only the signal ends it.
+          controller.abort(new Error("timed out"));
+          return;
+        }
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({ error: `${SIGNED_AT_ANOTHER_TIME}: 1`, trace: [] }),
+        );
+      });
+      const e = await rejection(
+        fetchSignedJson(
+          `${server.url}/read`,
+          { ...init, signal: controller.signal },
+          sign,
+        ),
+      );
+      assert.equal(e.status, 1);
+      assert.deepEqual(e.result.trace, ["Error: timed out"]);
+      // The request isn't sent again once aborted.
+      assert.deepEqual(
+        server.received.map(({ method }) => method),
+        ["POST", "HEAD"],
+      );
+    },
+  );
 
   it("takes a second refusal, and any other 401, as the answer", async () => {
     const refused = { error: `${SIGNED_AT_ANOTHER_TIME}: 1`, trace: [] };
@@ -721,6 +934,18 @@ describe("fetchSignedJson", () => {
     );
     assert.equal(e.status, 1);
     assert.match(e.result.trace[0], /looks like a file path/);
+    // A header `fetch` wouldn't send rejects like the rest, never with
+    // the bare TypeError.
+    e = await rejection(
+      fetchSignedJson(
+        "https://example.com/read",
+        { ...init, headers: { "x-a": "a\nb" } },
+        sign,
+      ),
+    );
+    assert.equal(e.status, 1);
+    assert.equal(e.result.error, "Request failed with error");
+    assert.ok(e.error instanceof TypeError);
     assert.equal(sent.length, 0);
   });
 

@@ -9,12 +9,18 @@ setLocalStorage({ value: undefined });
 // The helpers the apps' clients send their own requests with, from the
 // package's entry point.
 const {
+  MoghAuthClient,
   credentialHeaders,
   fetchJson,
+  fetchJsonWithCredential,
   fetchResponse,
+  fetchResponseWithCredential,
+  generateSigningKey,
   requestFailed,
+  requestSigner,
   responseError,
   responseJson,
+  signingKeys,
 } = await import("../dist/lib.js");
 
 const realFetch = globalThis.fetch;
@@ -66,7 +72,9 @@ describe("fetchJson", () => {
     assert.deepEqual(await fetchJson(NOTES_URL, init), [{ id: "1" }]);
     assert.equal(sent.length, 1);
     assert.equal(sent[0].input, NOTES_URL);
-    assert.deepEqual(sent[0].init, init);
+    // As given, apart from the redirect policy of a request with a
+    // credential (see "redirects").
+    assert.deepEqual(sent[0].init, { ...init, redirect: "error" });
   });
 
   it("rejects with the server's error, marked as its own", async () => {
@@ -257,6 +265,165 @@ describe("credentialHeaders", () => {
   });
 });
 
+describe("fetchJsonWithCredential", () => {
+  const init = {
+    method: "POST",
+    body: "{}",
+    headers: { "content-type": "application/json" },
+  };
+
+  it("sends a jwt or an api key as headers, with the session cookie", async () => {
+    mockFetch(() => Response.json({ ok: true }));
+    assert.deepEqual(await fetchJsonWithCredential(NOTES_URL, init, "jwt-1"), {
+      ok: true,
+    });
+    await fetchJsonWithCredential(NOTES_URL, init, { key: "k", secret: "s" });
+    // An app client's state, nothing set: only the cookie.
+    await fetchJsonWithCredential(NOTES_URL, init, {
+      jwt: undefined,
+      key: undefined,
+      secret: undefined,
+      sign: undefined,
+    });
+    await fetchJsonWithCredential(NOTES_URL, init, undefined);
+    assert.deepEqual(
+      sent.map(({ init }) => init.headers),
+      [
+        { authorization: "jwt-1", "content-type": "application/json" },
+        {
+          "x-api-key": "k",
+          "x-api-secret": "s",
+          "content-type": "application/json",
+        },
+        { "content-type": "application/json" },
+        { "content-type": "application/json" },
+      ],
+    );
+    for (const { input, init: sentInit } of sent) {
+      assert.equal(input, NOTES_URL);
+      assert.equal(sentInit.method, "POST");
+      assert.equal(sentInit.body, "{}");
+      assert.equal(sentInit.credentials, "include");
+    }
+    // A request with a credential follows no redirect, whichever it is
+    // (`fetchResponse`); one with none is left as it is.
+    assert.deepEqual(
+      sent.map(({ init }) => init.redirect),
+      ["error", "error", undefined, undefined],
+    );
+  });
+
+  it("keeps what init sets", async () => {
+    mockFetch(() => Response.json({}));
+    await fetchJsonWithCredential(
+      NOTES_URL,
+      {
+        ...init,
+        headers: new Headers({ Authorization: "mine", "X-Trace": "t" }),
+        credentials: "omit",
+        redirect: "error",
+      },
+      "jwt-1",
+    );
+    const [{ init: sentInit }] = sent;
+    assert.deepEqual(sentInit.headers, {
+      authorization: "mine",
+      "x-trace": "t",
+    });
+    assert.equal(sentInit.credentials, "omit");
+    assert.equal(sentInit.redirect, "error");
+  });
+
+  it("signs the request with a signing key", async () => {
+    mockFetch(() => Response.json({ ok: true }));
+    const { privateKey, publicKey } = await generateSigningKey();
+    const sign = requestSigner(signingKeys(privateKey));
+    // An app client's state with a signer.
+    const state = { jwt: undefined, key: undefined, secret: undefined, sign };
+    assert.deepEqual(await fetchJsonWithCredential(NOTES_URL, init, state), {
+      ok: true,
+    });
+    const [{ init: sentInit }] = sent;
+    assert.equal(sentInit.headers["x-api-public-key"], publicKey);
+    assert.ok(sentInit.headers["x-api-signature"]);
+    assert.equal(sentInit.headers["content-type"], "application/json");
+    assert.equal(sentInit.headers.authorization, undefined);
+    assert.equal(sentInit.credentials, "omit");
+    assert.equal(sentInit.redirect, "error");
+  });
+
+  it("rejects with a RequestError only", async () => {
+    mockFetch(() => Response.json({ error: "no", trace: [] }, { status: 403 }));
+    let e = await rejection(fetchJsonWithCredential(NOTES_URL, init, "jwt"));
+    assert.deepEqual(e, {
+      status: 403,
+      result: { error: "no", trace: [] },
+      server: true,
+    });
+    for (const credential of [
+      "jwt",
+      { sign: requestSigner(signingKeys("x".repeat(32))) },
+    ]) {
+      e = await rejection(
+        fetchJsonWithCredential(
+          NOTES_URL,
+          { ...init, headers: { "x-a": "a\nb" } },
+          credential,
+        ),
+      );
+      assert.equal(e.status, 1);
+      assert.ok(e.error instanceof TypeError);
+    }
+    assert.equal(sent.length, 1);
+  });
+
+  it("an invalid header never puts its value into the error", async () => {
+    // The runtime's TypeError repeats the value, which can be a
+    // credential pasted with a line break; the error's trace is shown
+    // by UIs and logged by scripts.
+    mockFetch(() => Response.json({}));
+    const sends = [
+      () =>
+        fetchJson(NOTES_URL, {
+          ...init,
+          headers: { authorization: "Bearer s3\ncr3t" },
+        }),
+      () =>
+        fetchJson(NOTES_URL, {
+          ...init,
+          redirect: "follow",
+          headers: { "x-api-secret": "s3\ncr3t" },
+        }),
+      () =>
+        fetchJsonWithCredential(
+          NOTES_URL,
+          { ...init, headers: { "x-a": "s3\ncr3t" } },
+          "jwt",
+        ),
+      () =>
+        fetchJsonWithCredential(
+          NOTES_URL,
+          { ...init, headers: { "x-a": "s3\ncr3t" } },
+          { sign: requestSigner(signingKeys("x".repeat(32))) },
+        ),
+    ];
+    for (const send of sends) {
+      const e = await rejection(send());
+      assert.equal(e.status, 1);
+      assert.ok(e.error instanceof TypeError);
+      assert.ok(!JSON.stringify(e.result).includes("s3"), JSON.stringify(e));
+      assert.ok(!e.error.message.includes("s3"), e.error.message);
+    }
+    assert.equal(sent.length, 0);
+  });
+
+  it("fetchResponseWithCredential resolves the 200 response itself", async () => {
+    mockFetch(() => new Response("line 1\nline 2"));
+    const response = await fetchResponseWithCredential(NOTES_URL, init, "jwt");
+    assert.equal(await response.text(), "line 1\nline 2");
+  });
+});
+
 /**
  * A local http server answering with `respond(req, body)` (status,
  * headers, body), and the requests it received.
@@ -295,17 +462,77 @@ describe("redirects", () => {
     for (const { init } of sent) assert.equal(init.redirect, "error");
   });
 
-  it("other requests, and a request choosing, are left as they are", async () => {
+  it("MoghAuthClient doesn't follow them, whatever the credential", async (t) => {
+    // The body carries the password, which a 307 sends again.
+    const elsewhere = await serve(t, () => [200, {}, "{}"]);
+    const server = await serve(t, () => [
+      307,
+      { location: `${elsewhere.url}/login` },
+      "",
+    ]);
+    for (const credential of [undefined, "jwt", { key: "k", secret: "s" }]) {
+      const e = await rejection(
+        MoghAuthClient(server.url, credential).login("LoginLocalUser", {
+          username: "u",
+          password: "hunter2",
+        }),
+      );
+      assert.equal(e.status, 1);
+      assert.ok(
+        e.result.trace.some((line) => /redirect/i.test(line)),
+        e.result.trace.join(" | "),
+      );
+    }
+    assert.equal(server.received.length, 3);
+    assert.equal(elsewhere.received.length, 0);
+  });
+
+  it("tokenExchange doesn't follow them", async (t) => {
+    // The body carries the provider's token.
+    const elsewhere = await serve(t, () => [200, {}, "{}"]);
+    const server = await serve(t, () => [
+      308,
+      { location: `${elsewhere.url}/token` },
+      "",
+    ]);
+    const e = await rejection(
+      MoghAuthClient(server.url).tokenExchange("id-token"),
+    );
+    assert.equal(e.status, 1);
+    assert.equal(e.result.error, "server_error");
+    assert.match(e.result.error_description, /redirect/i);
+    assert.equal(server.received.length, 1);
+    assert.equal(elsewhere.received.length, 0);
+  });
+
+  it("a request with a jwt doesn't follow them either", async () => {
     mockFetch(() => Response.json({}));
-    const jwt = { method: "POST", headers: { authorization: "jwt" } };
-    await fetchJson(NOTES_URL, jwt);
+    for (const headers of [
+      { authorization: "jwt" },
+      { Authorization: "jwt" },
+      new Headers({ authorization: "jwt" }),
+    ]) {
+      await fetchJson(NOTES_URL, { method: "POST", headers });
+      await fetchResponse(NOTES_URL, { method: "POST", headers });
+    }
+    assert.equal(sent.length, 6);
+    for (const { init } of sent) assert.equal(init.redirect, "error");
+  });
+
+  it("requests without a credential, and a request choosing, are left as they are", async () => {
+    mockFetch(() => Response.json({}));
+    const plain = { method: "POST", headers: { "content-type": "text/plain" } };
+    await fetchJson(NOTES_URL, plain);
     await fetchJson(NOTES_URL);
     const follow = { headers: apiKey, redirect: "follow" };
     await fetchJson(NOTES_URL, follow);
-    assert.equal(sent[0].init, jwt);
+    const jwtFollow = { headers: { authorization: "jwt" }, redirect: "follow" };
+    await fetchJson(NOTES_URL, jwtFollow);
+    assert.equal(sent[0].init, plain);
     assert.equal(sent[0].init.redirect, undefined);
     assert.equal(sent[1].init, undefined);
     assert.equal(sent[2].init.redirect, "follow");
+    assert.equal(sent[3].init.redirect, "follow");
   });
 
   it("the api key doesn't reach where a redirect points", async (t) => {

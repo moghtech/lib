@@ -234,7 +234,8 @@ export interface WorkloadRule {
  * so they don't need a long lived api key.
  * 
  * Unlike an [ExternalLoginProvider] nobody logs in here.
- * The issuer only has to publish the keys it signs tokens with,
+ * The issuer only has to publish the keys it signs tokens with (or,
+ * a Kubernetes cluster, review them: [TrustedIssuerKeys::TokenReview]),
  * and [WorkloadRule]s decide which tokens are accepted.
  */
 export interface TrustedIssuer {
@@ -876,7 +877,10 @@ export interface TokenExchangeError {
 export interface TokenExchangeRequest {
 	/** Must be [GRANT_TYPE_TOKEN_EXCHANGE]. */
 	grant_type: string;
-	/** The token issued by the external login provider. */
+	/**
+	 * The token to exchange: a user's token of an external login
+	 * provider, or a workload's token of a trusted issuer.
+	 */
 	subject_token: string;
 	/** [TOKEN_TYPE_ID_TOKEN] or [TOKEN_TYPE_JWT]. */
 	subject_token_type: string;
@@ -916,22 +920,27 @@ export interface TokenReviewConfig {
 	url?: string;
 	/**
 	 * The PEM bundle the api server's certificate is verified
-	 * against. Empty: the system roots.
+	 * against, and only it: the system roots are not trusted then
+	 * (like a kubeconfig's `certificate-authority-data`). Empty: the
+	 * system roots.
 	 */
 	ca?: string;
 	/**
 	 * The bearer credential of a reviewer service account bound to
 	 * the `system:auth-delegator` cluster role. Required with `url`.
-	 * Redacted on reads; an empty or redacted update keeps the
-	 * stored one.
+	 * A secret: apps store it encrypted at rest. Redacted on reads;
+	 * an empty or redacted update keeps the stored one (not for a
+	 * changed `url`).
 	 */
 	token?: string;
 	/**
-	 * Review through the app's own channel instead of `url`. For
-	 * Cicada this names the device (periphery) running in the
-	 * cluster, by id: its own service account reviews the tokens,
-	 * so the server needs no reach to the cluster and stores no
-	 * credential.
+	 * Review through a review device of the app instead of `url`: an
+	 * agent of the app running in the cluster, named by its id, whose
+	 * own service account reviews the tokens, so the server needs no
+	 * reach to the cluster and stores no credential. Only for apps
+	 * which review through devices
+	 * (`AuthImpl::reviews_through_devices`): the others refuse an
+	 * issuer naming one.
 	 */
 	device?: string;
 	/**

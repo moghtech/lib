@@ -49,6 +49,19 @@ it("the source maps resolve in the published package", () => {
   }
 });
 
+it("the lockfile names the package as package.json does", () => {
+  // A version bump without `npm install --package-lock-only` leaves the
+  // lock behind, and the next `npm install` rewrites it.
+  const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+  const lock = JSON.parse(
+    readFileSync(path.join(root, "package-lock.json"), "utf8"),
+  );
+  assert.equal(lock.name, pkg.name);
+  assert.equal(lock.version, pkg.version);
+  assert.equal(lock.packages[""].name, pkg.name);
+  assert.equal(lock.packages[""].version, pkg.version);
+});
+
 it("generate_types fails when typeshare fails", () => {
   const types = path.join(root, "src/types.ts");
   const before = readFileSync(types, "utf8");

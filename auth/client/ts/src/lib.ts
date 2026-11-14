@@ -1,12 +1,9 @@
 import { credentialToJSON } from "./passkey.js";
 import {
   bodySnippet,
-  credentialHeaders,
-  credentialSigner,
   describeError,
   errorBody,
-  fetchJson,
-  fetchSignedJson,
+  fetchJsonWithCredential,
   readBody,
   statusMessage,
   traceList,
@@ -34,7 +31,9 @@ export {
   credentialHeaders,
   credentialSigner,
   fetchJson,
+  fetchJsonWithCredential,
   fetchResponse,
+  fetchResponseWithCredential,
   fetchSignedJson,
   fetchSignedResponse,
   requestFailed,
@@ -191,38 +190,35 @@ function encodeParams(type: string, params: unknown) {
  * takes like an api key. An app client passes the credential it was
  * created with, its `{ jwt, key, secret }` as is. Without one the
  * requests only carry the session cookie.
+ *
+ * Its requests (`tokenExchange` too) follow no redirect, whatever the
+ * credential: their bodies carry passwords, 2fa codes and provider
+ * tokens, which a `307` / `308` sends on to wherever it points. A
+ * redirect rejects with `status: 1`.
  */
 export function MoghAuthClient(url: string, credential?: ClientCredential) {
-  const signer = credentialSigner(credential);
-  const headers = {
-    "content-type": "application/json",
-    ...credentialHeaders(credential),
-  };
-
+  /**
+   * Follows no redirect, whatever the credential: the body may carry a
+   * password (`LoginLocalUser`, `UpdatePassword`) or a 2fa code, which
+   * a `307` / `308` would send on to wherever it points, and the auth
+   * api never redirects these requests. A redirect rejects with
+   * `status: 1`.
+   */
   const request = async <Params, Res>(
     path: "/login" | "/manage",
     type: string,
     params: Params
   ): Promise<Res> => {
-    const input = `${url}${path}/${type}`;
-    const body = JSON.stringify(encodeParams(type, params));
-    if (signer) {
-      return await fetchSignedJson<Res>(
-        input,
-        {
-          method: "POST",
-          body,
-          headers: { "content-type": "application/json" },
-        },
-        signer
-      );
-    }
-    return await fetchJson<Res>(input, {
-      method: "POST",
-      body,
-      headers,
-      credentials: "include",
-    });
+    return await fetchJsonWithCredential<Res>(
+      `${url}${path}/${type}`,
+      {
+        method: "POST",
+        body: JSON.stringify(encodeParams(type, params)),
+        headers: { "content-type": "application/json" },
+        redirect: "error",
+      },
+      credential
+    );
   };
 
   const login = async <
@@ -303,6 +299,8 @@ export function MoghAuthClient(url: string, credential?: ClientCredential) {
    * fields of an OAuth error body are kept, except that an
    * `error_description` which isn't a string is dropped and a `trace`
    * is reduced to its string lines, as `RequestError.result` declares.
+   * A redirect isn't followed (it would send the subject token on to
+   * wherever it points): it rejects with `status: 1`, `server_error`.
    *
    * @param subjectToken The token issued by the provider.
    * @param subjectTokenType `TOKEN_EXCHANGE.ID_TOKEN` (default) or `TOKEN_EXCHANGE.JWT`.
@@ -323,6 +321,7 @@ export function MoghAuthClient(url: string, credential?: ClientCredential) {
           subject_token: subjectToken,
           subject_token_type: subjectTokenType,
         }),
+        redirect: "error",
       });
     } catch (error) {
       throw {

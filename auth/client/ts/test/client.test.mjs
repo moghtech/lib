@@ -200,8 +200,10 @@ describe("credentials", () => {
         ),
         { authorization: "jwt-1" },
       );
-      // `fetch` drops it on a redirect to another origin.
-      for (const { init } of sent) assert.equal(init.redirect, undefined);
+      // `fetch` would drop it on a redirect to another origin, but the
+      // body (a password, a 2fa code) would go along: no redirect is
+      // followed.
+      for (const { init } of sent) assert.equal(init.redirect, "error");
     }
   });
 

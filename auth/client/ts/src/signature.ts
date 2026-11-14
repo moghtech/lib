@@ -243,8 +243,23 @@ function urlOriginHost(url: URL): string {
  * encoded, without the fragment.
  */
 export function urlPathAndQuery(url: string | URL): string {
-  const parsed = parseUrl(url);
-  return parsed.pathname + parsed.search;
+  return pathAndQueryOf(parseUrl(url));
+}
+
+/**
+ * `urlPathAndQuery` of a parsed url. An empty query is one: `fetch`
+ * sends `https://example.com/read?` as `/read?`, and the server (and
+ * the Rust client) sign that, but `URL.search` is `""` for it as for
+ * no query at all. The `?` is then found in the `href`: the path, the
+ * query and the credentials of a url have theirs percent encoded, so
+ * the first `?` before the fragment (the first `#`) starts the query.
+ */
+function pathAndQueryOf(url: URL): string {
+  if (url.search) return url.pathname + url.search;
+  const href = url.href;
+  const fragment = href.indexOf("#");
+  const beforeFragment = fragment < 0 ? href : href.slice(0, fragment);
+  return url.pathname + (beforeFragment.endsWith("?") ? "?" : "");
 }
 
 /** The longest host: a name of 253 characters, a trailing dot and a port. */
@@ -424,7 +439,7 @@ export async function signedRequestHeadersForUrl(
     keys,
     urlOriginHost(parsed),
     method,
-    parsed.pathname + parsed.search,
+    pathAndQueryOf(parsed),
     body,
   );
 }
@@ -449,10 +464,15 @@ export type RequestSigner = (request: {
  * request, nothing else). Every request is signed for the host of its
  * url and its path and query, as they are sent, unless:
  * - `address`: the server's address, which every request url has to
- *   start with. The request is then signed for the host of the address
- *   and the path after it, the one the server receives where a proxy
- *   strips a prefix (`https://example.com/app` makes a request to
- *   `https://example.com/app/read` sign `/read`).
+ *   be under: the same origin, and a path at or below the address's.
+ *   The request is then signed for the host of the address and the
+ *   path after it, the one the server receives where a proxy strips a
+ *   prefix (`https://example.com/app` makes a request to
+ *   `https://example.com/app/read` sign `/read`). Both are taken as
+ *   `fetch` sends them (`/app/x/../read` is `/app/read`, `{` is
+ *   `%7B`), not as the text of the url. An address which isn't an
+ *   `http(s)` url, carries credentials, or has a query or a fragment,
+ *   throws here.
  * - `host`: the host to sign for instead of the url's (or the
  *   address's), one of the hosts the server is configured with: the
  *   server knows itself by another host than the url has.
@@ -467,24 +487,32 @@ export function requestSigner(
     headers?: Record<string, string>;
   },
 ): RequestSigner {
-  const address = options?.address?.trim().replace(/\/+$/, "");
-  const fixedHost = options?.host ?? (address ? urlHost(address) : undefined);
+  const addressText = options?.address?.trim();
+  const address = addressText ? signerAddress(addressText) : undefined;
+  const fixedHost = options?.host ?? address?.host;
   return async ({ method, url, body }) => {
     const pair = await keys;
+    const parsed = parseUrl(url);
     let host: string;
     let pathAndQuery: string;
     if (address) {
-      if (!url.startsWith(address + "/") && url !== address) {
+      const path = parsed.pathname;
+      if (
+        parsed.origin !== address.origin ||
+        (path !== address.prefix && !path.startsWith(address.prefix + "/"))
+      ) {
         throw new Error(
           "The request url is not under the address the signer signs for",
         );
       }
-      host = fixedHost ?? urlHost(address);
-      pathAndQuery = url.slice(address.length) || "/";
+      host = fixedHost ?? address.host;
+      // The path after the prefix, and the query (an empty one too).
+      pathAndQuery =
+        (path.slice(address.prefix.length) || "/") +
+        pathAndQueryOf(parsed).slice(path.length);
     } else {
-      const parsed = parseUrl(url);
       host = fixedHost ?? urlOriginHost(parsed);
-      pathAndQuery = parsed.pathname + parsed.search;
+      pathAndQuery = pathAndQueryOf(parsed);
     }
     const signed = await signedRequestHeaders(
       pair,
@@ -494,6 +522,32 @@ export function requestSigner(
       body ?? "",
     );
     return { ...options?.headers, ...signed };
+  };
+}
+
+/**
+ * The `address` of a `requestSigner`, parsed as `fetch` parses the
+ * urls under it: its origin, the host signed for (`urlHost`), and its
+ * path without the trailing `/`, the prefix a proxy in front of the
+ * server strips (`""` for none).
+ */
+function signerAddress(address: string): {
+  origin: string;
+  host: string;
+  prefix: string;
+} {
+  const parsed = parseUrl(address);
+  const host = urlOriginHost(parsed);
+  // A `#` anywhere but before the fragment is percent encoded.
+  if (pathAndQueryOf(parsed) !== parsed.pathname || parsed.href.includes("#")) {
+    throw new Error(
+      "The address has a query or a fragment, expected eg. https://example.com/app",
+    );
+  }
+  return {
+    origin: parsed.origin,
+    host,
+    prefix: parsed.pathname.replace(/\/+$/, ""),
   };
 }
 

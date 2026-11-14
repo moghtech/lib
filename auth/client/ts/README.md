@@ -22,8 +22,10 @@ requests (`MoghAuth.ClientCredential`):
 - an api key, `{ key, secret }`, sent as `X-API-KEY` / `X-API-SECRET`.
   The server takes it for the manage requests open to api keys, eg.
   `GetUserId`, `DeleteApiKey`, and an admin's login provider / trusted
-  issuer requests. A request with an api key doesn't follow redirects
-  (see [Redirects of requests with an api key](#redirects-of-requests-with-an-api-key)).
+  issuer requests.
+
+The client's requests follow no redirect, whatever the credential (see
+[Redirects](#redirects-of-requests)).
 
 A `jwt` is sent when set, otherwise the api key when both its parts are,
 otherwise nothing (only the session cookie goes along). So an app client
@@ -81,25 +83,43 @@ const notes = await MoghAuth.fetchJson<Note[]>(`${url}/read/ListNotes`, {
   any failure, never with anything else.
 - `fetchResponse(input, init)` resolves with the `200` response itself,
   eg. to stream its body, and rejects like `fetchJson`.
+- `fetchJsonWithCredential<Res>(input, init, credential)` (and
+  `fetchResponseWithCredential`) send the request with a
+  `ClientCredential`, the way `MoghAuthClient` sends its own: signed
+  with a signing key (`fetchSignedJson`), otherwise with the
+  credential's headers (`credentialHeaders`, a header of `init` of the
+  same name wins) and the session cookie (`credentials: "include"`
+  unless `init` sets it). An app client passes its state (`{ jwt, key,
+  secret }`, or `{ sign }`) as is.
 - For a response fetched another way: `responseJson(response)` (the json
   of a `200`, or the rejection), `responseError(response)` (what a status
   other than `200` rejects with) and `requestFailed(error)` (what a
   request which got no response rejects with).
 
-### Redirects of requests with an api key
+### Redirects of requests
 
-`fetchJson` and `fetchResponse` (and so `MoghAuthClient`) send a request
-carrying an api key (`X-API-KEY` / `X-API-SECRET`) with
-`redirect: "error"`, unless its `init` sets `redirect` itself: a redirect
-then rejects with `status: 1` instead of being followed. `fetch` outside
-a browser (node, Deno, Bun, a Komodo Action) drops only `Authorization`
-(and the browser's cookies) on a redirect to another origin, and sends
-every other header on to wherever the redirect points: the login page of
-an SSO proxy in front of the server, or the new address of a server
-which moved, would get the api key, and a `307` / `308` sends the body
-again too. A JWT in `Authorization` is dropped, so such requests follow
-redirects as usual. A request with an api key sent with plain `fetch`
-should pass `redirect: "error"` too.
+`fetchJson` and `fetchResponse` send a request carrying a credential (an
+api key `X-API-KEY` / `X-API-SECRET`, a signature, or a JWT in
+`Authorization`) with `redirect: "error"`, unless its `init` sets
+`redirect` itself: a redirect then rejects with `status: 1` instead of
+being followed. One rule for every credential. `fetch` outside a browser
+(node, Deno, Bun, a Komodo Action) drops only `Authorization` (and the
+browser's cookies) on a redirect to another origin, and sends every
+other header on to wherever the redirect points: the login page of an
+SSO proxy in front of the server, or the new address of a server which
+moved, would get the api key. And whatever the header, a `307` / `308`
+sends the body again, which carries secret values in the apps' apis. A
+proxy that redirects api calls (eg. http to https) so fails visibly. A
+request with a credential sent with plain `fetch` should pass
+`redirect: "error"` too.
+
+`MoghAuthClient` follows no redirect at all, whatever the credential,
+`tokenExchange` included: the bodies it sends carry passwords
+(`LoginLocalUser`, `UpdatePassword`), 2fa codes and provider tokens
+(`subject_token`), which a `307` / `308` would send on. The auth api
+never redirects these requests, so a redirect (a proxy, a server which
+moved) rejects with `status: 1`; the login of an external provider is a
+navigation of the browser, which isn't affected.
 
 ## Signed requests
 
@@ -138,9 +158,12 @@ const auth = MoghAuthClient(`${url}/auth`, { sign });
   makes a new pair.
 - `requestSigner(keys, { address, host, headers })` signs each request
   for the host of its url and its path and query, as they are sent. With
-  an `address` (the server's, which every request url starts with) it
-  signs the path after it, the one the server receives where a proxy in
-  front of it strips a prefix. `headers` are sent along unsigned.
+  an `address` (the server's: every request url has its origin and a
+  path at or below its path) it signs the path after it, the one the
+  server receives where a proxy in front of it strips a prefix. Paths
+  are taken as `fetch` sends them (`/app/x/../read` is `/app/read`, `{`
+  is `%7B`), not as the text of the url. `headers` are sent along
+  unsigned.
 - `fetchSignedJson(input, init, sign)` (and `fetchSignedResponse`) send
   the request signed right before it goes out, with `redirect: "error"`
   and `credentials: "omit"` unless `init` sets them. The body has to be
@@ -148,9 +171,10 @@ const auth = MoghAuthClient(`${url}/auth`, { sign });
   refuses the timestamp (`401`, `SIGNED_AT_ANOTHER_TIME`: a new
   connection took longer than its tolerance, a second by default), the
   request goes out once more, signed anew, over a connection an
-  unsigned `HEAD` opened first. A request carrying other credentials
-  (`Authorization`, an api key, `user:password@` in the url) is refused
-  (`OTHER_CREDENTIALS`), the server would take them over the signature.
+  unsigned `HEAD` opened first (`init.signal` stops it too). A request
+  carrying other credentials (`Authorization`, an api key,
+  `user:password@` in the url) is refused (`OTHER_CREDENTIALS`), the
+  server would take them over the signature.
   Failures reject with a `RequestError` like `fetchJson`: a key which
   doesn't parse rejects with `status: 1` and the reason as the `trace`,
   never repeating the key.

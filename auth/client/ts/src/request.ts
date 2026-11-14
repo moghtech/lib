@@ -13,8 +13,9 @@ import { SIGNED_AT_ANOTHER_TIME, type RequestSigner } from "./signature.js";
 export type RequestError = {
   /**
    * The http status. `1` when the server wasn't reached (network /
-   * CORS failure), or answered with a redirect which a request
-   * carrying an api key doesn't follow.
+   * CORS failure), or answered with a redirect which the request
+   * doesn't follow: one carrying an api key or a signature, and every
+   * request of `MoghAuthClient`.
    */
   status: number;
   /**
@@ -62,11 +63,17 @@ export type ClientCredential =
 
 /**
  * The headers a request isn't sent on to wherever a redirect points
- * with (see `fetchResponse`): an api key, and a request signature
- * (which no other host verifies anyway, but a `307` / `308` would send
- * the body again).
+ * with (see `fetchResponse`): an api key, a request signature (which
+ * no other host verifies anyway) and a JWT in `Authorization` (which
+ * `fetch` drops on the way to another origin). With each of them a
+ * `307` / `308` would send the body again.
  */
-const NO_REDIRECT_HEADERS = ["x-api-key", "x-api-secret", "x-api-signature"];
+const NO_REDIRECT_HEADERS = [
+  "x-api-key",
+  "x-api-secret",
+  "x-api-signature",
+  "authorization",
+];
 
 /**
  * The headers which send `credential` (see `ClientCredential`): none
@@ -173,15 +180,17 @@ export async function responseJson<Res>(response: Response): Promise<Res> {
  * `requestFailed` when no response came, `responseError` for another
  * status.
  *
- * A request carrying an api key (`X-API-KEY` / `X-API-SECRET`) or a
- * signature (`X-API-SIGNATURE`) doesn't follow redirects, unless
- * `init.redirect` says otherwise: a redirect rejects with `status: 1`. `fetch` outside a browser (node, Deno, a
- * Komodo Action) drops only `Authorization` (and the browser's
- * cookies) on a redirect to another origin, and sends the other
- * headers on to wherever it points: the login page of an SSO proxy in
- * front of the server, or the new address of a server which moved,
- * would get the api key, and a `307` / `308` sends the body again too.
- * A JWT in `Authorization` is safe to follow with.
+ * A request carrying a credential (an api key `X-API-KEY` /
+ * `X-API-SECRET`, a signature `X-API-SIGNATURE`, or a JWT in
+ * `Authorization`) doesn't follow redirects, unless `init.redirect`
+ * says otherwise: a redirect rejects with `status: 1`. One rule for
+ * every credential. `fetch` outside a browser (node, Deno, a Komodo
+ * Action) drops only `Authorization` (and the browser's cookies) on a
+ * redirect to another origin, and sends the other headers on to
+ * wherever it points: the login page of an SSO proxy in front of the
+ * server, or the new address of a server which moved, would get the
+ * api key. And whatever the header, a `307` / `308` sends the body
+ * again, which carries secret values in the apps' apis.
  */
 export async function fetchResponse(
   input: string | URL,
@@ -189,8 +198,8 @@ export async function fetchResponse(
 ): Promise<Response> {
   let response: Response;
   try {
-    // Inside the `try`: invalid headers throw a TypeError, as `fetch`
-    // would.
+    // Inside the `try`: invalid headers throw a TypeError
+    // (`checkedHeaders`), before `fetch` would throw its own.
     response = await fetch(input, withRedirectPolicy(init));
   } catch (error) {
     throw requestFailed(error);
@@ -200,16 +209,35 @@ export async function fetchResponse(
 }
 
 /**
- * `init` with `redirect: "error"` when it carries an api key or a
- * signature and doesn't set `redirect` itself (see `fetchResponse`).
+ * `init` with `redirect: "error"` when it carries a credential (an api
+ * key, a signature or a JWT) and doesn't set `redirect` itself (see
+ * `fetchResponse`).
  */
 function withRedirectPolicy(
   init: RequestInit | undefined,
 ): RequestInit | undefined {
-  if (!init || init.redirect !== undefined) return init;
-  const headers = new Headers(init.headers);
+  if (!init) return init;
+  // Checked whether or not the policy needs them: `fetch` then finds
+  // nothing invalid to throw its own TypeError about.
+  const headers = checkedHeaders(init.headers);
+  if (init.redirect !== undefined) return init;
   if (!NO_REDIRECT_HEADERS.some((name) => headers.has(name))) return init;
   return { ...init, redirect: "error" };
+}
+
+/**
+ * `init` read as `fetch` reads headers. An invalid header throws a
+ * TypeError which names no header: the runtime's own message repeats
+ * the header's value, which can be a credential (a token pasted with a
+ * line break), and the error ends in the `trace` of a `RequestError`,
+ * which UIs show and scripts log.
+ */
+function checkedHeaders(init: HeadersInit | undefined): Headers {
+  try {
+    return new Headers(init);
+  } catch {
+    throw new TypeError("A request header has an invalid name or value");
+  }
 }
 
 /**
@@ -257,8 +285,9 @@ export const OTHER_CREDENTIALS =
  * which it finds out before anything else and counts against nobody.
  * Then the request goes out once more, signed anew, over a connection
  * opened before it is signed: an unsigned `HEAD` to the url opens it,
- * which carries no credentials. Only once: any other answer, a second
- * refusal included, is the result.
+ * which carries no credentials, and `init.signal` stops like the
+ * request. Only once: any other answer, a second refusal included, is
+ * the result.
  *
  * A signed request follows no redirect (`redirect: "error"`) and
  * carries no cookies (`credentials: "omit"`), unless `init` sets
@@ -285,10 +314,14 @@ export async function fetchSignedResponse(
       ),
     );
   }
-  const headers: Record<string, string> = {};
-  new Headers(init.headers).forEach((value, name) => {
-    headers[name] = value;
-  });
+  let headers: Record<string, string>;
+  try {
+    // Inside the `try`: invalid headers throw a TypeError, which
+    // rejects as a `RequestError` like `fetchResponse`'s.
+    headers = headerRecord(init.headers);
+  } catch (error) {
+    throw requestFailed(error);
+  }
   if (
     urlHasCredentials(url) ||
     "authorization" in headers ||
@@ -320,12 +353,15 @@ export async function fetchSignedResponse(
   let response = await attempt();
   if (response.status === 401 && (await refusedTimestamp(response))) {
     // Best effort, the request is sent anyway. The answer has no
-    // body, the connection is there for the request to take.
+    // body, the connection is there for the request to take. The
+    // caller's signal stops it too (a proxy may hold it open): the
+    // request then rejects as aborted.
     try {
       const warm = await fetch(url, {
         method: "HEAD",
         redirect: "error",
         credentials: init.credentials ?? "omit",
+        signal: init.signal,
       });
       await warm.arrayBuffer();
     } catch {
@@ -356,6 +392,95 @@ export async function fetchSignedJson<Res>(
   sign: RequestSigner,
 ): Promise<Res> {
   return await responseJson<Res>(await fetchSignedResponse(input, init, sign));
+}
+
+/**
+ * Send a request with `credential` (see `ClientCredential`), and
+ * resolve with its `200` response: the way every client sends its
+ * requests, so the policy lives in one place.
+ * - A signing key (`credentialSigner`): the request is signed
+ *   (`fetchSignedResponse`), without cookies and following no
+ *   redirect unless `init` sets either.
+ * - Any other credential: its headers (`credentialHeaders`; a header of
+ *   `init` of the same name wins) and the session cookie
+ *   (`credentials: "include"`, unless `init` sets it), through
+ *   `fetchResponse`: a request with an api key or a JWT follows no
+ *   redirect.
+ *
+ * Rejects with a `RequestError` only, like both.
+ *
+ * ```ts
+ * const response = await fetchResponseWithCredential(
+ *   `${url}/terminal/execute`,
+ *   { method: "POST", body, headers: { "content-type": "application/json" } },
+ *   state,
+ * );
+ * ```
+ */
+export async function fetchResponseWithCredential(
+  input: string | URL,
+  init: RequestInit,
+  credential: ClientCredential | undefined,
+): Promise<Response> {
+  const sign = credentialSigner(credential);
+  if (sign) return await fetchSignedResponse(input, init, sign);
+  let headers: Record<string, string>;
+  try {
+    // Invalid headers reject like `fetchResponse`'s.
+    headers = headerRecord(credentialHeaders(credential), init.headers);
+  } catch (error) {
+    throw requestFailed(error);
+  }
+  return await fetchResponse(input, {
+    ...init,
+    headers,
+    credentials: init.credentials ?? "include",
+  });
+}
+
+/**
+ * `fetchResponseWithCredential`, resolving with the json of the `200`
+ * response (`responseJson`). Rejects with a `RequestError` on any
+ * failure.
+ *
+ * ```ts
+ * const notes = await fetchJsonWithCredential<Note[]>(
+ *   `${url}/read/ListNotes`,
+ *   {
+ *     method: "POST",
+ *     body: JSON.stringify({}),
+ *     headers: { "content-type": "application/json" },
+ *   },
+ *   credential,
+ * );
+ * ```
+ */
+export async function fetchJsonWithCredential<Res>(
+  input: string | URL,
+  init: RequestInit,
+  credential: ClientCredential | undefined,
+): Promise<Res> {
+  return await responseJson<Res>(
+    await fetchResponseWithCredential(input, init, credential),
+  );
+}
+
+/**
+ * `headers` merged into one record of lowercase names, a later one
+ * winning over an earlier one of the same name. Throws a TypeError
+ * for an invalid header, as `fetch` would, without the header's value
+ * (`checkedHeaders`).
+ */
+function headerRecord(
+  ...headers: (HeadersInit | undefined)[]
+): Record<string, string> {
+  const record: Record<string, string> = {};
+  for (const init of headers) {
+    checkedHeaders(init).forEach((value, name) => {
+      record[name] = value;
+    });
+  }
+  return record;
 }
 
 /**
