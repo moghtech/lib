@@ -5,6 +5,7 @@ export * from "./credential-key";
 export * from "./errors";
 export * from "./formatting";
 export * from "./hooks";
+export * from "./secret-mutation";
 export * from "./signing-key";
 export * from "./theme";
 export * from "./utils";

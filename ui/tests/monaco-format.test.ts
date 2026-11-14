@@ -129,6 +129,7 @@ test("the format action is off in a read only editor", async () => {
   // Monaco checks the precondition (the keybinding's too) against the
   // editor's context keys, kept up to date when `readOnly` changes.
   const precondition = ContextKeyExpr.deserialize(format.precondition);
+  assert.ok(precondition, "the precondition doesn't parse");
   const editorKeys = (readOnly: boolean) => ({
     getValue: (key: string) =>
       key === EditorContextKeys.readOnly.key ? readOnly : undefined,

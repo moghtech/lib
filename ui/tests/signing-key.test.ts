@@ -71,3 +71,83 @@ test("the hints name the app's key file", () => {
     hints.x25519,
   );
 });
+
+// Real pairs (the Ed25519 one is the example key of RFC 8410), for
+// the cases an app's own forms rely on: Cicada kept these in its copy
+// of the helpers until it moved to this module.
+const RFC_PRIVATE =
+  "MC4CAQAwBQYDK2VwBCIEINTuctv5E1hK1bbY8fdp+K06/nwoy/HU++CXqI9EdVhC";
+const RFC_PUBLIC =
+  "MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=";
+const RFC_PRIVATE_PEM = `-----BEGIN PRIVATE KEY-----\n${RFC_PRIVATE}\n-----END PRIVATE KEY-----`;
+const RFC_PUBLIC_PEM = `-----BEGIN PUBLIC KEY-----\n${RFC_PUBLIC}\n-----END PUBLIC KEY-----\n`;
+const X25519_PRIVATE =
+  "MC4CAQAwBQYDK2VuBCIEIP8bd52uKstjL1QZat+i5Y/aABuKKexAWH2sPRlzXvsA";
+const X25519_PUBLIC =
+  "MCowBQYDK2VuAyEAwRo9XrP09PWCyhRx4XU6CTS25fUbwYrhYRDHVidVOnw=";
+const X25519_PUBLIC_PEM = `-----BEGIN PUBLIC KEY-----\n${X25519_PUBLIC}\n-----END PUBLIC KEY-----\n`;
+
+test("excerpts of real keys", () => {
+  assert.equal(publicKeyExcerpt(RFC_PUBLIC), "…Gb9ECWmEzf6F…");
+  assert.equal(publicKeyExcerpt("abcdefghijklmnop"), "abcdefghijkl…");
+  assert.equal(publicKeyExcerpt(X25519_PUBLIC), "MCowBQYDK2Vu…");
+});
+
+test("a private key is known in base64 and PEM, of either algorithm", () => {
+  assert.equal(isPrivateKey(RFC_PRIVATE), true);
+  assert.equal(isPrivateKey(` ${RFC_PRIVATE}\n`), true);
+  assert.equal(isPrivateKey(RFC_PRIVATE_PEM), true);
+  assert.equal(isPrivateKey(X25519_PRIVATE), true);
+  assert.equal(
+    isPrivateKey("-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END"),
+    true,
+  );
+  assert.equal(isPrivateKey(RFC_PUBLIC), false);
+  assert.equal(isPrivateKey(RFC_PUBLIC_PEM), false);
+  assert.equal(isPrivateKey(X25519_PUBLIC), false);
+  assert.equal(isPrivateKey(""), false);
+});
+
+test("the value sent is the base64 spki, whatever surrounds it", () => {
+  assert.equal(publicKeyValue(RFC_PUBLIC_PEM), RFC_PUBLIC);
+  assert.equal(publicKeyValue(`\n${RFC_PUBLIC_PEM}\n`), RFC_PUBLIC);
+  assert.equal(publicKeyValue(""), "");
+});
+
+test("the form lets an Ed25519 public key through, and an empty value", () => {
+  assert.equal(publicKeyError("  \n"), null);
+  assert.equal(publicKeyError(RFC_PUBLIC), null);
+  assert.equal(publicKeyError(` ${RFC_PUBLIC} `), null);
+  assert.equal(publicKeyError(RFC_PUBLIC_PEM), null);
+});
+
+test("the form refuses a private key in every form", () => {
+  for (const key of [RFC_PRIVATE, RFC_PRIVATE_PEM, X25519_PRIVATE]) {
+    assert.match(publicKeyError(key)!, /^This is a private key/);
+  }
+});
+
+test("the form tells an X25519 public key in every form", () => {
+  const message = /^This is an X25519 key: signing keys are Ed25519 keys/;
+  assert.match(publicKeyError(X25519_PUBLIC)!, message);
+  assert.match(publicKeyError(` ${X25519_PUBLIC}\n`)!, message);
+  assert.match(publicKeyError(X25519_PUBLIC_PEM)!, message);
+  // A PEM whose line breaks were lost on paste.
+  assert.match(publicKeyError(X25519_PUBLIC_PEM.replace(/\n/g, ""))!, message);
+});
+
+test("the form refuses a PEM of another key, and what is no key", () => {
+  const rsa =
+    "-----BEGIN PUBLIC KEY-----\nMFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAK\n-----END PUBLIC KEY-----";
+  assert.match(publicKeyError(rsa)!, /^Not an Ed25519 public key/);
+  assert.match(
+    publicKeyError("-----BEGIN PUBLIC KEY-----")!,
+    /^Not an Ed25519 public key/,
+  );
+  // 60 characters which are no key.
+  assert.match(publicKeyError("a".repeat(60))!, /^Not an Ed25519 public key/);
+  assert.equal(
+    publicKeyError("-----BEGIN CERTIFICATE-----\nAAAA\n-----END"),
+    "Expected a PEM PUBLIC KEY",
+  );
+});

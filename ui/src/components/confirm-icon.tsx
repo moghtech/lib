@@ -8,10 +8,12 @@ import { Check, CircleQuestionMark } from "lucide-react";
 import {
   FocusEventHandler,
   forwardRef,
+  MouseEvent,
   MouseEventHandler,
   useEffect,
   useState,
 } from "react";
+import { useSingleFlight } from "../hooks";
 
 // https://mantine.dev/guides/polymorphic/#create-your-own-polymorphic-components
 
@@ -28,7 +30,8 @@ export interface ConfirmIconProps extends ActionIconProps {
 
 /**
  * An icon button which asks for a second click (within 4 seconds) before
- * it runs `onClick`, showing a check mark in between.
+ * it runs `onClick`, showing a check mark in between. `onClick` runs
+ * once per confirm (see `useSingleFlight`).
  */
 export const ConfirmIcon = createPolymorphicComponent<
   "button",
@@ -40,6 +43,14 @@ export const ConfirmIcon = createPolymorphicComponent<
       ref,
     ) => {
       const [clickedOnce, setClickedOnce] = useState(false);
+      // The confirming click runs `onClick` once: a click landing in
+      // the same tick (eg. a double click on the confirm) still sees
+      // `clickedOnce`, which React hasn't rendered away yet, and would
+      // run it again. Also held while an `onClick` returning a promise
+      // runs.
+      const confirm = useSingleFlight(
+        async (e: MouseEvent<HTMLButtonElement>) => await onClick?.(e),
+      );
       useEffect(() => {
         if (clickedOnce) {
           const timeout = setTimeout(() => {
@@ -53,7 +64,7 @@ export const ConfirmIcon = createPolymorphicComponent<
           onClick={(e) => {
             e.stopPropagation();
             if (clickedOnce) {
-              onClick?.(e);
+              void confirm(e);
               setClickedOnce(false);
             } else {
               setClickedOnce(true);

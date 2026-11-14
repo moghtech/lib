@@ -22,7 +22,6 @@ import {
 import { notifications } from "@mantine/notifications";
 import {
   QueryState,
-  useMutation,
   UseMutationOptions,
   useQuery,
   useQueryClient,
@@ -64,6 +63,7 @@ import type {
 } from "mogh_supporter";
 import { sendWithJwt, useSendableJwt } from "../auth/rejected-jwt";
 import { errorNotificationMessage } from "../errors";
+import { useSecretMutation } from "../secret-mutation";
 import {
   Config,
   ConfigInput,
@@ -289,7 +289,10 @@ type SupporterError = { result?: { error?: string; trace?: string[] } };
 
 /**
  * The write api of the supporter key (`SetSupporterKey`,
- * `DeleteSupporterKey`), admin only, with an error notification.
+ * `DeleteSupporterKey`, `SetSupporterBranding`), admin only, with an
+ * error notification. Forgotten once it settled (`useSecretMutation`:
+ * the key holds the instance's private key): use the answer in
+ * `onSuccess` or from the `mutateAsync` promise, not from `data`.
  */
 export function useManageSupporter<
   T extends Types.SupporterWriteRequest["type"],
@@ -300,7 +303,7 @@ export function useManageSupporter<
     "mutationKey" | "mutationFn"
   >,
 >(type: T, config?: C) {
-  return useMutation({
+  return useSecretMutation({
     // Spread first: a caller's `onError` extends the notification.
     ...config,
     mutationKey: [type],
@@ -517,14 +520,18 @@ function SupporterBrandingConfig({
   const { data: stored } = useSupporterBranding();
   const kept = normalizeBranding(stored);
   // The images uploaded here, by their labels: the form holds the
-  // label, the save sends the image.
-  const [uploads, setUploads] = useState<Record<string, string>>({});
+  // label, the save sends the image. A Map, as the typed text is looked
+  // up in it: in a plain object "constructor" or "toString" would find
+  // Object.prototype's members.
+  const [uploads, setUploads] = useState<ReadonlyMap<string, string>>(
+    () => new Map(),
+  );
   const keptUpload = kept.icon?.startsWith("data:")
     ? uploadLabel(kept.icon)
     : undefined;
-  const isUpload = (icon: string) => icon in uploads || icon === keptUpload;
+  const isUpload = (icon: string) => uploads.has(icon) || icon === keptUpload;
   const iconOf = (icon: string) =>
-    uploads[icon] ?? (icon === keptUpload ? kept.icon : icon);
+    uploads.get(icon) ?? (icon === keptUpload ? kept.icon : icon);
 
   const original: BrandingForm = {
     icon: keptUpload ?? kept.icon ?? "",
@@ -651,10 +658,9 @@ function SupporterBrandingConfig({
                         iconDataUrl(file)
                           .then((image) => {
                             const label = uploadLabel(image, file.name);
-                            setUploads((uploads) => ({
-                              ...uploads,
-                              [label]: image,
-                            }));
+                            setUploads((uploads) =>
+                              new Map(uploads).set(label, image),
+                            );
                             set({ icon: label });
                           })
                           .catch((e) =>

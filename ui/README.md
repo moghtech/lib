@@ -59,13 +59,15 @@ import { ThemeProvider } from "mogh_ui";
   the cached queries and mutation variables when the tab's user
   changes).
 - The auth requests (`useLogin`, `useManageAuth`, the redeem of
-  `useAuthState`) are forgotten once they settled and the caller's
-  callbacks ran: their params (a password, a code, a credential) and
-  answers (a token, TOTP recovery codes, a new key's secret) leave the
-  hook's state and the query client's mutation cache at once
-  (`gcTime: 0`), which would keep them for 5 minutes. Use an answer in
-  `onSuccess` (or from the `mutateAsync` promise), not from `data` /
-  `error`; a callback passed to `mutate` itself doesn't run.
+  `useAuthState`) and the supporter key's (`useManageSupporter`) are
+  forgotten once they settled and the caller's callbacks ran: their
+  params (a password, a code, a credential) and answers (a token, TOTP
+  recovery codes, a new key's secret) leave the hook's state and the
+  query client's mutation cache at once (`gcTime: 0`), which would
+  keep them for 5 minutes. Use an answer in `onSuccess` (or from the
+  `mutateAsync` promise), not from `data` / `error`; a callback passed
+  to `mutate` itself doesn't run. See `useSecretMutation` below for
+  the app's own writes.
 - `AuthProfileSections({ user, refetchUser, loginExtra? })` is the auth
   part of a profile page: Login (username, and the password where local
   login is enabled), the linked providers (`LinkedLogins`) and 2FA
@@ -110,6 +112,20 @@ passkeyEnrolled, externalSkip2fa, linkedLogins }` and keeps its own
   and then shows the errors at their fields. An emptied number (a
   maximum token age, a token lifetime) is such an error: it is never
   saved as 0, which is no limit at all.
+- `TrustedIssuerPage`'s `tokenReview` says what the app's server can
+  review the tokens of a "Token review" issuer (a Kubernetes cluster
+  verifying its own tokens) with. By default the page offers the
+  cluster's api server url and the cluster the app runs in, which the
+  lib's default review serves; `{ device: true }` adds the app's own
+  devices (only for an app whose `AuthImpl::review_workload_token`
+  handles them), with `deviceField` for the app's own words for them;
+  `false` doesn't offer the source. An issuer stored with a source or a
+  device the app doesn't offer still shows it, with a notice, so it can
+  be moved to one the app does. `ruleAdmin={false}` (and
+  `LoginProviderPage`'s `adminGroups={false}`) hides the admin switch of
+  the rules (the admin groups of a provider) for an app which never
+  makes a workload (a user of the provider) an admin: what is stored is
+  kept.
 - `Config` shows one confirm dialog behind all of its Save buttons.
   Ctrl / Cmd + Enter (outside of text inputs) opens it while there are
   changes, and Enter in the open dialog saves (it opens with its Save
@@ -142,6 +158,15 @@ passkeyEnrolled, externalSkip2fa, linkedLogins }` and keeps its own
   `useHoldOpen()`) and passes `closeOnClickOutside={!held}`,
   `closeOnEscape={!held}` (a modal also `withCloseButton={!held}`).
   The TOTP enrollment's recovery codes do.
+- A mutation whose request or answer carries a credential (a pasted
+  private key, a minted api key's secret, a new key's private key, a
+  password) must not stay in the mutation cache once `RevealOnce`
+  closed: react-query keeps `variables` and `data` in the hook and in
+  `queryClient.getMutationCache()` (5 minutes by default), readable by
+  anything on the page. Make such writes with `useSecretMutation(options)`
+  (`useMutation`'s options): it resets once its last request in flight
+  settled, and its mutations have `gcTime: 0`. Take the answer in
+  `onSuccess` or from `mutateAsync`, never from `data`.
 - `DataTable` keys its rows (and their cells) by index unless it is
   given `getRowId` (eg. `(row) => row.id`): pass it for a table whose
   cells hold state of their own (an input with a draft, a selector),
@@ -175,8 +200,10 @@ passkeyEnrolled, externalSkip2fa, linkedLogins }` and keeps its own
   while one is in flight is dropped (resolves to `undefined`). A second
   press (a double click, a held Enter) can land before React renders
   the loading or disabled state of the first, and would send the
-  request again. `ConfirmUpdate`'s dialog and the passkey enrollment
-  use it.
+  request again. `ConfirmUpdate`'s dialog, the passkey enrollment and
+  the confirming click of `ConfirmButton` / `ConfirmIcon` use it: their
+  `onClick` runs once per confirm, and not again while one returning a
+  promise is in flight.
 - `EnableSwitch` with `toggleOnEnter`: Enter toggles it as Space does,
   through its own `onChange` / `onCheckedChange` (eg. a form's
   `getInputProps`), instead of submitting the form around it.
@@ -294,6 +321,9 @@ npm run build
 `tests/*.test.ts` run in node's own runner. The hook and component
 tests are `tests/*.test.tsx`: vitest renders them with React in jsdom
 (`npm run test:dom`), inside the providers of `tests/render.tsx`.
+Neither checks types: `npm run typecheck` checks the sources
+(`tsconfig.json`, browser only) and the tests (`tsconfig.test.json`,
+with node's types).
 
 The [example app](../example) uses the local build (`file:` dependency),
 and its Playwright suite exercises the auth pages end to end.

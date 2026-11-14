@@ -25,7 +25,12 @@ import {
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import * as MoghAuth from "mogh_auth_client";
-import { Config, ConfigItem } from "../../components/config";
+import {
+  Config,
+  ConfigInput,
+  ConfigItem,
+  ConfigSelector,
+} from "../../components/config";
 import { ConfirmModal } from "../../components/confirm-modal";
 import { CopyText } from "../../components/copy-text";
 import { EnableSwitch } from "../../components/enable-switch";
@@ -49,6 +54,40 @@ import {
 type ListItem = MoghAuth.Types.TrustedIssuerListItem;
 
 /**
+ * What the app's server can review the tokens of a TokenReview issuer
+ * with (`TrustedIssuerPage`'s `tokenReview`), beside the cluster's api
+ * server url and the cluster the app itself runs in, which the lib's
+ * `default_review_workload_token` serves.
+ */
+export interface TokenReviewOptions {
+  /**
+   * Also offer reviews through a device of the app, by its id: an
+   * agent of the app running in the cluster, reviewing with its own
+   * service account. Only for an app whose
+   * `AuthImpl::review_workload_token` handles `device`: the lib's
+   * default refuses every token of such an issuer. Default: false.
+   */
+  device?: boolean;
+  /**
+   * The app's own words for the device field: what it calls its
+   * devices, what their ids look like. Default: app-neutral ones.
+   */
+  deviceField?: {
+    label?: string;
+    description?: string;
+    placeholder?: string;
+  };
+}
+
+/** The device field's words, unless the app has its own. */
+const DEVICE_FIELD = {
+  label: "Review Device",
+  description:
+    "The id of the app's device in the cluster (an agent of the app) which reviews the tokens with its own service account. The server then stores no cluster credential.",
+  placeholder: "Device id",
+};
+
+/**
  * The page of one trusted issuer (workload identity): its details
  * and its configuration, rules included, edited like an app's own
  * entities (a config section with a confirm / reset). For the app
@@ -63,6 +102,7 @@ export function TrustedIssuerPage({
   backTo,
   groupOptions,
   ruleAdmin = true,
+  tokenReview = {},
   onDeleted,
   children,
 }: {
@@ -76,6 +116,16 @@ export function TrustedIssuerPage({
    * make a workload an admin: the switch and the badges are hidden,
    * and a rule keeps the flag it has. */
   ruleAdmin?: boolean;
+  /**
+   * The "Token review" source of signing keys (a Kubernetes cluster
+   * verifying its own tokens) and the reviews the app's server can
+   * do. By default offered with the api server url and the app's own
+   * cluster; `{ device: true }` adds the app's devices (see
+   * `TokenReviewOptions`), `false` doesn't offer the source. An issuer
+   * stored with a source or a review the app doesn't offer still shows
+   * it, with a notice, to be moved to one the app does.
+   */
+  tokenReview?: false | TokenReviewOptions;
   /** Called after the issuer was deleted, before navigating back. */
   onDeleted?: () => void;
   /** Rendered below the configuration: what the app knows about the
@@ -242,6 +292,7 @@ export function TrustedIssuerPage({
             item={item}
             groupOptions={groupOptions}
             ruleAdmin={ruleAdmin}
+            tokenReview={tokenReview}
             onSave={async (values) => {
               await update({ issuer: trustedIssuer(item.issuer.id, values) });
             }}
@@ -264,18 +315,40 @@ function TrustedIssuerConfig({
   item,
   groupOptions,
   ruleAdmin,
+  tokenReview,
   onSave,
 }: {
   item: ListItem;
   groupOptions?: string[];
   ruleAdmin: boolean;
+  tokenReview: false | TokenReviewOptions;
   onSave: (values: IssuerFormValues) => Promise<unknown>;
 }) {
   const readOnly = item.read_only;
   const original = issuerFormValues(item.issuer);
   const [update, setUpdate] = useState<Partial<IssuerFormValues>>({});
   const values = { ...original, ...update };
-  const errors = issuerFormErrors(values);
+
+  // What the app offers, and what the stored issuer has which it
+  // doesn't: shown as stored, with a notice, to be moved off.
+  const reviewOffered = tokenReview !== false;
+  const deviceOffered = tokenReview !== false && !!tokenReview.device;
+  const reviewShown = reviewOffered || original.keys_source === "TokenReview";
+  const deviceShown = deviceOffered || !!original.review_device.trim();
+  const deviceField = {
+    ...DEVICE_FIELD,
+    ...(tokenReview !== false ? tokenReview.deviceField : undefined),
+  };
+  const keysSources = reviewShown
+    ? KEYS_SOURCES
+    : KEYS_SOURCES.filter((source) => source.value !== "TokenReview");
+  const reviewing =
+    values.keys_source === "TokenReview" && !values.review_in_cluster;
+
+  const errors = issuerFormErrors(values, {
+    stored: item.issuer,
+    device: deviceShown,
+  });
   // Shown at the fields once a save was refused for them, not while
   // the draft is first filled in.
   const [showErrors, setShowErrors] = useState(false);
@@ -288,6 +361,11 @@ function TrustedIssuerConfig({
       update={update}
       setUpdate={setUpdate}
       disabled={readOnly}
+      // Never sent to the browser: the draft starts empty, whether a
+      // credential is stored or not.
+      secretKeys={[
+        { key: "review_token", stored: original.review_token_stored },
+      ]}
       onSave={async () => {
         const [message] = Object.values(errors);
         if (message) {
@@ -321,12 +399,36 @@ function TrustedIssuerConfig({
                 placeholder: "https://token.actions.githubusercontent.com",
                 error: shown.issuer,
               },
-              keys_source: {
-                label: "Signing Keys",
-                description:
-                  "Discovery loads them from the issuer's /.well-known/openid-configuration (Github Actions, Gitlab, clusters exposing their discovery). Static keys are for issuers the app server can't reach. Token review asks a Kubernetes cluster to verify its own tokens, so no keys are stored.",
-                options: KEYS_SOURCES,
-              },
+              keys_source: (value, set) => (
+                <Stack gap="sm">
+                  <ConfigSelector
+                    label="Signing Keys"
+                    description={
+                      "Discovery loads them from the issuer's /.well-known/openid-configuration (Github Actions, Gitlab, clusters exposing their discovery). Static keys are for issuers the app server can't reach." +
+                      (reviewShown
+                        ? " Token review asks a Kubernetes cluster to verify its own tokens, so no keys are stored."
+                        : "")
+                    }
+                    value={value}
+                    options={keysSources}
+                    onValueChange={(keys_source) =>
+                      set({ keys_source: keys_source as typeof value })
+                    }
+                    disabled={readOnly}
+                  />
+                  {!reviewOffered && values.keys_source === "TokenReview" && (
+                    <Alert
+                      icon={<ShieldAlert size="1rem" />}
+                      color="yellow"
+                      data-testid="token-review-not-offered"
+                    >
+                      This app doesn't offer token review. The issuer is stored
+                      with it and shown as stored: choose another source of
+                      signing keys to move it off.
+                    </Alert>
+                  )}
+                </Stack>
+              ),
               keys_url: {
                 label: "Keys URL",
                 description:
@@ -363,17 +465,18 @@ function TrustedIssuerConfig({
               review_in_cluster: {
                 label: "Review with this cluster",
                 description:
-                  "Cicada runs in the cluster itself and reviews the tokens with its own service account, storing no credential.",
+                  "For an app server running in the cluster itself: it reviews the tokens with its own service account, and no credential is stored.",
                 hidden: values.keys_source !== "TokenReview",
               },
               review_url: {
                 label: "API Server URL",
                 description:
-                  "The cluster api server the reviews go to. Leave empty to review through a device instead.",
+                  "The cluster api server the reviews go to." +
+                  (deviceShown
+                    ? " Leave empty to review through a device instead."
+                    : ""),
                 placeholder: "https://10.0.0.1:6443",
-                hidden:
-                  values.keys_source !== "TokenReview" ||
-                  values.review_in_cluster,
+                hidden: !reviewing,
                 error: shown.review_url,
               },
               review_token: {
@@ -383,17 +486,12 @@ function TrustedIssuerConfig({
                 placeholder: values.review_token_stored
                   ? "Unchanged"
                   : "Enter the reviewer credential",
-                hidden:
-                  values.keys_source !== "TokenReview" ||
-                  !!values.review_device.trim() ||
-                  values.review_in_cluster,
+                hidden: !reviewing || !!values.review_device.trim(),
                 secret: true,
                 error: shown.review_token,
               },
               review_ca: (value, set) =>
-                values.keys_source === "TokenReview" &&
-                !values.review_device.trim() &&
-                !values.review_in_cluster ? (
+                reviewing && !values.review_device.trim() ? (
                   <ConfigItem
                     label="API Server CA"
                     description="The PEM bundle the api server's certificate is verified against. Empty: the system roots."
@@ -417,16 +515,34 @@ function TrustedIssuerConfig({
                 ) : (
                   <></>
                 ),
-              review_device: {
-                label: "Review Device",
-                description:
-                  "The device (periphery) in the cluster that reviews the tokens with its own service account, by id. The server then stores no cluster credential.",
-                placeholder: "dev_...",
-                hidden:
-                  values.keys_source !== "TokenReview" ||
-                  values.review_in_cluster,
-                error: shown.review_device,
-              },
+              review_device: (value, set) =>
+                reviewing && deviceShown ? (
+                  <Stack gap="sm">
+                    <ConfigInput
+                      label={deviceField.label}
+                      description={deviceField.description}
+                      placeholder={deviceField.placeholder}
+                      value={value ?? ""}
+                      onValueChange={(review_device) => set({ review_device })}
+                      disabled={readOnly}
+                      inputProps={{ error: shown.review_device }}
+                    />
+                    {!deviceOffered && values.review_device.trim() && (
+                      <Alert
+                        icon={<ShieldAlert size="1rem" />}
+                        color="yellow"
+                        data-testid="review-device-not-offered"
+                      >
+                        This issuer reviews through a device, which this app
+                        doesn't offer: its tokens are refused. Empty the device,
+                        and review with the API Server URL or this cluster
+                        instead.
+                      </Alert>
+                    )}
+                  </Stack>
+                ) : (
+                  <></>
+                ),
               audiences: (value, set) => (
                 <ConfigItem
                   label="Audiences"

@@ -38,7 +38,10 @@ export interface IssuerFormValues {
    */
   review_token: string;
   review_token_stored: boolean;
-  /** The device (periphery) a TokenReview source reviews through. */
+  /**
+   * The device of the app (eg. an agent of it in the cluster) a
+   * TokenReview source reviews through, by id.
+   */
   review_device: string;
   /**
    * Review with the cluster the app itself runs in: its own service
@@ -90,13 +93,10 @@ export function issuerFormValues(issuer: TrustedIssuer): IssuerFormValues {
     keys_source: keys?.source ?? "Discovery",
     keys_url: keys?.source === "JwksUri" ? keys.params : "",
     keys_static: keys?.source === "Static" ? keys.params : "",
-    review_url:
-      keys?.source === "TokenReview" ? (keys.params.url ?? "") : "",
-    review_ca:
-      keys?.source === "TokenReview" ? (keys.params.ca ?? "") : "",
+    review_url: keys?.source === "TokenReview" ? (keys.params.url ?? "") : "",
+    review_ca: keys?.source === "TokenReview" ? (keys.params.ca ?? "") : "",
     review_token: "",
-    review_token_stored:
-      keys?.source === "TokenReview" && !!keys.params.token,
+    review_token_stored: keys?.source === "TokenReview" && !!keys.params.token,
     review_device:
       keys?.source === "TokenReview" ? (keys.params.device ?? "") : "",
     review_in_cluster:
@@ -135,13 +135,7 @@ export function trustedIssuer(
               // own cluster reviews: they are not sent either.
               params: values.review_in_cluster
                 ? { in_cluster: true }
-                : {
-                    url: values.review_url.trim(),
-                    ca: values.review_ca.trim(),
-                    // Empty (or the redacted listing) keeps the stored one
-                    token: values.review_token,
-                    device: values.review_device.trim(),
-                  },
+                : reviewParams(values),
             }
           : { source: "Discovery", params: {} };
   return {
@@ -161,6 +155,25 @@ export function trustedIssuer(
       })),
       token_ttl_secs: seconds(rule.token_ttl_secs),
     })),
+  };
+}
+
+/** The params of a review at the url or through the device. */
+function reviewParams(
+  values: IssuerFormValues,
+): MoghAuth.Types.TokenReviewConfig {
+  const device = values.review_device.trim();
+  if (device) {
+    // The credential and CA fields are hidden while a device is set:
+    // it reviews with its own, and the server drops them anyway.
+    return { url: values.review_url.trim(), ca: "", token: "", device };
+  }
+  return {
+    url: values.review_url.trim(),
+    ca: values.review_ca.trim(),
+    // Empty (or the redacted listing) keeps the stored one
+    token: values.review_token,
+    device: "",
   };
 }
 
@@ -185,6 +198,25 @@ export const wholeSeconds = (value: unknown) =>
     ? null
     : "Must be a whole number of seconds";
 
+/** The api server url a stored reviewer credential was entered for. */
+function storedReviewUrl(stored: TrustedIssuer) {
+  return stored.keys?.source === "TokenReview"
+    ? (stored.keys.params.url ?? "").trim()
+    : "";
+}
+
+/** What the issuer's page knows beside the values (`issuerFormErrors`). */
+export interface IssuerFormContext {
+  /** The issuer as stored, which the values edit. */
+  stored: TrustedIssuer;
+  /**
+   * Whether the page shows the review device field: the app offers
+   * reviews through its devices, or the issuer is stored with one
+   * (`TrustedIssuerPage`'s `tokenReview`).
+   */
+  device: boolean;
+}
+
 /**
  * What the server would refuse, checked before a save: by the path of
  * the field (`issuer`, `max_token_age_secs`, `rules.0.name`,
@@ -193,6 +225,7 @@ export const wholeSeconds = (value: unknown) =>
  */
 export function issuerFormErrors(
   values: IssuerFormValues,
+  context: IssuerFormContext,
 ): Record<string, string> {
   const errors: Record<string, string> = {};
   if (!values.name.trim().length) errors.name = "Name cannot be empty";
@@ -221,8 +254,10 @@ export function issuerFormErrors(
     const url = values.review_url.trim();
     const device = values.review_device.trim();
     if (!url && !device) {
-      errors.review_url =
-        "A token review needs the cluster api server URL, a device to review through, or this cluster";
+      // Names what the page offers.
+      errors.review_url = context.device
+        ? "A token review needs the cluster api server URL, a device to review through, or this cluster"
+        : "A token review needs the cluster api server URL, or this cluster";
     } else if (url && device) {
       errors.review_device =
         "A token review goes to the URL or through the device, not both";
@@ -230,24 +265,22 @@ export function issuerFormErrors(
     if (url && !validHttpUrl(url)) {
       errors.review_url = "The api server must be an http(s) URL";
     }
-    if (
-      url &&
-      !values.review_token &&
-      !values.review_token_stored
-    ) {
-      errors.review_token = "A reviewer credential is required with a URL";
+    // A device reviews with its own credential and CA: their fields
+    // are hidden and not saved while one is set, like the in-cluster
+    // review's, so nothing of theirs to check.
+    if (!device && url && !values.review_token) {
+      if (!values.review_token_stored) {
+        errors.review_token = "A reviewer credential is required with a URL";
+      } else if (url !== storedReviewUrl(context.stored)) {
+        // The server keeps the stored credential only for the url it
+        // was entered for, so it is never sent to another address.
+        errors.review_token =
+          "Enter the reviewer credential again when changing the URL";
+      }
     }
-    if (values.review_token === REDACTED) {
+    if (!device && values.review_token === REDACTED) {
       errors.review_token =
         "The redacted credential cannot be used as the credential";
-    }
-    if (device && values.review_token) {
-      errors.review_token =
-        "A device reviews with its own credentials: no credential here";
-    }
-    if (device && values.review_ca.trim()) {
-      errors.review_ca =
-        "A device reviews with its own cluster CA: no CA here";
     }
   }
   // What ties a token to this app

@@ -1,0 +1,18 @@
+{
+  // The tests, with the sources they import, for type checking only:
+  // node's runner and vitest run them without checking their types.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": ".",
+    // They run in node (>= 22) and jsdom, newer than the browsers the
+    // sources are built for.
+    "target": "ES2022",
+    // The node tests import the sources as node runs them, by file.
+    "allowImportingTsExtensions": true,
+    "types": ["node"]
+  },
+  "include": ["src", "tests", "vitest.config.ts", "tsup.config.ts"]
+}

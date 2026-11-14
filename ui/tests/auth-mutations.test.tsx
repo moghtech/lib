@@ -3,6 +3,8 @@ import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setAuthUrl, useLogin, useManageAuth } from "../src/auth/hooks";
 import { EnrollTotp } from "../src/auth/profile/totp";
+import { useSecretMutation } from "../src/secret-mutation";
+import { setSupporterUrl, useManageSupporter } from "../src/supporter";
 import {
   answering,
   renderHookWithProviders,
@@ -138,6 +140,56 @@ describe("useLogin", () => {
     await flush();
     expect(onSuccess.mock.calls[0][0]).toEqual({ jwt: "J_token" });
     expect(result.current.data).toBeUndefined();
+    expect(result.current.variables).toBeUndefined();
+    await waitFor(() =>
+      expect(client.getMutationCache().getAll()).toHaveLength(0),
+    );
+  });
+});
+
+describe("useSecretMutation", () => {
+  it("is exported for an app's own writes carrying a credential, and forgets them", async () => {
+    const client = new QueryClient();
+    const onSuccess = vi.fn();
+    // Eg. an app's onboarding key: a pasted private key in, a minted
+    // one out.
+    const { result } = renderHookWithProviders(
+      () =>
+        useSecretMutation({
+          mutationKey: ["CreateOnboardingKey"],
+          mutationFn: async (_: { private_key: string }) => ({
+            private_key: "P_minted",
+          }),
+          onSuccess,
+        }),
+      client,
+    );
+    await act(() => result.current.mutateAsync({ private_key: "P_pasted" }));
+    await flush();
+    expect(onSuccess.mock.calls[0][0]).toEqual({ private_key: "P_minted" });
+    expect(result.current.status).toBe("idle");
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.variables).toBeUndefined();
+    await waitFor(() =>
+      expect(client.getMutationCache().getAll()).toHaveLength(0),
+    );
+  });
+});
+
+describe("useManageSupporter", () => {
+  it("forgets the supporter key once it was set", async () => {
+    setSupporterUrl("http://supporter.test");
+    const client = new QueryClient();
+    vi.stubGlobal(
+      "fetch",
+      answering({ source: "Stored", config_key: false }).fetch,
+    );
+    const { result } = renderHookWithProviders(
+      () => useManageSupporter("SetSupporterKey"),
+      client,
+    );
+    await act(() => result.current.mutateAsync({ key: "K_supporter_key" }));
+    await flush();
     expect(result.current.variables).toBeUndefined();
     await waitFor(() =>
       expect(client.getMutationCache().getAll()).toHaveLength(0),

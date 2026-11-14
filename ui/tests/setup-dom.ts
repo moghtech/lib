@@ -20,6 +20,13 @@ globalThis.ResizeObserver ??= class {
   disconnect() {}
 };
 Element.prototype.scrollIntoView ??= () => {};
+// Textarea's autosize measures again once the fonts loaded.
+if (!document.fonts) {
+  Object.defineProperty(document, "fonts", {
+    value: Object.assign(new EventTarget(), { ready: Promise.resolve() }),
+    configurable: true,
+  });
+}
 
 afterEach(() => {
   // Not in `globals` mode, so testing-library can't register its own

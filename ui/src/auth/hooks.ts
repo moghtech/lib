@@ -5,13 +5,9 @@
 // package barrel).
 
 import { notifications } from "@mantine/notifications";
-import {
-  useMutation,
-  UseMutationOptions,
-  useQuery,
-} from "@tanstack/react-query";
+import { UseMutationOptions, useQuery } from "@tanstack/react-query";
 import * as MoghAuth from "mogh_auth_client";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import {
   externalLoginState,
   flowReturnError,
@@ -23,6 +19,8 @@ import {
   withoutFlowReturnParams,
 } from "./external-flow";
 import { errorNotificationMessage } from "../errors";
+// Its name inside the package before it was exported.
+import { useSecretMutation as useForgetfulMutation } from "../secret-mutation";
 import { type PasskeyRequest, passkeyRequestFromParam } from "./passkey-login";
 import {
   SEND_REJECTED_ONCE,
@@ -184,54 +182,8 @@ export function useTrustedIssuers(options?: { enabled?: boolean }) {
 }
 
 /**
- * `useMutation` for the auth requests, which forgets each request once
- * it settled and the caller's callbacks ran: its params (a password, a
- * code, a credential) and its answer (a token, TOTP recovery codes, a
- * new key's secret, a passkey challenge). React-query keeps both in the
- * hook's state, and keeps a finished mutation in the query client's
- * cache for 5 minutes by default, where anything running on the page
- * could still read them after the dialog showing them closed. So the
- * hook resets once its last request in flight settled, and its
- * mutations have `gcTime: 0`: unobserved, the cache drops them at once,
- * whatever the app's query client defaults.
- *
- * What a caller does with the answer (or the failure) goes in the
- * hook's callbacks (`onSuccess`, `onError`, `onSettled`), or after the
- * `mutateAsync` promise: `data`, `error` and `variables` are gone by
- * then, and a callback passed to `mutate` itself doesn't run.
- */
-function useForgetfulMutation<TData, TError, TVariables, TOnMutateResult>(
-  options: UseMutationOptions<TData, TError, TVariables, TOnMutateResult>,
-) {
-  // Overlapping requests (eg. a second click before the first
-  // answered) are a mutation each, and the hook observes the latest:
-  // reset once the last one settled, so it stays pending while any is.
-  const forget = useRef({ inFlight: 0, reset: () => {} });
-  const mutation = useMutation({
-    ...options,
-    gcTime: 0,
-    onMutate: (variables, context) => {
-      forget.current.inFlight++;
-      return options.onMutate?.(variables, context) as
-        TOnMutateResult | Promise<TOnMutateResult>;
-    },
-    onSettled: async (...args) => {
-      try {
-        await options.onSettled?.(...args);
-      } finally {
-        const settled = forget.current;
-        settled.inFlight = Math.max(0, settled.inFlight - 1);
-        if (settled.inFlight === 0) settled.reset();
-      }
-    },
-  });
-  forget.current.reset = mutation.reset;
-  return mutation;
-}
-
-/**
  * A login request, its failure notified. Forgotten once it settled (see
- * `useForgetfulMutation`): use the answer in `onSuccess` or from the
+ * `useSecretMutation`): use the answer in `onSuccess` or from the
  * `mutateAsync` promise, not from `data`.
  */
 export function useLogin<
@@ -299,7 +251,7 @@ export function useUserId(options?: { enabled?: boolean }) {
  * A manage request (with the signed in user's token), its failure
  * notified; one refused for an old login sends the user to log in
  * again (`setOnReauthenticationRequired`). Forgotten once it settled
- * (see `useForgetfulMutation`): use the answer in `onSuccess` or from
+ * (see `useSecretMutation`): use the answer in `onSuccess` or from
  * the `mutateAsync` promise, not from `data` / `error`.
  */
 export function useManageAuth<
