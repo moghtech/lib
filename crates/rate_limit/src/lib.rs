@@ -474,8 +474,12 @@ pub type RateLimiter = KeyedRateLimiter<()>;
 /// up: a client trying a new key gets a new budget, and makes the
 /// limiter hold another entry (up to
 /// [RateLimiterBuilder::max_entries], then the oldest are dropped).
-/// Key only what is known to exist (eg. one key for every unknown
-/// resource), so made up keys share one budget.
+/// One key for everything unknown (eg. every unknown resource)
+/// makes made up keys share one budget and one entry, but the
+/// answers then tell a known name from an unknown one: the shared
+/// budget runs out while a known name still has its own. Where the
+/// names are no public knowledge, key by what the request names,
+/// known or not, and let `max_entries` bound the map.
 pub struct KeyedRateLimiter<K> {
   /// Only the clients and keys with failures in the window, or
   /// strict attempts, are on the map.

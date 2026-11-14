@@ -141,15 +141,12 @@ are tracked. A task removes the rest once a minute, and at most
 whose failures have all left the window are removed, then the ones whose last
 failure is the oldest.
 
-## Since 3.1
+## Since 3.0
 
 - `KeyedRateLimiter<K>` and the `_using_ip_and_key` variants, see
   [Keyed limiters](#keyed-limiters). `RateLimiter` is now
   `KeyedRateLimiter<()>` (a type alias, everything it had works as before) and
   `RateLimiterBuilder` takes the key type, `()` by default.
-
-## Since 3.0
-
 - A refusal which is not a guess is not counted, see above: an error marked
   `uncounted` (mogh_error 2.0), or a server error (5xx). 5xx used to count
   (2.2.1), and to get the note with their causes hidden per the detail
