@@ -81,8 +81,12 @@ PROVIDERS.invalidate();
   bounds how long a change made elsewhere (directly on the database)
   goes unnoticed. A load which started before an invalidation returns
   its result to its caller, but never caches it.
-- A failed load caches nothing: the next read loads again. The error
-  type is the loader's.
+- A failed load caches nothing. The readers which waited for it share its
+  failure, rather than each loading again in turn (in a database outage, the
+  k-th would answer after k load timeouts): they return `LoadFailed`, at about
+  the time of that one load. The next read loads again. The error type is the
+  loader's, which takes `LoadFailed` (`E: From<LoadFailed>`, as
+  `anyhow::Error` and `mogh_error::Error` do).
 - The value is dropped once it expires, not just hidden until the next
   load: what is cached may be secret (decrypted client secrets, wiped
   on drop), and must not sit in memory for as long as nobody asks

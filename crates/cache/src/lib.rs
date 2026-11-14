@@ -12,7 +12,7 @@ use tokio::{
 
 mod load_cache;
 
-pub use load_cache::LoadCache;
+pub use load_cache::{LoadCache, LoadFailed};
 
 /// Lets concurrent / rapid fire calls of an action share one run
 /// and its result, which is reused for `timeout` after it is set.

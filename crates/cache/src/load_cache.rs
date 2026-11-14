@@ -24,7 +24,9 @@ use tokio::time::Instant;
 ///   by another process) goes unnoticed.
 /// - A load which started before an invalidation returns its result
 ///   to its caller, but never caches it: it may predate the write.
-/// - A failed load caches nothing: the next read loads again.
+/// - A failed load caches nothing. The readers which waited for it
+///   share its failure ([LoadFailed]) rather than each loading again
+///   in turn; the next reader to come loads again.
 /// - The value is dropped once `ttl` is over, not just hidden until
 ///   the next load replaces it: what is cached may be secret (eg.
 ///   decrypted client secrets, wiped on drop), and must not sit in
@@ -84,7 +86,30 @@ pub struct LoadCache<T> {
   /// Concurrent misses await one load instead of each hitting the
   /// database.
   loading: tokio::sync::Mutex<()>,
+  /// Bumped (holding `loading`) by every load which fails: a caller
+  /// which saw a lower count before it waited queued behind a
+  /// failure, and shares it rather than loading again.
+  failures: AtomicU64,
 }
+
+/// The error of a [LoadCache::read_or_load] caller which waited for
+/// another caller's load, which failed: it shares that failure
+/// rather than loading again right away (in a database outage, each
+/// of the callers queued behind a load would otherwise wait for every
+/// load ahead of it to time out). The failing load's own error went
+/// to the caller which ran it. The next call loads again: retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadFailed;
+
+impl std::fmt::Display for LoadFailed {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(
+      "The load this request waited for failed (its error went to the request which ran it): retry",
+    )
+  }
+}
+
+impl std::error::Error for LoadFailed {}
 
 impl<T> LoadCache<T> {
   /// A cache which serves a value for `ttl` after it is loaded.
@@ -97,6 +122,7 @@ impl<T> LoadCache<T> {
       entry: RwLock::new(None),
       generation: AtomicU64::new(0),
       loading: tokio::sync::Mutex::const_new(()),
+      failures: AtomicU64::new(0),
     }
   }
 
@@ -126,10 +152,13 @@ impl<T> LoadCache<T> {
   ///
   /// Concurrent callers which miss wait for one load: the first
   /// loads, and the others read what it cached. A failed load
-  /// returns its error to its caller and caches nothing, so the next
-  /// caller in line loads again. Dropping the returned future (eg. a
-  /// cancelled request) drops its load, and the next caller in line
-  /// loads. A load overtaken by an
+  /// returns its error to its caller and caches nothing, and the
+  /// callers which waited for it share its failure: they return
+  /// [LoadFailed] (into `E`), at about the time of that one load,
+  /// rather than each loading again in turn. Only callers which come
+  /// after the failure load again. Dropping the returned future (eg.
+  /// a cancelled request) drops its load, which is no failure: the
+  /// next caller in line loads. A load overtaken by an
   /// [invalidate](LoadCache::invalidate) returns its result to its
   /// caller, without caching it.
   ///
@@ -149,17 +178,32 @@ impl<T> LoadCache<T> {
   where
     T: Send + Sync,
     F: Future<Output = Result<T, E>>,
+    E: From<LoadFailed>,
   {
     if let Some(read) = self.read(&read) {
       return Ok(read);
     }
+    // Before waiting: a failure counted after this is one of a load
+    // ahead of us.
+    let failures = self.failures.load(Ordering::SeqCst);
     let _loading = self.loading.lock().await;
     // The load ahead of us may have finished while we waited.
     if let Some(read) = self.read(&read) {
       return Ok(read);
     }
+    // Or failed: its outcome is ours too.
+    if self.failures.load(Ordering::SeqCst) != failures {
+      return Err(LoadFailed.into());
+    }
     let generation = self.generation.load(Ordering::SeqCst);
-    let value = load().await?;
+    let value = match load().await {
+      Ok(value) => value,
+      Err(e) => {
+        // Still holding `loading`: every caller waiting now sees it.
+        self.failures.fetch_add(1, Ordering::SeqCst);
+        return Err(e);
+      }
+    };
     let result = read(&value);
     let mut entry =
       self.entry.write().unwrap_or_else(|e| e.into_inner());
@@ -207,6 +251,20 @@ mod tests {
     cache.entry.read().unwrap().is_none()
   }
 
+  /// The error of the loads here: the loader's own, or the one of a
+  /// caller which waited for a load that failed.
+  #[derive(Debug, PartialEq)]
+  enum TestError {
+    Load(&'static str),
+    Waited,
+  }
+
+  impl From<LoadFailed> for TestError {
+    fn from(LoadFailed: LoadFailed) -> TestError {
+      TestError::Waited
+    }
+  }
+
   /// An expired value is dropped (running its `Drop`, which wipes
   /// cached secrets), not merely hidden from readers, without
   /// anyone reading it again.
@@ -221,7 +279,7 @@ mod tests {
     }
     let cache = leak(LoadCache::<Secret>::new(TTL));
     cache
-      .read_or_load(|| async { Ok::<_, ()>(Secret) }, |_| ())
+      .read_or_load(|| async { Ok::<_, TestError>(Secret) }, |_| ())
       .await
       .unwrap();
     tokio::time::sleep(TTL / 2).await;
@@ -236,8 +294,9 @@ mod tests {
   async fn loads_once_until_invalidated() {
     let cache = leak(LoadCache::<Vec<u32>>::new(TTL));
     assert!(cache.read(|value| value.len()).is_none());
-    let load =
-      |value: u32| move || async move { Ok::<_, ()>(vec![value]) };
+    let load = |value: u32| {
+      move || async move { Ok::<_, TestError>(vec![value]) }
+    };
     let first = cache.read_or_load(load(1), Vec::clone).await;
     assert_eq!(first.unwrap(), [1]);
     // Served from memory: the loader is not consulted.
@@ -253,20 +312,29 @@ mod tests {
   async fn expired_and_failed_loads_are_not_served() {
     let cache = leak(LoadCache::<u32>::new(Duration::ZERO));
     cache
-      .read_or_load(|| async { Ok::<_, ()>(1) }, |value| *value)
+      .read_or_load(
+        || async { Ok::<_, TestError>(1) },
+        |value| *value,
+      )
       .await
       .unwrap();
     assert!(cache.read(|value| *value).is_none());
 
     let cache = leak(LoadCache::<u32>::new(TTL));
     let failed = cache
-      .read_or_load(|| async { Err("database down") }, |value| *value)
+      .read_or_load(
+        || async { Err(TestError::Load("database down")) },
+        |value| *value,
+      )
       .await;
-    assert_eq!(failed, Err("database down"));
+    assert_eq!(failed, Err(TestError::Load("database down")));
     assert!(is_empty(cache));
     // The next read loads again.
     let loaded = cache
-      .read_or_load(|| async { Ok::<_, &str>(2) }, |value| *value)
+      .read_or_load(
+        || async { Ok::<_, TestError>(2) },
+        |value| *value,
+      )
       .await;
     assert_eq!(loaded, Ok(2));
   }
@@ -280,7 +348,7 @@ mod tests {
       .read_or_load(
         || async {
           cache.invalidate();
-          Ok::<_, ()>(1)
+          Ok::<_, TestError>(1)
         },
         |value| *value,
       )
@@ -298,7 +366,7 @@ mod tests {
     let load = || async {
       LOADS.fetch_add(1, Ordering::SeqCst);
       tokio::time::sleep(Duration::from_secs(1)).await;
-      Ok::<_, ()>(7)
+      Ok::<_, TestError>(7)
     };
     let readers = (0..10)
       .map(|_| tokio::spawn(cache.read_or_load(load, |value| *value)))
@@ -307,6 +375,81 @@ mod tests {
       assert_eq!(reader.await.unwrap(), Ok(7));
     }
     assert_eq!(LOADS.load(Ordering::SeqCst), 1);
+  }
+
+  /// Callers which queued behind a failing load share its failure,
+  /// rather than each loading again in turn: during a database
+  /// outage the k-th would answer after k load timeouts. Only callers
+  /// arriving after the failure load again.
+  #[tokio::test(start_paused = true)]
+  async fn waiters_share_a_failed_load() {
+    static LOADS: AtomicUsize = AtomicUsize::new(0);
+    const LOAD_TIME: Duration = Duration::from_secs(30);
+    let cache = leak(LoadCache::<u32>::new(TTL));
+    let failing = || async {
+      LOADS.fetch_add(1, Ordering::SeqCst);
+      tokio::time::sleep(LOAD_TIME).await;
+      Err::<u32, _>(TestError::Load("database down"))
+    };
+    let start = Instant::now();
+    // The first loads, the ten others miss while it is in flight.
+    let callers = (0..11)
+      .map(|_| {
+        tokio::spawn(async move {
+          let res = cache.read_or_load(failing, |value| *value).await;
+          (res, start.elapsed())
+        })
+      })
+      .collect::<Vec<_>>();
+    let mut waited = 0;
+    for caller in callers {
+      let (res, elapsed) = caller.await.unwrap();
+      // All at about one load's time.
+      assert!(
+        elapsed < LOAD_TIME + Duration::from_secs(1),
+        "{elapsed:?}"
+      );
+      match res {
+        Err(TestError::Load(_)) => {}
+        Err(TestError::Waited) => waited += 1,
+        Ok(_) => panic!("loaded"),
+      }
+    }
+    assert_eq!(waited, 10);
+    assert_eq!(LOADS.load(Ordering::SeqCst), 1);
+    assert!(is_empty(cache));
+    // A caller arriving after the failure loads again.
+    let again = cache
+      .read_or_load(
+        || async { Ok::<_, TestError>(3) },
+        |value| *value,
+      )
+      .await;
+    assert_eq!(again, Ok(3));
+  }
+
+  /// A load dropped with its caller (a cancelled request) is no
+  /// failure: the next caller in line loads, rather than share one.
+  #[tokio::test(start_paused = true)]
+  async fn a_dropped_load_is_no_failure_to_share() {
+    let cache = leak(LoadCache::<u32>::new(TTL));
+    let slow = || async {
+      tokio::time::sleep(Duration::from_secs(30)).await;
+      Ok::<_, TestError>(1)
+    };
+    let first =
+      tokio::spawn(cache.read_or_load(slow, |value| *value));
+    // Queued behind the first's load.
+    tokio::task::yield_now().await;
+    let waiter = tokio::spawn(cache.read_or_load(
+      || async { Ok::<_, TestError>(2) },
+      |value| *value,
+    ));
+    tokio::task::yield_now().await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert_eq!(waiter.await.unwrap(), Ok(2));
+    assert_eq!(cache.read(|value| *value), Some(2));
   }
 
   /// Outside a tokio runtime no task could drop the value at
@@ -321,7 +464,7 @@ mod tests {
     let cache = leak(LoadCache::<u32>::new(TTL));
     for value in [1, 2] {
       let read = pin!(cache.read_or_load(
-        || async move { Ok::<_, ()>(value) },
+        || async move { Ok::<_, TestError>(value) },
         |value| *value
       ));
       // Nothing to wait for: ready on the first poll.
@@ -340,7 +483,8 @@ mod tests {
   #[tokio::test(start_paused = true)]
   async fn a_sweep_leaves_a_newer_value() {
     let cache = leak(LoadCache::<u32>::new(TTL));
-    let load = |value: u32| move || async move { Ok::<_, ()>(value) };
+    let load =
+      |value: u32| move || async move { Ok::<_, TestError>(value) };
     cache.read_or_load(load(1), |value| *value).await.unwrap();
     tokio::time::sleep(TTL / 2).await;
     cache.invalidate();
