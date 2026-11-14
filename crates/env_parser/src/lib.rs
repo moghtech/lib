@@ -13,7 +13,9 @@
 //!   `NAME=value` lines, `#` comments (those directly above an entry
 //!   are its description), an `export ` prefix accepted, values
 //!   unquoted, single quoted (literal) or double quoted with `\n` /
-//!   `\r` / `\t` / `\"` / `\\` escapes. Nothing is substituted in a
+//!   `\r` / `\t` / `\"` / `\\` / `\uXXXX` escapes (the serializer
+//!   writes the line breaks of other dotenv parsers as `\uXXXX`, so
+//!   no value holds a raw one). Nothing is substituted in a
 //!   value: `${VAR}` and `$(cmd)` are kept as written, since env
 //!   file values are secrets, not templates.
 //! - [parse_env_file_object]: the entries as a configuration

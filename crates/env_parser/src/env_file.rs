@@ -11,7 +11,7 @@
 //! are skipped, an `export ` prefix is accepted, and a value is
 //! unquoted (taken literally to the end of the line, trimmed),
 //! single quoted (literal) or double quoted with `\n` / `\r` / `\t`
-//! / `\"` / `\\` escapes. Nothing is substituted inside a value:
+//! / `\"` / `\\` / `\uXXXX` escapes. Nothing is substituted inside a value:
 //! `${VAR}` and `$(cmd)` are kept as written, since env file values
 //! are secrets and never templates.
 //!
@@ -255,7 +255,11 @@ fn conflict(
 
 /// A value after `=`, already trimmed: unquoted (taken literally to
 /// the end of the line), single quoted (literal), or double quoted
-/// with escapes. `name` is the entry's, for the errors.
+/// with escapes: `\n`, `\r`, `\t`, `\"`, `\\`, and `\uXXXX` (four
+/// hex digits, in any case, of a character: not a surrogate). Any
+/// other escape, or a `\u` not followed by four hex digits of a
+/// character, is an error naming the entry, never the escaped text.
+/// `name` is the entry's, for the errors.
 fn parse_value(
   value: &str,
   name: &str,
@@ -273,6 +277,20 @@ fn parse_value(
             Some('t') => out.push('\t'),
             Some('"') => out.push('"'),
             Some('\\') => out.push('\\'),
+            Some('u') => {
+              let Some(c) = unicode_escape(&mut chars) else {
+                // The digits are part of the (secret) value too.
+                return Err(error(
+                  line,
+                  format!(
+                    "malformed `\\uXXXX` escape in the value of \
+                     `{name}`: four hex digits of a character (not a \
+                     surrogate) follow `\\u`"
+                  ),
+                ));
+              };
+              out.push(c);
+            }
             // The escaped character is part of the (secret) value,
             // and so is where it sits, so the message names neither.
             Some(_) => {
@@ -281,7 +299,8 @@ fn parse_value(
                 format!(
                   "unsupported escape in the value of `{name}`: \
                    a double quoted value takes `\\n`, `\\r`, `\\t`, \
-                   `\\\"` and `\\\\` (a literal backslash)"
+                   `\\\"`, `\\\\` (a literal backslash) and \
+                   `\\uXXXX`"
                 ),
               ));
             }
@@ -329,6 +348,17 @@ fn parse_value(
   }
 }
 
+/// The character of a `\uXXXX` escape, its four hex digits taken
+/// from `chars` (after the `\u`). `None` when they aren't four hex
+/// digits, or name a surrogate (no character).
+fn unicode_escape(chars: &mut std::str::Chars<'_>) -> Option<char> {
+  let mut code = 0;
+  for _ in 0..4 {
+    code = code * 16 + chars.next()?.to_digit(16)?;
+  }
+  char::from_u32(code)
+}
+
 /// Whether [serialize_env_file] can write a name such that
 /// [parse_env_file] reads it back: not empty, without whitespace
 /// around it (names are trimmed), not starting with `#` (a comment),
@@ -372,15 +402,22 @@ pub enum EnvFileSerializeError {
 ///   for other dotenv parsers, which would read the rest of the
 ///   line as an entry.
 /// - A value holding `$` is single quoted when it can be (no `'`,
-///   no line break): Compose's `env_file:`, systemd and dotenv
-///   libraries take a single quoted value literally, where they
-///   would substitute `$NAME` / `${NAME}` in an unquoted or double
-///   quoted one.
+///   no line break of any dotenv parser, see
+///   [normalize_env_description]): Compose's `env_file:`, systemd and
+///   dotenv libraries take a single quoted value literally, where
+///   they would substitute `$NAME` / `${NAME}` in an unquoted or
+///   double quoted one.
 /// - Any other value is double quoted, with `\n` / `\r` / `\t` /
 ///   `\"` / `\\` escapes, when it wouldn't survive unquoted
 ///   (surrounding whitespace is trimmed, `#` starts a comment in
 ///   some dotenv dialects, a leading quote would be read as
-///   quoting), else written as is.
+///   quoting), else written as is. A value holding a character
+///   another dotenv parser ends a line at (VT, FF, FS, GS, RS, NEL,
+///   U+2028, U+2029) is always double quoted, the character written
+///   as its `\uXXXX` escape: raw, it would end the line for Python's
+///   `str.splitlines` (django-environ) or Node's dotenv, which would
+///   read the rest of the value as an entry of its own (another
+///   secret's name, set to what the value says).
 ///
 /// Errors on a name the syntax can't hold, see
 /// [representable_env_name], and on a name given twice.
@@ -470,14 +507,21 @@ fn is_line_break(c: char) -> bool {
 
 /// Writes a value, quoted as [serialize_env_file] describes.
 fn write_value(out: &mut String, value: &str) {
-  if value.contains('$') && !value.contains(['\'', '\n', '\r']) {
+  if value.contains('$')
+    && !value.contains('\'')
+    && !value.contains(is_line_break)
+  {
     out.push('\'');
     out.push_str(value);
     out.push('\'');
     return;
   }
+  // FS, GS and RS are no whitespace to Rust, and line breaks to
+  // other parsers.
   let needs_quoting = value.chars().any(|c| {
-    c.is_whitespace() || matches!(c, '"' | '\'' | '#' | '\\')
+    c.is_whitespace()
+      || is_line_break(c)
+      || matches!(c, '"' | '\'' | '#' | '\\')
   });
   if !needs_quoting {
     out.push_str(value);
@@ -491,6 +535,11 @@ fn write_value(out: &mut String, value: &str) {
       '\t' => out.push_str("\\t"),
       '"' => out.push_str("\\\""),
       '\\' => out.push_str("\\\\"),
+      // The other line breaks of dotenv parsers, see
+      // serialize_env_file.
+      c if is_line_break(c) => {
+        out.push_str(&format!("\\u{:04x}", u32::from(c)))
+      }
       c => out.push(c),
     }
   }
@@ -735,8 +784,10 @@ UNQUOTED=$(not run) ${NOT_EXPANDED} # not a comment
       }
     }
     let serialized = serialize_env_file(&entries).unwrap();
-    // A value's CR is escaped, a description's is a line break.
+    // A value's CR is escaped, a description's is a line break. So
+    // are the other line breaks of dotenv parsers.
     assert!(!serialized.contains('\r'));
+    assert!(!serialized.contains(OTHER_LINE_BREAKS));
     let parsed = parse_env_file(&serialized).unwrap();
     assert_eq!(parsed.len(), entries.len());
     for (parsed, entry) in parsed.iter().zip(&entries) {
@@ -830,9 +881,98 @@ UNQUOTED=$(not run) ${NOT_EXPANDED} # not a comment
     );
   }
 
+  /// The characters other dotenv parsers end a line at, besides
+  /// `\n` and `\r`: VT, FF, FS, GS, RS, NEL, U+2028, U+2029.
+  const OTHER_LINE_BREAKS: [char; 8] = [
+    '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}',
+    '\u{2029}',
+  ];
+
+  /// A value holding a line break of another dotenv parser is written
+  /// double quoted, the character as its `\uXXXX` escape (never raw),
+  /// and parses back to the same value: also a value holding `$`
+  /// (single quoted otherwise), or nothing else to quote.
+  #[test]
+  fn line_breaks_of_other_parsers_are_escaped_in_values() {
+    for c in OTHER_LINE_BREAKS {
+      let escape = format!("\\u{:04x}", u32::from(c));
+      for value in [
+        format!("x{c}DATABASE_URL=postgres://evil"),
+        format!("{c}"),
+        format!("pa$$word{c}B=2"),
+        format!("a {c} \"b\" \\ #c\n"),
+      ] {
+        let serialized =
+          serialize_env_file([entry(0, "A", &value, "")]).unwrap();
+        assert!(
+          !serialized.contains(OTHER_LINE_BREAKS),
+          "{value:?}: {serialized:?}"
+        );
+        assert!(serialized.starts_with("A=\""), "{serialized:?}");
+        assert!(serialized.contains(&escape), "{serialized:?}");
+        let parsed = parse_env_file(&serialized).unwrap();
+        assert_eq!(parsed[0].value, value, "{serialized:?}");
+      }
+    }
+    // Read in any case, any character but a surrogate.
+    let parsed = parse_env_file(
+      "A=\"\\u2028\\u202A\\u202a\\u0041\\uFFFD\\u00e9\"",
+    )
+    .unwrap();
+    assert_eq!(
+      parsed[0].value,
+      "\u{2028}\u{202a}\u{202a}A\u{fffd}\u{e9}"
+    );
+    // A `\u` written as text is a backslash, escaped.
+    let value = "C:\\users\\u2028";
+    let serialized =
+      serialize_env_file([entry(0, "A", value, "")]).unwrap();
+    assert_eq!(serialized, "A=\"C:\\\\users\\\\u2028\"\n");
+    assert_eq!(parse_env_file(&serialized).unwrap()[0].value, value);
+  }
+
+  /// A `\u` not followed by four hex digits of a character is an
+  /// error naming the entry, the same whatever the digits (part of
+  /// the secret value) are.
+  #[test]
+  fn malformed_unicode_escapes_are_errors_naming_no_digits() {
+    let expected = parse_env_file("DB_PASSWORD=\"\\u12\"")
+      .unwrap_err()
+      .to_string();
+    assert!(
+      expected.starts_with(
+        "line 1: malformed `\\uXXXX` escape in the value of `DB_PASSWORD`"
+      ),
+      "{expected}"
+    );
+    for escape in [
+      "\\u",
+      "\\u1",
+      "\\u12",
+      "\\u123",
+      "\\u12g4",
+      "\\u-123",
+      "\\u+123",
+      "\\u 123",
+      "\\uD800",
+      "\\udfff",
+      "\\u١٢٣٤",
+    ] {
+      for file in [
+        format!("DB_PASSWORD=\"{escape}\""),
+        format!("DB_PASSWORD=\"p4ss{escape}w0rd\""),
+      ] {
+        let err = parse_env_file(&file).unwrap_err();
+        assert_eq!(err.line, 1);
+        assert_eq!(err.to_string(), expected, "{file:?}");
+      }
+    }
+  }
+
   /// The lines other dotenv parsers read: each line break of any of
-  /// them inside a description stays inside a comment line, so no
-  /// text of a description is an entry to them.
+  /// them inside a description stays inside a comment line, and
+  /// inside a value it is escaped, so no text of a description or a
+  /// value is an entry to them.
   #[test]
   fn descriptions_are_comments_to_other_parsers() {
     let serialized = serialize_env_file([
@@ -844,6 +984,18 @@ UNQUOTED=$(not run) ${NOT_EXPANDED} # not a comment
         B=2\u{2028}C=3\u{2029}D=4\u{85}E=5\x0bF=6\x0cG=7\x1cH=8",
       ),
       entry(0, "OTHER", "x", ""),
+      // The values: VT, FF, NEL, U+2028 and U+2029 are whitespace to
+      // the serializer, FS, GS and RS are not (and were written
+      // unquoted, raw).
+      entry(
+        0,
+        "VALUE",
+        "x\u{2028}API_URL=https://evil.example\u{2029}B=2\u{85}C=3\
+        \x0bD=4\x0cE=5",
+        "",
+      ),
+      entry(0, "BARE", "x\x1cF=6\x1dG=7\x1eH=8", ""),
+      entry(0, "DOLLAR", "$x\u{2028}I=9", ""),
     ])
     .unwrap();
     let lines = serialized
@@ -867,6 +1019,9 @@ UNQUOTED=$(not run) ${NOT_EXPANDED} # not a comment
         "# H=8",
         "KEY=value",
         "OTHER=x",
+        "VALUE=\"x\\u2028API_URL=https://evil.example\\u2029B=2\\u0085C=3\\u000bD=4\\u000cE=5\"",
+        "BARE=\"x\\u001cF=6\\u001dG=7\\u001eH=8\"",
+        "DOLLAR=\"$x\\u2028I=9\"",
       ]
     );
   }
@@ -965,7 +1120,7 @@ UNQUOTED=$(not run) ${NOT_EXPANDED} # not a comment
     assert!(!expected.contains("\\q"), "{expected}");
     let escaped = ('!'..='~')
       .chain([' ', 'é', '€', '😀'])
-      .filter(|c| !matches!(c, 'n' | 'r' | 't' | '"' | '\\'));
+      .filter(|c| !matches!(c, 'n' | 'r' | 't' | '"' | '\\' | 'u'));
     for c in escaped {
       for file in [
         format!("DB_PASSWORD=\"\\{c}\""),

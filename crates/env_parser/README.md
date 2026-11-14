@@ -47,14 +47,23 @@ An env file is a flat set of `NAME=value` lines.
 - `#` lines are comments, and those directly above an entry are its description (an empty line detaches them).
 - Empty lines are skipped.
 - An `export ` prefix is accepted.
-- a value is unquoted (taken literally to the end of the line minus whitespace), single quoted (literal), or double quoted with `\n` / `\r` / `\t` / `\"` /
-`\\` escapes.
+- A value is unquoted (taken literally to the end of the line minus whitespace), single quoted (literal), or double quoted with escapes:
+  `\n`, `\r`, `\t`, `\"`, `\\` (a literal backslash), and `\uXXXX`: four hex digits (in any case) of a character, eg. `\u2028`.
+  Any other escape is an error, and so is a `\u` not followed by four hex digits of a character (a surrogate, `\ud800`, is none):
+  the error names the line and the entry, never the escaped text, which is part of the (secret) value.
 - Nothing is substituted inside a value. `${VAR}` and `$(cmd)` are kept as written.
 - A name given twice is an error.
 
 `parse_env_file` reads a file into its entries. `serialize_env_file` writes entries back,
 with values holding `$` single quoted, any other value double quoted when it wouldn't survive
-unquoted.
+unquoted. Other dotenv parsers end a line at more characters than `\n` and `\r`: VT, FF, FS, GS,
+RS and NEL (Python's `str.splitlines`, which django-environ reads with), U+2028 and U+2029 (Node's
+dotenv). Raw inside a value, the rest of the value would be an entry of its own to them (`x<U+2028>DATABASE_URL=...`):
+`serialize_env_file` writes a value holding one double quoted, the character as its `\uXXXX`
+escape (`\u2028`), so every parser reads the value on its line, and this parser reads it back
+unchanged (another parser reads the escape by its own grammar: python-dotenv decodes it, Node's
+dotenv keeps the six characters). Descriptions turn them into line breaks of their comment lines
+(`normalize_env_description`).
 
 ```rust
 use mogh_env_parser::{EnvFileEntry, parse_env_file, serialize_env_file};
