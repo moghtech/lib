@@ -30,6 +30,11 @@ use crate::ui::content_hash;
 /// `utoipa::openapi::OpenApi` of a `#[derive(utoipa::OpenApi)]`
 /// type. `title` is the page title.
 ///
+/// Under an app's `Content-Security-Policy`
+/// ([crate::ServerConfig::content_security_policy]) the page is
+/// answered with the policy plus the sources it loads, see
+/// [crate::docs_content_security_policy].
+///
 /// ```
 /// use axum::Router;
 ///
@@ -51,7 +56,13 @@ pub fn serve_docs(title: &str, spec: &impl Serialize) -> Router {
       "/docs",
       get(move || {
         let page = page.clone();
-        async move { Html(page) }
+        async move {
+          // Marked, so `configure_app` allows the sources the page
+          // loads in the app's Content-Security-Policy.
+          let mut response = Html(page).into_response();
+          response.extensions_mut().insert(crate::DocsPage);
+          response
+        }
       }),
     )
     .route(
@@ -227,6 +238,55 @@ mod tests {
       .await
       .unwrap()
       .to_vec()
+  }
+
+  /// Under an app's Content-Security-Policy the page is answered
+  /// with the sources it loads; the spec route with the app's policy.
+  #[tokio::test]
+  async fn the_page_gets_its_sources_under_the_apps_policy() {
+    struct Policy;
+    impl crate::ServerConfig for Policy {
+      fn port(&self) -> u16 {
+        0
+      }
+      fn content_security_policy(&self) -> &str {
+        "default-src 'self'"
+      }
+    }
+    let policy_of = async |path: &str| {
+      let app =
+        crate::configure_app(serve_docs("Test", &spec()), &Policy)
+          .unwrap();
+      app
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .headers()[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap()
+        .to_string()
+    };
+    let page = policy_of("/docs").await;
+    assert_eq!(
+      page,
+      crate::docs_content_security_policy("default-src 'self'")
+    );
+    // The bundle of docs.html comes from the script source, and its
+    // fonts from the font source.
+    assert!(
+      include_str!("docs.html")
+        .contains("src=\"https://cdn.jsdelivr.net/npm/@scalar/")
+    );
+    assert!(page.contains(
+      "script-src 'self' https://cdn.jsdelivr.net/npm/@scalar/"
+    ));
+    assert!(
+      page.contains("font-src 'self' https://fonts.scalar.com")
+    );
+    assert_eq!(
+      policy_of("/docs/openapi.json").await,
+      "default-src 'self'"
+    );
   }
 
   #[tokio::test]

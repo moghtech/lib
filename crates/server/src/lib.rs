@@ -1,6 +1,4 @@
-use std::{
-  net::SocketAddr, str::FromStr as _, sync::Arc, time::Duration,
-};
+use std::{net::SocketAddr, str::FromStr as _, time::Duration};
 
 use anyhow::Context as _;
 use axum::{
@@ -9,14 +7,7 @@ use axum::{
   middleware::from_fn,
 };
 use axum_server::{
-  Handle,
-  accept::DefaultAcceptor,
-  tls_rustls::{RustlsAcceptor, RustlsConfig},
-};
-use rustls::{
-  ServerConfig as TlsServerConfig,
-  crypto::CryptoProvider,
-  pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _},
+  Handle, accept::DefaultAcceptor, tls_rustls::RustlsAcceptor,
 };
 use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::info;
@@ -42,6 +33,7 @@ pub mod cors;
 pub mod openapi;
 pub mod session;
 mod timeout;
+mod tls;
 pub mod ui;
 
 pub trait ServerConfig {
@@ -52,6 +44,10 @@ pub trait ServerConfig {
   /// Serve https with the PEM [cert][Self::ssl_cert_file] /
   /// [key][Self::ssl_key_file] files. The rustls crypto provider
   /// installed as the process default is used, else aws-lc-rs.
+  ///
+  /// A renewed pair (eg. by certbot or cert-manager, written to the
+  /// same paths) is served to new connections without a restart, see
+  /// [Self::ssl_reload_interval].
   fn ssl_enabled(&self) -> bool {
     false
   }
@@ -60,6 +56,22 @@ pub trait ServerConfig {
   }
   fn ssl_cert_file(&self) -> &str {
     "/config/ssl/cert.pem"
+  }
+  /// How often [serve_app] checks the [cert][Self::ssl_cert_file] /
+  /// [key][Self::ssl_key_file] files for a renewed pair: when either
+  /// file's modification time or size changed, or the certificate's
+  /// contents, the pair is loaded as at startup (with the same crypto
+  /// provider) and served to the connections accepted from then on.
+  /// Open connections keep the certificate they were opened with.
+  ///
+  /// A pair which doesn't load (a file missing or half written, a key
+  /// which isn't the certificate's) keeps the served one, with a
+  /// warning logged once for that state of the files, not at every
+  /// check. The check runs while the server does, and ends with it.
+  ///
+  /// Default: 60 seconds. `None` reads the files once, at startup.
+  fn ssl_reload_interval(&self) -> Option<Duration> {
+    Some(Duration::from_secs(60))
   }
   /// `X-Content-Type-Options` header value.
   /// Default is `nosniff`. Set as empty string
@@ -73,10 +85,21 @@ pub trait ServerConfig {
   fn x_frame_options(&self) -> &str {
     "DENY"
   }
-  /// `X-XSS-PROTECTION` header value. Return an empty string to
-  /// omit the header entirely. Default: `1; mode=block`
+  /// `X-XSS-Protection` header value. Return an empty string to
+  /// omit the header entirely. Default: `0`, the browser's XSS
+  /// auditor off.
+  ///
+  /// Current browsers have no auditor (Chromium removed it, Firefox
+  /// never had one). In the old ones which still do (old Safari,
+  /// legacy Edge, embedded webviews), `1; mode=block` blocked a page
+  /// whose response looked like it reflected the request: a page of
+  /// another site could then probe the app's pages cross-origin by
+  /// what got blocked. OWASP and MDN advise `0`, with a
+  /// [Content-Security-Policy][Self::content_security_policy] against
+  /// XSS instead. Before mogh_server 4.0 the default was
+  /// `1; mode=block`, still available here.
   fn x_xss_protection(&self) -> &str {
-    "1; mode=block"
+    "0"
   }
   /// Apply Referrer Policy directives.
   /// If empty string, no header is applied.
@@ -90,6 +113,14 @@ pub trait ServerConfig {
   ///
   /// Example, the policy a UI built with mogh_ui needs (see its README):
   /// `default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'`
+  ///
+  /// The header is set on every response which doesn't set one
+  /// itself: a route's own `Content-Security-Policy` wins. The
+  /// `openapi` feature's `/docs` page (`openapi::serve_docs`) gets
+  /// this policy with the sources of the Scalar bundle that page
+  /// loads from jsDelivr, and of the fonts the bundle loads, added
+  /// ([docs_content_security_policy]), so the UI's pages don't
+  /// share them and `/docs` still works under the policy.
   fn content_security_policy(&self) -> &str {
     ""
   }
@@ -183,6 +214,54 @@ pub trait ServerConfig {
   }
 }
 
+/// A response extension which marks the `/docs` page of
+/// `openapi::serve_docs`: [configure_app] answers it with
+/// [docs_content_security_policy] of the app's policy. An app's own
+/// page which loads the same bundle can carry it too.
+#[derive(Debug, Clone, Copy)]
+pub struct DocsPage;
+
+/// The `Content-Security-Policy` of the `/docs` page under the app's
+/// `policy`: the policy, with the Scalar bundle the page loads from
+/// jsDelivr allowed as a script source and the fonts the bundle
+/// loads as a font source. Without the script source `/docs` is a
+/// blank page; without the font source it renders in the browser's
+/// fonts. The path in the script source keeps the rest of jsDelivr
+/// out.
+///
+/// A `script-src` / `font-src` directive which `policy` sets itself
+/// is left as it is (a second directive of a name is ignored by
+/// browsers): an app with its own names the sources there. An empty
+/// policy stays empty.
+pub fn docs_content_security_policy(policy: &str) -> String {
+  const SOURCES: [(&str, &str); 2] = [
+    ("script-src", "'self' https://cdn.jsdelivr.net/npm/@scalar/"),
+    ("font-src", "'self' https://fonts.scalar.com"),
+  ];
+  let policy = policy.trim().trim_end_matches(';').trim_end();
+  if policy.is_empty() {
+    return String::new();
+  }
+  let has_directive = |name: &str| {
+    policy.split(';').any(|directive| {
+      directive
+        .split_ascii_whitespace()
+        .next()
+        .is_some_and(|first| first.eq_ignore_ascii_case(name))
+    })
+  };
+  let mut docs = policy.to_string();
+  for (name, sources) in SOURCES {
+    if !has_directive(name) {
+      docs.push_str("; ");
+      docs.push_str(name);
+      docs.push(' ');
+      docs.push_str(sources);
+    }
+  }
+  docs
+}
+
 /// Applies a security header layer to the app,
 /// unless the configured value is an empty string.
 fn apply_security_header(
@@ -236,12 +315,29 @@ pub fn configure_app(
     config.x_xss_protection(),
     "Invalid x_xss_protection value",
   )?;
-  app = apply_security_header(
-    app,
-    header::CONTENT_SECURITY_POLICY,
-    config.content_security_policy(),
-    "Invalid content_security_policy value",
-  )?;
+  let policy = config.content_security_policy();
+  if !policy.is_empty() {
+    let page = HeaderValue::from_str(policy)
+      .context("Invalid content_security_policy value")?;
+    let docs =
+      HeaderValue::from_str(&docs_content_security_policy(policy))
+        .context("Invalid content_security_policy value")?;
+    // Not overriding, unlike the other headers: a route which sets
+    // its own policy keeps it, and the docs page gets the sources it
+    // loads without the app's other pages sharing them.
+    app = app.layer(SetResponseHeaderLayer::if_not_present(
+      header::CONTENT_SECURITY_POLICY,
+      move |response: &axum::response::Response| {
+        let docs_page =
+          response.extensions().get::<DocsPage>().is_some();
+        Some(if docs_page {
+          docs.clone()
+        } else {
+          page.clone()
+        })
+      },
+    ));
+  }
   app = apply_security_header(
     app,
     header::REFERRER_POLICY,
@@ -257,7 +353,9 @@ pub fn configure_app(
 /// Clients which don't send the headers of a request in time are
 /// disconnected, see [ServerConfig::header_read_timeout], and a body
 /// which doesn't arrive in time is answered 408, see
-/// [ServerConfig::request_body_timeout].
+/// [ServerConfig::request_body_timeout]. Over https, a renewed cert
+/// / key pair is served without a restart, see
+/// [ServerConfig::ssl_reload_interval].
 pub async fn serve_app(
   app: Router,
   config: impl ServerConfig,
@@ -278,9 +376,16 @@ pub async fn serve_app(
     // Run the server with TLS (https)
     info!("🔒 Server SSL Enabled");
     info!("Server starting on https://{socket_addr}");
-    let ssl_config =
-      rustls_config(config.ssl_cert_file(), config.ssl_key_file())
-        .context("Invalid ssl cert / key")?;
+    // `_reload` ends the reload task with the server (also when this
+    // future is dropped).
+    let (ssl_config, _reload) = tls::serve_tls_files(
+      tls::TlsFiles::new(
+        config.ssl_cert_file(),
+        config.ssl_key_file(),
+      ),
+      config.ssl_reload_interval(),
+    )
+    .context("Invalid ssl cert / key")?;
     let mut server = axum_server::bind(socket_addr).acceptor(
       timeout::HeaderTimeoutAcceptor {
         inner: RustlsAcceptor::new(ssl_config),
@@ -320,46 +425,4 @@ pub async fn serve_app(
       .await
       .context("Failed to start http server")
   }
-}
-
-/// Builds the https config from the PEM cert / key files.
-///
-/// `RustlsConfig::from_pem_file` lets rustls pick the crypto
-/// provider from its crate features, which panics when both
-/// `ring` and `aws-lc-rs` end up in the binary (eg together with
-/// mogh_auth_server). Instead use the provider the app installed
-/// as process default, else aws-lc-rs (what axum-server enables).
-fn rustls_config(
-  cert_file: &str,
-  key_file: &str,
-) -> anyhow::Result<RustlsConfig> {
-  let certs = CertificateDer::pem_file_iter(cert_file)
-    .with_context(|| {
-      format!("Failed to read ssl cert file at {cert_file}")
-    })?
-    .collect::<Result<Vec<_>, _>>()
-    .with_context(|| {
-      format!("Failed to parse ssl cert file at {cert_file}")
-    })?;
-  anyhow::ensure!(
-    !certs.is_empty(),
-    "No certificate in ssl cert file at {cert_file}"
-  );
-  let key =
-    PrivateKeyDer::from_pem_file(key_file).with_context(|| {
-      format!("Failed to read ssl key file at {key_file}")
-    })?;
-  let provider =
-    CryptoProvider::get_default().cloned().unwrap_or_else(|| {
-      Arc::new(rustls::crypto::aws_lc_rs::default_provider())
-    });
-  let mut config = TlsServerConfig::builder_with_provider(provider)
-    .with_safe_default_protocol_versions()
-    .context("Unsupported TLS crypto provider")?
-    .with_no_client_auth()
-    .with_single_cert(certs, key)
-    .context("Failed to use ssl cert / key")?;
-  // Same as axum-server's own configs.
-  config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-  Ok(RustlsConfig::from_config(Arc::new(config)))
 }

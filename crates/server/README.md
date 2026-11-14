@@ -28,15 +28,22 @@ let app = Router::new()
 mogh_server::serve_app(app, Config, None).await?;
 ```
 
-`serve_app` applies the security headers (`X-Content-Type-Options`,
-`X-Frame-Options`, `X-XSS-Protection`, `Referrer-Policy`, optional
-`Content-Security-Policy`) and the `ServerConfig::trusted_proxies` layer, which
+`serve_app` applies the security headers (`X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY`, `X-XSS-Protection: 0`, `Referrer-Policy:
+strict-origin-when-cross-origin`, optional `Content-Security-Policy`; each
+configurable, an empty value leaves the header out) and the
+`ServerConfig::trusted_proxies` layer, which
 decides which socket peers may set the client ip through `X-Forwarded-For` /
 `X-Real-IP`. `ServerConfig::trusted_proxies` returns a `Result`: pipe the
 config list through `TrustedProxies::from_config`, and an invalid entry fails
 the startup ("Invalid 'trusted_proxies' config") instead of falling back to
 another policy. Use `configure_app` to apply the same layers when serving the
 app yourself.
+
+`X-XSS-Protection` defaults to `0` (since 4.0, was `1; mode=block`): current
+browsers have no XSS auditor, and in the old ones which do, `1; mode=block`
+let another site probe the app's pages by what the auditor blocked. OWASP and
+MDN advise `0`, with a `Content-Security-Policy` against XSS instead.
 
 `serve_app` disconnects clients which don't send the headers of a request within
 `ServerConfig::header_read_timeout` (default 30 seconds, `None` to wait without
@@ -83,6 +90,20 @@ crypto provider the app installed as process default
 of rustls' `ring` and `aws-lc-rs` features end up in the binary (eg together
 with `mogh_auth_server`), where rustls can't pick one by itself.
 
+A renewed pair is served without a restart: every
+`ServerConfig::ssl_reload_interval` (default 60 seconds) `serve_app` checks the
+two files, and when either's modification time or size changed, or the
+certificate's contents, it loads the pair as at startup (same crypto provider)
+and serves it to the connections accepted from then on. Open connections keep
+the certificate they were opened with. This covers certbot or cert-manager
+writing a renewed certificate (eg. every 60 of its 90 days, or every day for an
+internal CA) to the same paths, by copying over them or switching symlinks. A
+pair which doesn't load (a file missing or half written, a key which isn't the
+certificate's) keeps the served one, with a warning logged once for that state
+of the files, not at every check; the next change is checked again. The check
+ends with the server. `None` reads the files once, at startup: restart the app
+to serve a renewed pair then.
+
 ### Session
 
 `session::memory_session_layer` adds the session layer used by the Mogh Auth
@@ -124,12 +145,31 @@ load of the docs. The page hides Scalar's models section for the same reason,
 and sends "Send request" straight to the server rather than through Scalar's
 proxy. See `src/openapi/README.md` to bump the pinned Scalar version.
 
+The page loads Scalar from jsDelivr, and Scalar its fonts from
+`fonts.scalar.com`. Under an app's `Content-Security-Policy`
+(`ServerConfig::content_security_policy`) the `/docs` page alone is answered
+with the policy plus both sources (`docs_content_security_policy`), so the
+app's other pages don't share them:
+
+```text
+script-src 'self' https://cdn.jsdelivr.net/npm/@scalar/; font-src 'self' https://fonts.scalar.com
+```
+
+A policy which sets `script-src` / `font-src` itself is left as it is: name
+the sources there. The policy header is set only on a response which has
+none, so a route may answer with a policy of its own.
+
+Without the `script-src`, `/docs` is a blank page (the browser console shows the
+refusal); without the `font-src`, it renders in the browser's fonts. The path in
+the `script-src` source keeps the rest of jsDelivr out of the UI's pages, which
+share the policy.
+
 ### Static UI
 
 `ui::serve_static_ui` serves a static UI directory, answering paths without a
-file (`/`, client side routes) with its `index.html`. The index is always served
-in full with `Cache-Control: no-cache` and the content hash as `ETag`, so
-browsers pick up a new UI right after an upgrade. Without an `index.html` (a
+file (`/`, client side routes) and `/index.html` itself with its `index.html`.
+The index is always served in full with `Cache-Control: no-cache` and the
+content hash as `ETag`, so browsers pick up a new UI right after an upgrade. Without an `index.html` (a
 wrong `ui_path`, an install without the UI) those paths answer 404, and an error
 naming `ui_path` is logged on startup.
 

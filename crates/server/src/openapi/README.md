@@ -44,7 +44,14 @@ URL resolves to whatever is latest). To bump it:
    browser. The page must render, and the network tab should show
    `openapi.json` served gzipped, and revalidated (304) on reload.
    Check the browser console too, Scalar warns there about deprecated
-   config options.
+   config options. Load the page once more under the
+   `Content-Security-Policy` the page gets from `configure_app`
+   (mogh_ui's policy plus `script-src` / `font-src`, see
+   `docs_content_security_policy`): the console must show no refusal.
+   If the new Scalar loads from another host (eg. its fonts), update
+   the sources in `docs_content_security_policy`, its test and the
+   README, and say so in the release notes: operators whose policy
+   sets `script-src` / `font-src` itself must change it.
 5. Release a new `mogh_server` and bump the apps.
 
 Notes:

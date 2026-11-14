@@ -51,7 +51,7 @@ fn with_index_fallback(
 
 /// Serves the static UI directory, which must have an `index.html`
 /// to use as the root. Paths without a file (`/`, client side
-/// routes) get the index.
+/// routes) and `/index.html` itself get the index.
 ///
 /// The files under `/assets` (vite's content hashed output) are
 /// served with `Cache-Control: public, max-age=31536000, immutable`,
@@ -127,12 +127,21 @@ pub fn serve_static_ui(
     )
     .layer(map_response(cache_immutable));
 
+  let index_router = add_no_cache_layer(index_router);
+
   Router::new()
     .nest_service(&format!("/{ASSETS_DIR}"), assets)
-    .fallback_service(with_index_fallback(
-      directory,
-      add_no_cache_layer(index_router),
-    ))
+    // The index file by its own name (a bookmark, a proxy health
+    // check, a PWA `start_url`) is the index like `/`: ServeDir would
+    // find the file and answer it itself, with the mtime validators
+    // and no `Cache-Control`, the stale index after an upgrade the
+    // index router exists to avoid. (`route_service` takes no
+    // `Router`, hence `into_service`.)
+    .route_service(
+      "/index.html",
+      index_router.clone().into_service::<axum::body::Body>(),
+    )
+    .fallback_service(with_index_fallback(directory, index_router))
     // Explicitly the two every browser takes, whatever other
     // tower-http compression features the app's build enables.
     .layer(CompressionLayer::new().no_deflate().no_zstd())

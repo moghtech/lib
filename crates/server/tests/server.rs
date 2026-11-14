@@ -268,7 +268,9 @@ async fn static_ui_index_is_never_cached_heuristically() {
   // for a tenth of its age, and run a stale UI after an upgrade.
   let dir = UiDir::new("static_ui_heuristic");
   let service = serve_static_ui(dir.0.to_str().unwrap(), false);
-  for uri in ["/", "/unknown/route"] {
+  // `/index.html` too, which names the file itself (a bookmark, a
+  // proxy health check, a PWA start_url).
+  for uri in ["/", "/index.html", "/unknown/route"] {
     let headers = index_headers(&service, uri).await;
     assert_eq!(headers[header::CACHE_CONTROL], "no-cache", "{uri}");
     assert!(headers.contains_key(header::ETAG), "{uri}");
@@ -306,7 +308,7 @@ async fn static_ui_index_ignores_conditional_and_range_requests() {
     if let Some(etag) = etag {
       conditions.push((header::IF_NONE_MATCH, etag));
     }
-    for uri in ["/", "/unknown/route"] {
+    for uri in ["/", "/index.html", "/unknown/route"] {
       for (name, value) in &conditions {
         let response = service
           .clone()
@@ -538,7 +540,7 @@ async fn static_ui_without_index_answers_404_and_logs_the_path() {
       logs_of(|| serve_static_ui(ui_path, force_no_cache));
     assert!(logs.contains("ERROR"), "{logs}");
     assert!(logs.contains(ui_path), "{logs}");
-    for uri in ["/", "/unknown/route"] {
+    for uri in ["/", "/index.html", "/unknown/route"] {
       let response = service
         .clone()
         .oneshot(
@@ -933,6 +935,180 @@ async fn configure_app_attaches_trusted_proxies() {
   );
 }
 
+/// The security headers by default: `X-XSS-Protection: 0` (the
+/// auditor of old browsers off, OWASP's advice), the others as they
+/// were. An app may still set the old `1; mode=block`, or leave the
+/// header out.
+#[tokio::test]
+async fn configure_app_sets_the_default_security_headers() {
+  struct Xss(&'static str);
+  impl ServerConfig for Xss {
+    fn port(&self) -> u16 {
+      0
+    }
+    fn x_xss_protection(&self) -> &str {
+      self.0
+    }
+  }
+  struct Defaults;
+  impl ServerConfig for Defaults {
+    fn port(&self) -> u16 {
+      0
+    }
+  }
+  let headers = async |app: Router| {
+    app
+      .oneshot(
+        Request::builder().uri("/").body(Body::empty()).unwrap(),
+      )
+      .await
+      .unwrap()
+      .headers()
+      .clone()
+  };
+  let route = || Router::new().route("/", get(async || "ok"));
+  let defaults =
+    headers(mogh_server::configure_app(route(), &Defaults).unwrap())
+      .await;
+  for (name, value) in [
+    (header::X_XSS_PROTECTION, "0"),
+    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    (header::X_FRAME_OPTIONS, "DENY"),
+    (header::REFERRER_POLICY, "strict-origin-when-cross-origin"),
+  ] {
+    assert_eq!(defaults.get(&name).unwrap(), value, "{name}");
+  }
+  assert!(!defaults.contains_key(header::CONTENT_SECURITY_POLICY));
+  let old = headers(
+    mogh_server::configure_app(route(), &Xss("1; mode=block"))
+      .unwrap(),
+  )
+  .await;
+  assert_eq!(
+    old.get(header::X_XSS_PROTECTION).unwrap(),
+    "1; mode=block"
+  );
+  let none =
+    headers(mogh_server::configure_app(route(), &Xss("")).unwrap())
+      .await;
+  assert!(!none.contains_key(header::X_XSS_PROTECTION));
+}
+
+/// The Content-Security-Policy is the one header a route may set
+/// itself: its own policy is kept. A response marked as the docs
+/// page gets the policy with the sources that page loads, the app's
+/// other pages don't share them.
+#[tokio::test]
+async fn the_content_security_policy_leaves_a_routes_own_and_knows_the_docs_page()
+ {
+  use axum::response::IntoResponse as _;
+  use mogh_server::{DocsPage, docs_content_security_policy};
+
+  const POLICY: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'";
+  const DOCS: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'; script-src 'self' https://cdn.jsdelivr.net/npm/@scalar/; font-src 'self' https://fonts.scalar.com";
+  assert_eq!(docs_content_security_policy(POLICY), DOCS);
+  // A trailing `;` and blanks don't leave an empty directive.
+  assert_eq!(
+    docs_content_security_policy("default-src 'self' ; "),
+    "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net/npm/@scalar/; font-src 'self' https://fonts.scalar.com"
+  );
+  // A directive the policy sets itself is the app's to keep, in any
+  // case: a second one of its name would be ignored by browsers.
+  assert_eq!(
+    docs_content_security_policy(
+      "default-src 'none'; Script-Src 'self' https://example.com"
+    ),
+    "default-src 'none'; Script-Src 'self' https://example.com; font-src 'self' https://fonts.scalar.com"
+  );
+  assert_eq!(
+    docs_content_security_policy("script-src 'self';font-src 'none'"),
+    "script-src 'self';font-src 'none'"
+  );
+  // `script-src-elem` is another directive than `script-src`.
+  assert!(
+    docs_content_security_policy("script-src-elem 'self'")
+      .ends_with("; script-src 'self' https://cdn.jsdelivr.net/npm/@scalar/; font-src 'self' https://fonts.scalar.com")
+  );
+  assert_eq!(docs_content_security_policy(""), "");
+  assert_eq!(docs_content_security_policy(" ; "), "");
+
+  struct Policy(&'static str);
+  impl ServerConfig for Policy {
+    fn port(&self) -> u16 {
+      0
+    }
+    fn content_security_policy(&self) -> &str {
+      self.0
+    }
+  }
+  let app = |policy: &'static str| {
+    let routes = Router::new()
+      .route("/", get(async || "ok"))
+      .route(
+        "/own",
+        get(async || {
+          (
+            [(header::CONTENT_SECURITY_POLICY, "default-src 'none'")],
+            "own",
+          )
+        }),
+      )
+      .route(
+        "/docs",
+        get(async || {
+          let mut response = "docs".into_response();
+          response.extensions_mut().insert(DocsPage);
+          response
+        }),
+      );
+    mogh_server::configure_app(routes, &Policy(policy)).unwrap()
+  };
+  let policy_of = async |app: Router, path: &str| {
+    app
+      .oneshot(
+        Request::builder().uri(path).body(Body::empty()).unwrap(),
+      )
+      .await
+      .unwrap()
+      .headers()
+      .get(header::CONTENT_SECURITY_POLICY)
+      .map(|value| value.to_str().unwrap().to_string())
+  };
+  assert_eq!(
+    policy_of(app(POLICY), "/").await.as_deref(),
+    Some(POLICY)
+  );
+  // Also what the app answers for a path of no route.
+  assert_eq!(
+    policy_of(app(POLICY), "/nothing").await.as_deref(),
+    Some(POLICY)
+  );
+  assert_eq!(
+    policy_of(app(POLICY), "/own").await.as_deref(),
+    Some("default-src 'none'")
+  );
+  assert_eq!(
+    policy_of(app(POLICY), "/docs").await.as_deref(),
+    Some(DOCS)
+  );
+  // No policy: no header, the docs page included; a route's own
+  // stays.
+  assert_eq!(policy_of(app(""), "/").await, None);
+  assert_eq!(policy_of(app(""), "/docs").await, None);
+  assert_eq!(
+    policy_of(app(""), "/own").await.as_deref(),
+    Some("default-src 'none'")
+  );
+  // An invalid value is refused when the app is configured.
+  assert!(
+    mogh_server::configure_app(
+      Router::new(),
+      &Policy("default-src 'self'\n")
+    )
+    .is_err()
+  );
+}
+
 struct TlsServer;
 
 impl ServerConfig for TlsServer {
@@ -979,6 +1155,252 @@ async fn serve_app_serves_https_with_both_rustls_providers() {
     .unwrap();
   assert_eq!(response.status(), reqwest::StatusCode::OK);
   assert_eq!(response.text().await.unwrap(), "ok");
+  handle.shutdown();
+  server.await.unwrap().unwrap();
+}
+
+/// The DER of the first certificate in the PEM file `path`.
+fn cert_der(path: &std::path::Path) -> Vec<u8> {
+  use rustls::pki_types::{CertificateDer, pem::PemObject as _};
+  CertificateDer::pem_file_iter(path)
+    .unwrap()
+    .next()
+    .unwrap()
+    .unwrap()
+    .to_vec()
+}
+
+/// Serves https with the pair in its directory, checking it for a
+/// renewed one every [RELOAD_INTERVAL].
+struct ReloadingTls {
+  cert_file: String,
+  key_file: String,
+}
+
+const RELOAD_INTERVAL: std::time::Duration =
+  std::time::Duration::from_millis(100);
+
+impl ServerConfig for ReloadingTls {
+  fn bind_ip(&self) -> &str {
+    "127.0.0.1"
+  }
+  fn port(&self) -> u16 {
+    0
+  }
+  fn ssl_enabled(&self) -> bool {
+    true
+  }
+  fn ssl_cert_file(&self) -> &str {
+    &self.cert_file
+  }
+  fn ssl_key_file(&self) -> &str {
+    &self.key_file
+  }
+  fn ssl_reload_interval(&self) -> Option<std::time::Duration> {
+    Some(RELOAD_INTERVAL)
+  }
+}
+
+/// Writes `contents` to `path` at once (a renewal tool writes a new
+/// file and moves it over the old one).
+fn replace_file(path: &std::path::Path, contents: &[u8]) {
+  let new = path.with_extension("new");
+  std::fs::write(&new, contents).unwrap();
+  std::fs::rename(&new, path).unwrap();
+}
+
+/// A renewed cert / key pair written over the served one is served
+/// to new connections without a restart. A pair which doesn't load
+/// keeps the served one, with a warning once per state of the files,
+/// not at every check.
+#[tokio::test(flavor = "current_thread")]
+async fn serve_app_serves_a_renewed_certificate() {
+  // One thread: the server's tasks log here too.
+  let captured = Captured::default();
+  let _logs = tracing::subscriber::set_default(
+    tracing_subscriber::fmt()
+      .with_writer(captured.clone())
+      .with_ansi(false)
+      .finish(),
+  );
+  let warnings = || {
+    String::from_utf8(captured.0.lock().unwrap().clone())
+      .unwrap()
+      .matches("don't load")
+      .count()
+  };
+
+  let first_dir =
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/tls");
+  let (first_cert, first_key) =
+    (first_dir.join("cert.pem"), first_dir.join("key.pem"));
+  // The second pair: the TLS test pair of the auth crates.
+  let second_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .join("../../auth/test_keys");
+  let (second_cert, second_key) = (
+    second_dir.join("tls_server.pem"),
+    second_dir.join("tls_server_key.pem"),
+  );
+  assert_ne!(cert_der(&first_cert), cert_der(&second_cert));
+
+  let dir = UiDir::new("tls_reload");
+  let (cert_file, key_file) =
+    (dir.0.join("cert.pem"), dir.0.join("key.pem"));
+  std::fs::copy(&first_cert, &cert_file).unwrap();
+  std::fs::copy(&first_key, &key_file).unwrap();
+  let handle = mogh_server::axum_server::Handle::new();
+  let mut server = tokio::spawn(mogh_server::serve_app(
+    Router::new().route("/", get(async || "ok")),
+    ReloadingTls {
+      cert_file: cert_file.display().to_string(),
+      key_file: key_file.display().to_string(),
+    },
+    handle.clone(),
+  ));
+  let addr = tokio::select! {
+    addr = handle.listening() => addr.expect("https server failed to bind"),
+    res = &mut server => panic!("https server stopped: {res:?}"),
+  };
+  // The certificate a new connection is served.
+  let served = async || {
+    let client = reqwest::Client::builder()
+      .tls_danger_accept_invalid_certs(true)
+      .tls_info(true)
+      .build()
+      .unwrap();
+    let response = client
+      .get(format!("https://127.0.0.1:{}/", addr.port()))
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    response
+      .extensions()
+      .get::<reqwest::tls::TlsInfo>()
+      .and_then(|info| info.peer_certificate())
+      .expect("no peer certificate")
+      .to_vec()
+  };
+  // Waits (a few checks at most) for `cert` to be served.
+  let serves = async |cert: &std::path::Path| {
+    let expected = cert_der(cert);
+    for _ in 0..50 {
+      if served().await == expected {
+        return true;
+      }
+      tokio::time::sleep(RELOAD_INTERVAL).await;
+    }
+    false
+  };
+  assert_eq!(served().await, cert_der(&first_cert));
+
+  // Renewed: the key first, then the certificate (the state between
+  // is a pair which doesn't load, if a check sees it).
+  replace_file(&key_file, &std::fs::read(&second_key).unwrap());
+  replace_file(&cert_file, &std::fs::read(&second_cert).unwrap());
+  assert!(
+    serves(&second_cert).await,
+    "the renewed pair isn't served"
+  );
+
+  // A certificate which doesn't parse: the renewed pair stays, with
+  // one warning however many checks see it.
+  let warned = warnings();
+  replace_file(&cert_file, b"-----BEGIN CERTIFICATE-----\nnot\n");
+  tokio::time::sleep(RELOAD_INTERVAL * 6).await;
+  assert_eq!(served().await, cert_der(&second_cert));
+  assert_eq!(warnings(), warned + 1);
+  // Another bad state (the first certificate, with the second key):
+  // warned about once too.
+  replace_file(&cert_file, &std::fs::read(&first_cert).unwrap());
+  tokio::time::sleep(RELOAD_INTERVAL * 6).await;
+  assert_eq!(served().await, cert_der(&second_cert));
+  assert_eq!(warnings(), warned + 2);
+  // The key missing.
+  std::fs::remove_file(&key_file).unwrap();
+  tokio::time::sleep(RELOAD_INTERVAL * 6).await;
+  assert_eq!(served().await, cert_der(&second_cert));
+  assert_eq!(warnings(), warned + 3);
+
+  // The first pair whole again: served.
+  replace_file(&key_file, &std::fs::read(&first_key).unwrap());
+  assert!(serves(&first_cert).await, "the first pair isn't served");
+  handle.shutdown();
+  server.await.unwrap().unwrap();
+}
+
+/// Without a reload interval, the files are read once: a renewed pair
+/// is only served after a restart.
+#[tokio::test]
+async fn serve_app_without_a_reload_interval_keeps_its_certificate() {
+  struct OnceTls(ReloadingTls);
+  impl ServerConfig for OnceTls {
+    fn bind_ip(&self) -> &str {
+      "127.0.0.1"
+    }
+    fn port(&self) -> u16 {
+      0
+    }
+    fn ssl_enabled(&self) -> bool {
+      true
+    }
+    fn ssl_cert_file(&self) -> &str {
+      self.0.ssl_cert_file()
+    }
+    fn ssl_key_file(&self) -> &str {
+      self.0.ssl_key_file()
+    }
+    fn ssl_reload_interval(&self) -> Option<std::time::Duration> {
+      None
+    }
+  }
+  let first_dir =
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/tls");
+  let second_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .join("../../auth/test_keys");
+  let dir = UiDir::new("tls_no_reload");
+  let (cert_file, key_file) =
+    (dir.0.join("cert.pem"), dir.0.join("key.pem"));
+  std::fs::copy(first_dir.join("cert.pem"), &cert_file).unwrap();
+  std::fs::copy(first_dir.join("key.pem"), &key_file).unwrap();
+  let handle = mogh_server::axum_server::Handle::new();
+  let mut server = tokio::spawn(mogh_server::serve_app(
+    Router::new().route("/", get(async || "ok")),
+    OnceTls(ReloadingTls {
+      cert_file: cert_file.display().to_string(),
+      key_file: key_file.display().to_string(),
+    }),
+    handle.clone(),
+  ));
+  let addr = tokio::select! {
+    addr = handle.listening() => addr.expect("https server failed to bind"),
+    res = &mut server => panic!("https server stopped: {res:?}"),
+  };
+  replace_file(
+    &key_file,
+    &std::fs::read(second_dir.join("tls_server_key.pem")).unwrap(),
+  );
+  replace_file(
+    &cert_file,
+    &std::fs::read(second_dir.join("tls_server.pem")).unwrap(),
+  );
+  tokio::time::sleep(RELOAD_INTERVAL * 4).await;
+  let response = reqwest::Client::builder()
+    .tls_danger_accept_invalid_certs(true)
+    .tls_info(true)
+    .build()
+    .unwrap()
+    .get(format!("https://127.0.0.1:{}/", addr.port()))
+    .send()
+    .await
+    .unwrap();
+  let served = response
+    .extensions()
+    .get::<reqwest::tls::TlsInfo>()
+    .and_then(|info| info.peer_certificate())
+    .unwrap()
+    .to_vec();
+  assert_eq!(served, cert_der(&first_dir.join("cert.pem")));
   handle.shutdown();
   server.await.unwrap().unwrap();
 }
