@@ -158,6 +158,9 @@ pub fn envelope_decrypt_string<A: AssociatedData>(
 /// decrypted (the plaintext is dropped, wiped), so an envelope whose
 /// data doesn't decrypt is an error, rather than moved onto the new
 /// key as if it were readable, to fail on its next read.
+///
+/// The key layer moves as [rewrap_key_layer] moves it, which skips
+/// the check of the data layer.
 pub fn envelope_rewrap<A: AssociatedData>(
   envelope: &EnvelopeEncryptedData,
   old_master_key: &Key,
@@ -169,8 +172,9 @@ pub fn envelope_rewrap<A: AssociatedData>(
     unwrap_data_key(&envelope.key, old_master_key, associated_data)?;
   decrypt(&envelope.data, &data_key, associated_data)
     .context("The envelope's data does not decrypt with its key")?;
-  let key = encrypt(
-    data_key.as_bytes(),
+  let key = rewrap_key_layer(
+    &envelope.key,
+    old_master_key,
     new_master_key,
     associated_data,
     cipher,
@@ -179,6 +183,40 @@ pub fn envelope_rewrap<A: AssociatedData>(
     key,
     data: envelope.data.clone(),
   })
+}
+
+/// Moves the key layer of an envelope (`envelope.key`, its wrapped
+/// data key) onto another master key, or another cipher: the data
+/// key is decrypted with `old_master_key` (32 bytes, or an error) and
+/// encrypted again under `new_master_key` with `cipher`, bound to the
+/// same associated data. Pass the same master key twice to change the
+/// cipher only. The data layer, which keeps the data key, is not
+/// changed: an envelope of the result and the data layer reads with
+/// `new_master_key`.
+///
+/// ⚠️ The data layer is not read, so not authenticated either: an
+/// envelope whose data no longer decrypts with its key (tampered,
+/// or another envelope's data under the same associated data) moves
+/// like any other, and fails on its next read rather than here. For
+/// a caller which leaves the data layer where it is (eg. paged
+/// rotations of rows holding large data, which never load it); with
+/// the whole envelope at hand, [envelope_rewrap] is the checked
+/// form.
+pub fn rewrap_key_layer<A: AssociatedData>(
+  key: &EncryptedData,
+  old_master_key: &Key,
+  new_master_key: &Key,
+  associated_data: &A,
+  cipher: Cipher,
+) -> anyhow::Result<EncryptedData> {
+  let data_key =
+    unwrap_data_key(key, old_master_key, associated_data)?;
+  encrypt(
+    data_key.as_bytes(),
+    new_master_key,
+    associated_data,
+    cipher,
+  )
 }
 
 /// The data key of an envelope, decrypted with the master key.
@@ -478,6 +516,142 @@ mod tests {
       envelope_rewrap(&wrong_len, &key(), &other_key(), &aad, cipher)
         .unwrap_err();
     assert!(err.to_string().contains("not 32 bytes"), "{err}");
+  }
+
+  #[test]
+  fn rewrap_key_layer_moves_the_data_key() {
+    let aad = "row-1";
+    for (from, to) in [
+      (Cipher::XChaCha20Poly1305, Cipher::XChaCha20Poly1305),
+      (Cipher::XChaCha20Poly1305, Cipher::Aes256Gcm),
+      (Cipher::Aes256Gcm, Cipher::XChaCha20Poly1305),
+      (Cipher::Aes256Gcm, Cipher::Aes256Gcm),
+    ] {
+      let envelope =
+        envelope_encrypt(b"contents", &key(), &aad, from).unwrap();
+      // Onto another master key.
+      let key_layer = rewrap_key_layer(
+        &envelope.key,
+        &key(),
+        &other_key(),
+        &aad,
+        to,
+      )
+      .unwrap();
+      assert_ne!(key_layer, envelope.key);
+      assert_eq!(Cipher::parse(&key_layer.data).unwrap().0, to);
+      let moved = EnvelopeEncryptedData {
+        key: key_layer,
+        data: envelope.data.clone(),
+      };
+      assert_eq!(
+        envelope_decrypt(&moved, &other_key(), &aad)
+          .unwrap()
+          .as_slice(),
+        b"contents"
+      );
+      assert!(envelope_decrypt(&moved, &key(), &aad).is_err());
+      // The same master key twice: the cipher only.
+      let key_layer =
+        rewrap_key_layer(&envelope.key, &key(), &key(), &aad, to)
+          .unwrap();
+      assert_eq!(Cipher::parse(&key_layer.data).unwrap().0, to);
+      let converted = EnvelopeEncryptedData {
+        key: key_layer,
+        data: envelope.data.clone(),
+      };
+      assert_eq!(
+        envelope_decrypt(&converted, &key(), &aad)
+          .unwrap()
+          .as_slice(),
+        b"contents"
+      );
+      // envelope_rewrap moves the key layer alike.
+      let rewrapped =
+        envelope_rewrap(&envelope, &key(), &other_key(), &aad, to)
+          .unwrap();
+      assert_eq!(
+        rewrap_key_layer(
+          &rewrapped.key,
+          &other_key(),
+          &key(),
+          &aad,
+          from
+        )
+        .and_then(|key_layer| envelope_decrypt(
+          &EnvelopeEncryptedData {
+            key: key_layer,
+            data: envelope.data.clone(),
+          },
+          &key(),
+          &aad
+        ))
+        .unwrap()
+        .as_slice(),
+        b"contents"
+      );
+    }
+  }
+
+  /// The key layer alone: what it can refuse, and the documented
+  /// difference to envelope_rewrap, which reads the data layer too.
+  #[test]
+  fn rewrap_key_layer_checks_the_key_layer_only() {
+    let aad = "row-1";
+    let cipher = Cipher::default();
+    let a = envelope_encrypt(b"a", &key(), &aad, cipher).unwrap();
+    let b = envelope_encrypt(b"b", &key(), &aad, cipher).unwrap();
+    // Wrong old master key, or associated data.
+    assert!(
+      rewrap_key_layer(&a.key, &other_key(), &key(), &aad, cipher)
+        .is_err()
+    );
+    assert!(
+      rewrap_key_layer(
+        &a.key,
+        &key(),
+        &other_key(),
+        &"row-2",
+        cipher
+      )
+      .is_err()
+    );
+    // A key layer which unwraps to something other than a key.
+    let wrong_len =
+      encrypt(&[1u8; 16], &key(), &aad, cipher).unwrap();
+    let err = rewrap_key_layer(
+      &wrong_len,
+      &key(),
+      &other_key(),
+      &aad,
+      cipher,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("not 32 bytes"), "{err}");
+    // A's key layer with B's data layer: the key layer moves (the
+    // data is not read), the envelope fails on its next read.
+    // envelope_rewrap refuses it.
+    let spliced = EnvelopeEncryptedData {
+      key: a.key.clone(),
+      data: b.data.clone(),
+    };
+    let key_layer = rewrap_key_layer(
+      &spliced.key,
+      &key(),
+      &other_key(),
+      &aad,
+      cipher,
+    )
+    .unwrap();
+    let moved = EnvelopeEncryptedData {
+      key: key_layer,
+      data: spliced.data.clone(),
+    };
+    assert!(envelope_decrypt(&moved, &other_key(), &aad).is_err());
+    assert!(
+      envelope_rewrap(&spliced, &key(), &other_key(), &aad, cipher)
+        .is_err()
+    );
   }
 
   #[test]

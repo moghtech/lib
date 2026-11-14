@@ -41,6 +41,13 @@ let rotated = aead::envelope_rewrap(
 )?;
 ```
 
+`aead::rewrap_key_layer` moves the key layer alone (the wrapped data key, onto
+another master key or cipher), for callers which leave the data layer where it
+is, eg. paged rotations of rows holding large data. It doesn't read the data
+layer, so doesn't authenticate it either: an envelope whose data no longer
+decrypts moves like any other, and fails on its next read. `envelope_rewrap`,
+which moves the key layer the same way, is the checked form.
+
 Keys come from `Key::generate()`, or from the text people hand over with
 `Key::decode(text)` (a config value, a request field) and `Key::read_file(path)`
 (a key file): base64url or standard base64 (eg. `openssl rand -base64 32`),
