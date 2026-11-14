@@ -277,9 +277,21 @@ async fn app_writes_which_grant_access_need_a_recent_login() {
 
   tokio::time::sleep(Duration::from_secs(WINDOW_SECS + 2)).await;
 
-  // Taking access away still works.
+  // Taking access away still works. The whitelist is compared as it
+  // is applied: padded or repeated entries, and a range within one
+  // stored, let nobody new in.
   admin.write(access(None, Some(false), None)).await.unwrap();
   admin.write(access(Some(false), None, None)).await.unwrap();
+  let user = admin
+    .write(whitelist(&[
+      " 127.0.0.1",
+      "10.1.0.0/16 ",
+      "10.1.0.0/16",
+      "",
+    ]))
+    .await
+    .unwrap();
+  assert_eq!(user.cidr_whitelist, ["127.0.0.1", "10.1.0.0/16"]);
   admin.write(whitelist(&["127.0.0.1"])).await.unwrap();
   // Granting it needs a recent login.
   assert_reauthentication_required(

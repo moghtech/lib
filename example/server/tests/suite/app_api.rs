@@ -317,6 +317,61 @@ async fn admin_requests_need_an_admin() {
   assert_eq!(status_of(res), StatusCode::UNAUTHORIZED);
 }
 
+/// `UpdateUserAccess` checks all of the request before it writes any
+/// of it: one refused for an invalid group leaves the user as they
+/// were, also the fields before the groups. A valid one is stored at
+/// once.
+#[tokio::test]
+async fn a_refused_access_update_changes_nothing() {
+  let app = TestApp::spawn().await;
+  let admin = app.sign_up("admin").await;
+  let user = app.sign_up("user").await;
+  let user_id = get_user(&user).await.id;
+  let access = |enabled: bool, admin: bool, groups: Vec<String>| {
+    UpdateUserAccess {
+      user_id: user_id.clone(),
+      enabled: Some(enabled),
+      admin: Some(admin),
+      groups: Some(groups),
+    }
+  };
+  admin
+    .write(access(false, false, vec!["readers".into()]))
+    .await
+    .unwrap();
+
+  for groups in [
+    vec![String::new()],
+    vec![String::from("writers"), "x".repeat(101)],
+  ] {
+    let res = admin.write(access(true, true, groups)).await;
+    assert_eq!(status_of(res), StatusCode::BAD_REQUEST);
+    let users = admin.read(ListUsers {}).await.unwrap();
+    let target = users.iter().find(|u| u.id == user_id).unwrap();
+    assert!(!target.enabled && !target.admin, "{target:?}");
+    assert_eq!(target.groups, ["readers"]);
+  }
+
+  let updated = admin
+    .write(access(true, true, vec!["writers".into()]))
+    .await
+    .unwrap();
+  assert!(updated.enabled && updated.admin);
+  assert_eq!(updated.groups, ["writers"]);
+  // Fields left out keep their value.
+  let updated = admin
+    .write(UpdateUserAccess {
+      user_id: user_id.clone(),
+      enabled: None,
+      admin: Some(false),
+      groups: None,
+    })
+    .await
+    .unwrap();
+  assert!(updated.enabled && !updated.admin);
+  assert_eq!(updated.groups, ["writers"]);
+}
+
 #[tokio::test]
 async fn stats_are_cached_for_a_moment() {
   let app = TestApp::spawn().await;

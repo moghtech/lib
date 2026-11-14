@@ -13,6 +13,7 @@ mod app_api;
 mod disabled_users;
 mod local_auth;
 mod login_starts;
+mod logins;
 mod oidc;
 mod providers;
 mod reauth;

@@ -13,7 +13,8 @@ use mogh_auth_client::{
   },
 };
 use mogh_auth_server::{
-  AuthImpl, CredentialChange, DynFuture, RequestAuthentication,
+  AcceptedSignature, AuthImpl, CredentialChange, DynFuture, Login,
+  RequestAuthentication,
   api_key::{StoredApiKey, StoredSigningKey},
   middleware::{
     get_key_user_id, get_user_from_request_authentication,
@@ -28,6 +29,7 @@ use mogh_auth_server::{
       sync_all_workload_users,
     },
   },
+  replay::SeenSignatures,
   user::{AuthUserImpl, BoxAuthUser},
 };
 use mogh_error::{AddStatusCode as _, AddStatusCodeError as _};
@@ -355,6 +357,25 @@ impl AuthImpl for ExampleAuthImpl {
     })
   }
 
+  /// Appends the login to the `logins` table, the example's audit
+  /// trail. A failure is logged rather than failing the login: by now
+  /// a one-time credential (a TOTP step, a recovery code) may have
+  /// been used up, and the user would have to wait for the next one.
+  fn record_login(
+    &self,
+    login: Login,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    Box::pin(async move {
+      if let Err(e) = db::record_login(&login).await {
+        warn!(
+          user_id = login.user_id,
+          "Failed to record a login | {e:#}"
+        );
+      }
+      Ok(())
+    })
+  }
+
   /// Ends the user's other sessions: a token which leaked stops
   /// working once the user changes how they log in. The session which
   /// made the change is kept.
@@ -365,6 +386,24 @@ impl AuthImpl for ExampleAuthImpl {
     kept_jwt: Option<String>,
   ) -> DynFuture<mogh_error::Result<()>> {
     Box::pin(async move {
+      let end_sessions = match &change {
+        CredentialChange::Password
+        | CredentialChange::TotpEnrolled
+        | CredentialChange::TotpUnenrolled
+        | CredentialChange::PasskeyEnrolled
+        | CredentialChange::PasskeyUnenrolled
+        | CredentialChange::LocalLoginUnlinked
+        | CredentialChange::ExternalLoginUnlinked { .. } => true,
+        // Turned off, a provider login alone no longer gets in: a
+        // session one opened before (a leaked provider account) ends
+        // with the others.
+        CredentialChange::ExternalSkip2faChanged {
+          external_skip_2fa,
+        } => !external_skip_2fa,
+      };
+      if !end_sessions {
+        return Ok(());
+      }
       // Tokens carry whole seconds: the ones issued in the second of
       // the change stay valid, so a login right after it works (one
       // issued in that second before the change, too).
@@ -822,9 +861,9 @@ impl AuthImpl for ExampleAuthImpl {
     })
   }
 
-  /// The auth server verifies the secret and the expiry
-  /// (`AuthImpl::get_api_key`), and finds the owner of a key to
-  /// delete it (`get_api_key_owner_id`) with this.
+  /// The auth server verifies the secret, the expiry and that the key
+  /// is enabled (`AuthImpl::get_api_key`), and finds the owner of a
+  /// key to delete it (`get_api_key_owner_id`) with this.
   fn find_api_key(
     &self,
     key: String,
@@ -835,6 +874,8 @@ impl AuthImpl for ExampleAuthImpl {
         .map(|api_key| StoredApiKey {
           user_id: api_key.api_key.user_id,
           hashed_secret: api_key.hashed_secret,
+          // The example's keys can't be disabled, only deleted.
+          enabled: true,
           expires: stored_expires(api_key.api_key.expires),
           cidr_whitelist: api_key.api_key.cidr_whitelist,
         });
@@ -861,6 +902,22 @@ impl AuthImpl for ExampleAuthImpl {
     true
   }
 
+  /// A signed request whose signer authenticated, right before it is
+  /// handled: a second one with its signature is a replay, refused
+  /// (401). The auth server calls this once for every signed request,
+  /// on the app's apis, the auth management api and the supporter api
+  /// alike. In memory, as the example runs one instance: the store
+  /// keeps each signature for the tolerance plus the body timeout of
+  /// this impl (the defaults, 1 s + 30 s).
+  fn accept_signed_request(
+    &self,
+    accepted: AcceptedSignature,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    static SEEN: SeenSignatures = SeenSignatures::new();
+    let res = SEEN.accept_once(self, &accepted);
+    Box::pin(async move { res })
+  }
+
   fn create_signing_key(
     &self,
     user_id: String,
@@ -882,7 +939,7 @@ impl AuthImpl for ExampleAuthImpl {
     })
   }
 
-  /// The auth server refuses expired keys
+  /// The auth server refuses disabled and expired keys
   /// (`AuthImpl::get_signing_key`), and finds the owner of a key to
   /// delete it (`get_signing_key_owner_id`) with this.
   fn find_signing_key(
@@ -895,6 +952,8 @@ impl AuthImpl for ExampleAuthImpl {
           .await?
           .map(|api_key| StoredSigningKey {
             user_id: api_key.api_key.user_id,
+            // The example's keys can't be disabled, only deleted.
+            enabled: true,
             expires: stored_expires(api_key.api_key.expires),
             cidr_whitelist: api_key.api_key.cidr_whitelist,
           });

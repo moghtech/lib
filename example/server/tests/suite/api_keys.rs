@@ -1003,6 +1003,56 @@ async fn signature_works_over_http2() {
     .unwrap();
 }
 
+/// A signed request is accepted once: the example's
+/// `accept_signed_request` keeps the signatures it accepted
+/// (mogh_auth_server's replay store), and the auth server hands it
+/// every signed request, through each of the middlewares which take
+/// one: the app's api (`authenticate_request`), the auth management
+/// api, and the supporter api (`authenticate_user` + `finish`). The
+/// exact request sent again within its tolerance is refused, as the
+/// credentials it is (not its time); signed anew it is another one.
+#[tokio::test]
+async fn signed_request_is_accepted_once_on_every_api() {
+  let app = TestApp::spawn().await;
+  let admin = app.sign_up("admin").await;
+  let private_key = generated_signing_key(&admin, "replayed").await;
+  let host = app.host();
+  let sign = |path: &str, body: &[u8]| {
+    signed_headers(
+      &private_key,
+      &host,
+      "POST",
+      path,
+      unix_timestamp_ms() as i64,
+      body,
+    )
+  };
+  let body = b"{}".to_vec();
+  for path in [
+    "/read/GetRequestInfo",
+    "/auth/manage/ListTrustedIssuers",
+    "/supporter/write/DeleteSupporterKey",
+  ] {
+    let headers = sign(path, &body);
+    let (status, answer) =
+      send_signed_answer(&app, path, body.clone(), headers.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{path}: {answer}");
+    let (status, answer) =
+      send_signed_answer(&app, path, body.clone(), headers).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+    assert!(
+      answer.contains("Invalid client credentials")
+        && !answer.contains(SIGNED_AT_ANOTHER_TIME),
+      "{path}: {answer}"
+    );
+    let (status, answer) =
+      send_signed_answer(&app, path, body.clone(), sign(path, &body))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{path}: {answer}");
+  }
+}
+
 /// A tcp proxy on `listener` to `to` (`host:port`), whose first
 /// connection is slow to get going: what the client sends over it
 /// first is passed on `delay` late, as over a link which takes long

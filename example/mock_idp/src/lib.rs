@@ -3,6 +3,9 @@
 //! A minimal OIDC provider (discovery, key set, authorization code flow
 //! with PKCE, user info) which can also mint arbitrary signed tokens,
 //! to test external login, token exchange and workload identity against.
+//! It also plays the api server of a Kubernetes cluster for
+//! TokenReview issuers (`POST /apis/authentication.k8s.io/v1/tokenreviews`):
+//! the tokens it minted are the cluster's service account tokens.
 //!
 //! ⚠️ For tests only. The signing keys are committed to this
 //! repository, and everybody is logged in without being asked.
@@ -40,6 +43,10 @@ const KEY_ID: &str = "test-key";
 
 pub const DEFAULT_CLIENT_ID: &str = "example-client-id";
 pub const DEFAULT_CLIENT_SECRET: &str = "example-client-secret";
+/// The bearer credential the TokenReview endpoint accepts at first,
+/// the reviewer service account's token of a real cluster
+/// ([MockIdp::set_reviewer_token] changes it).
+pub const DEFAULT_REVIEWER_TOKEN: &str = "mock-reviewer-token";
 
 /// A user who can log in at the provider.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -127,6 +134,10 @@ struct Inner {
   access_tokens: HashMap<String, String>,
   /// How often the key set was fetched.
   jwks_requests: u64,
+  /// The bearer a TokenReview must present.
+  reviewer_token: String,
+  /// How many TokenReviews were posted, the refused ones included.
+  token_reviews: u64,
 }
 
 #[derive(Clone)]
@@ -154,6 +165,7 @@ impl MockIdp {
       client_secret: DEFAULT_CLIENT_SECRET.to_string(),
       inner: Default::default(),
     };
+    idp.set_reviewer_token(DEFAULT_REVIEWER_TOKEN);
     let app = idp.router();
     tokio::spawn(async move {
       if let Err(e) = axum::serve(listener, app).await {
@@ -170,6 +182,10 @@ impl MockIdp {
       .route("/authorize", get(authorize))
       .route("/token", post(token))
       .route("/userinfo", get(userinfo))
+      .route(
+        "/apis/authentication.k8s.io/v1/tokenreviews",
+        post(token_review),
+      )
       .route("/control/users", post(control_upsert_user))
       .route("/control/auto_user", post(control_auto_user))
       .route("/control/mint", post(control_mint))
@@ -188,6 +204,17 @@ impl MockIdp {
 
   pub fn jwks_requests(&self) -> u64 {
     self.lock().jwks_requests
+  }
+
+  /// The bearer credential TokenReviews must present from now on, as
+  /// when the reviewer's token is rotated (or revoked) in a cluster.
+  pub fn set_reviewer_token(&self, token: &str) {
+    self.lock().reviewer_token = token.to_string();
+  }
+
+  /// How many TokenReviews were posted, the refused ones included.
+  pub fn token_reviews(&self) -> u64 {
+    self.lock().token_reviews
   }
 
   /// The key set the provider publishes, as JSON.
@@ -599,6 +626,110 @@ async fn userinfo(
   let mut claims = user_claims(user, false);
   claims.insert("sub".into(), json!(user.sub));
   Json(claims).into_response()
+}
+
+/// A TokenReview, as the api server of a cluster answers it: `401`
+/// for a request without the reviewer's bearer credential, else the
+/// review of `spec.token`. A token the provider minted (signed with
+/// its published key) and not expired is authenticated, for the
+/// `spec.audiences` it was issued to (none of them: not
+/// authenticated), as `system:serviceaccount:...` (its `sub`).
+async fn token_review(
+  State(idp): State<MockIdp>,
+  headers: HeaderMap,
+  Json(review): Json<Value>,
+) -> Response {
+  let authorized = {
+    let mut inner = idp.lock();
+    inner.token_reviews += 1;
+    headers
+      .get(header::AUTHORIZATION)
+      .and_then(|value| value.to_str().ok())
+      .and_then(|value| value.strip_prefix("Bearer "))
+      .is_some_and(|bearer| bearer == inner.reviewer_token)
+  };
+  if !authorized {
+    return (
+      StatusCode::UNAUTHORIZED,
+      Json(json!({
+        "kind": "Status",
+        "apiVersion": "v1",
+        "status": "Failure",
+        "message": "Unauthorized",
+        "reason": "Unauthorized",
+        "code": 401,
+      })),
+    )
+      .into_response();
+  }
+  let token = review["spec"]["token"].as_str().unwrap_or_default();
+  let wanted: Vec<&str> = review["spec"]["audiences"]
+    .as_array()
+    .map(|audiences| {
+      audiences
+        .iter()
+        .filter_map(|audience| audience.as_str())
+        .collect()
+    })
+    .unwrap_or_default();
+  let status = match verify_minted(token) {
+    Ok(claims) => {
+      let issued_to: Vec<&str> = match &claims["aud"] {
+        Value::String(aud) => vec![aud.as_str()],
+        Value::Array(auds) => {
+          auds.iter().filter_map(|aud| aud.as_str()).collect()
+        }
+        _ => Vec::new(),
+      };
+      let audiences: Vec<&str> = if wanted.is_empty() {
+        issued_to
+      } else {
+        wanted
+          .into_iter()
+          .filter(|audience| issued_to.contains(audience))
+          .collect()
+      };
+      if audiences.is_empty() {
+        json!({
+          "authenticated": false,
+          "error": "token audiences are invalid for the target audiences",
+        })
+      } else {
+        json!({
+          "authenticated": true,
+          "user": { "username": claims["sub"] },
+          "audiences": audiences,
+        })
+      }
+    }
+    Err(e) => json!({ "authenticated": false, "error": e }),
+  };
+  Json(json!({
+    "apiVersion": "authentication.k8s.io/v1",
+    "kind": "TokenReview",
+    "status": status,
+  }))
+  .into_response()
+}
+
+/// The claims of a token the provider minted (its published key) which
+/// has not expired.
+fn verify_minted(token: &str) -> Result<Value, String> {
+  let set: Value = serde_json::from_str(&jwks_json())
+    .map_err(|e| format!("invalid key set: {e}"))?;
+  let key = &set["keys"][0];
+  let key = jsonwebtoken::DecodingKey::from_rsa_components(
+    key["n"].as_str().unwrap_or_default(),
+    key["e"].as_str().unwrap_or_default(),
+  )
+  .map_err(|e| format!("invalid key: {e}"))?;
+  let mut validation =
+    jsonwebtoken::Validation::new(Algorithm::RS256);
+  // The review checks the audiences itself.
+  validation.validate_aud = false;
+  jsonwebtoken::decode::<Value>(token, &key, &validation)
+    .map(|data| data.claims)
+    .map_err(|e| format!("invalid bearer token: {e}"))
 }
 
 async fn control_upsert_user(

@@ -60,7 +60,9 @@ test("tools: key pair, seal / open, validate", async ({ page }) => {
   // Tampered input is a failed request, reported as a notification.
   await sealed.fill((await sealed.inputValue()).slice(0, -6) + "AAAAAA");
   await page.getByRole("button", { name: "Open", exact: true }).click();
-  await expect(notification(page, /Execute request OpenText failed/)).toBeVisible();
+  await expect(
+    notification(page, /Execute request OpenText failed/),
+  ).toBeVisible();
 
   await page.getByLabel("Input").fill("not a username");
   await page.getByRole("button", { name: "Validate", exact: true }).click();
@@ -81,9 +83,20 @@ test("api keys: create in the ui, use against the api", async ({
   await page.getByRole("button", { name: "New Api Key" }).click();
   await page.getByRole("dialog").getByLabel("Name", { exact: true }).fill("ci");
   await page.getByRole("button", { name: "Create" }).click();
-  const key = await page.getByTestId("api-key-key").innerText();
-  const secret = await page.getByTestId("api-key-secret").innerText();
-  await page.getByRole("button", { name: "Done" }).click();
+  const dialog = page.getByRole("dialog");
+  const keyInput = dialog.getByRole("textbox", { name: "Key", exact: true });
+  await expect(keyInput).toHaveValue(/^K_/);
+  const key = await keyInput.inputValue();
+  const secret = await dialog
+    .getByRole("textbox", { name: "Secret", exact: true })
+    .inputValue();
+  // Shown once: held open (Escape doesn't lose it), and Done asks
+  // whether it was saved first.
+  await page.keyboard.press("Escape");
+  await expect(keyInput).toBeVisible();
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await dialog.getByRole("button", { name: "Saved, close" }).click();
+  await expect(dialog).toBeHidden();
   await expect(page.getByTestId("api-key-row")).toHaveCount(1);
 
   const res = await request.post("/read/GetRequestInfo", {

@@ -67,7 +67,7 @@ CREATE TABLE login_providers (
 -- Workload identity issuers managed by admins over the auth api.
 CREATE TABLE trusted_issuers (
   id TEXT PRIMARY KEY NOT NULL,
-  -- JSON TrustedIssuer.
+  -- JSON TrustedIssuer, encrypted (may include a reviewer credential).
   data TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );

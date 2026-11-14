@@ -17,11 +17,12 @@ use example_client::{
       token::TOKEN_TYPE_JWT,
     },
     config::{
-      TrustedIssuer, TrustedIssuerKeys, WorkloadClaim, WorkloadRule,
+      REDACTED, TokenReviewConfig, TrustedIssuer, TrustedIssuerKeys,
+      WorkloadClaim, WorkloadRule,
     },
   },
 };
-use example_mock_idp::{MintToken, Signer};
+use example_mock_idp::{DEFAULT_REVIEWER_TOKEN, MintToken, Signer};
 use reqwest::StatusCode;
 use serde_json::json;
 
@@ -950,4 +951,378 @@ async fn token_exchange(
   )
   .await
   .map(|_| ())
+}
+
+// =================
+// = TOKEN REVIEWS =
+// =================
+
+/// The issuer url of the cluster's service account tokens (its
+/// `--service-account-issuer`). The mock idp mints them, and plays
+/// the cluster's api server which reviews them.
+const CLUSTER_ISSUER: &str =
+  "https://kubernetes.default.svc.cluster.local";
+
+/// The service account a token is for (`sub`).
+const SERVICE_ACCOUNT: &str = "system:serviceaccount:ci:deployer";
+
+/// An issuer whose tokens the cluster's api server at `url` reviews,
+/// presenting `credential`.
+fn review_issuer(url: &str, credential: &str) -> TrustedIssuer {
+  TrustedIssuer {
+    id: String::new(),
+    name: "Cluster".into(),
+    enabled: true,
+    issuer: CLUSTER_ISSUER.into(),
+    keys: review_keys(url, credential),
+    audiences: vec![AUDIENCE.into()],
+    max_token_age_secs: 300,
+    rules: vec![WorkloadRule {
+      id: String::new(),
+      name: "Deployer".into(),
+      enabled: true,
+      claims: vec![claim("sub", SERVICE_ACCOUNT)],
+      groups: vec!["deployers".into()],
+      admin: false,
+      token_ttl_secs: 900,
+    }],
+  }
+}
+
+fn review_keys(url: &str, credential: &str) -> TrustedIssuerKeys {
+  TrustedIssuerKeys::TokenReview(TokenReviewConfig {
+    url: url.into(),
+    token: credential.into(),
+    ..Default::default()
+  })
+}
+
+/// `issuer` (eg. as it was read back) with another review source.
+fn reviewed_at(
+  issuer: &TrustedIssuer,
+  url: &str,
+  credential: &str,
+) -> TrustedIssuer {
+  TrustedIssuer {
+    keys: review_keys(url, credential),
+    ..issuer.clone()
+  }
+}
+
+/// A service account token of the cluster, for the app unless
+/// `token` names other audiences.
+fn service_account_token(app: &TestApp, token: MintToken) -> String {
+  let aud = if token.aud.is_empty() {
+    vec![AUDIENCE.into()]
+  } else {
+    token.aud.clone()
+  };
+  app.idp.mint(MintToken {
+    iss: Some(CLUSTER_ISSUER.into()),
+    sub: SERVICE_ACCOUNT.into(),
+    aud,
+    ..token
+  })
+}
+
+/// The status of exchanging `token`: 200 when it works.
+async fn exchange_status(app: &TestApp, token: String) -> StatusCode {
+  match app.token_exchange(&token, TOKEN_TYPE_JWT).await {
+    Ok(_) => StatusCode::OK,
+    Err((status, _)) => status,
+  }
+}
+
+/// A url-mode TokenReview issuer (`TokenReviewConfig::url`): the
+/// cluster's api server reviews each token, presented with the
+/// reviewer credential, which is never read back. The token's own
+/// claims are checked before (the cluster isn't asked about a token
+/// the app refuses anyway), and what the cluster doesn't authenticate
+/// is the token's refusal (400), which doesn't hold back the next.
+#[tokio::test]
+async fn token_review_issuer_reviews_through_the_cluster() {
+  let app = TestApp::spawn().await;
+  let admin = app.sign_up("admin").await;
+  let created = admin
+    .manage(CreateTrustedIssuer {
+      issuer: review_issuer(&app.idp.issuer, DEFAULT_REVIEWER_TOKEN),
+    })
+    .await
+    .unwrap();
+  assert_eq!(created.issuer.keys.review_token(), Some(REDACTED));
+  let listed = admin.manage(ListTrustedIssuers {}).await.unwrap();
+  assert_eq!(listed[0].issuer.keys.review_token(), Some(REDACTED));
+  assert_eq!(app.idp.token_reviews(), 0);
+  // The app keeps the credential encrypted at rest.
+  for file in ["data/example.db", "data/example.db-wal"] {
+    let contents = std::fs::read(app.path(file)).unwrap_or_default();
+    assert!(
+      !contents
+        .windows(DEFAULT_REVIEWER_TOKEN.len())
+        .any(|window| window == DEFAULT_REVIEWER_TOKEN.as_bytes()),
+      "The reviewer credential is stored in plain text in {file}"
+    );
+  }
+
+  // Reviewed, with the credential as the bearer (the mock cluster
+  // answers anything else 401).
+  let res = app
+    .token_exchange(
+      &service_account_token(&app, MintToken::default()),
+      TOKEN_TYPE_JWT,
+    )
+    .await
+    .unwrap();
+  assert_eq!(res.expires_in, 900);
+  assert_eq!(app.idp.token_reviews(), 1);
+  let workload =
+    app.client().with_auth(ClientAuth::Jwt(res.access_token));
+  let info = workload.read(GetRequestInfo {}).await.unwrap();
+  let users = admin.read(ListUsers {}).await.unwrap();
+  let user =
+    users.iter().find(|user| user.id == info.user_id).unwrap();
+  assert_eq!(user.username, "workload-deployer");
+  assert_eq!(user.groups, ["deployers"]);
+  let link = user.workload.as_ref().unwrap();
+  assert_eq!(link.issuer_id, created.issuer.id);
+  assert_eq!(link.last_subject, SERVICE_ACCOUNT);
+
+  // Expired, for another audience, older than the issuer takes:
+  // refused before the review.
+  for (case, token) in [
+    (
+      "expired",
+      MintToken {
+        expires_in: -600,
+        ..Default::default()
+      },
+    ),
+    (
+      "another audience",
+      MintToken {
+        aud: vec!["https://other-app.test".into()],
+        ..Default::default()
+      },
+    ),
+    (
+      "too old",
+      MintToken {
+        issued_ago: 600,
+        ..Default::default()
+      },
+    ),
+  ] {
+    let token = service_account_token(&app, token);
+    let (status, error) = app
+      .token_exchange(&token, TOKEN_TYPE_JWT)
+      .await
+      .unwrap_err();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{case}");
+    assert_eq!(error.error, "invalid_grant", "{case}");
+  }
+  assert_eq!(app.idp.token_reviews(), 1);
+
+  // A token the cluster didn't issue (another key): reviewed and
+  // refused, and the next one is reviewed right away.
+  let forged = service_account_token(
+    &app,
+    MintToken {
+      signer: Signer::Other,
+      ..Default::default()
+    },
+  );
+  let (status, error) = app
+    .token_exchange(&forged, TOKEN_TYPE_JWT)
+    .await
+    .unwrap_err();
+  assert_eq!(status, StatusCode::BAD_REQUEST);
+  assert_eq!(error.error, "invalid_grant");
+  assert_eq!(app.idp.token_reviews(), 2);
+  app
+    .token_exchange(
+      &service_account_token(&app, MintToken::default()),
+      TOKEN_TYPE_JWT,
+    )
+    .await
+    .unwrap();
+  assert_eq!(app.idp.token_reviews(), 3);
+}
+
+/// The reviewer credential is a secret the app keeps: saved empty
+/// or as read back (redacted) the stored one stays, for the same
+/// api server only (another url needs it entered again). It is what
+/// the review presents: once the cluster no longer takes it, the
+/// issuer is unavailable (503), and the cluster is spared for a while
+/// rather than asked on every exchange, until the issuer is saved
+/// with the new credential.
+#[tokio::test]
+async fn token_review_credential_is_kept_until_the_url_changes() {
+  let app = TestApp::spawn().await;
+  let admin = app.sign_up("admin").await;
+  let created = admin
+    .manage(CreateTrustedIssuer {
+      issuer: review_issuer(&app.idp.issuer, DEFAULT_REVIEWER_TOKEN),
+    })
+    .await
+    .unwrap()
+    .issuer;
+  let exchange = || {
+    exchange_status(
+      &app,
+      service_account_token(&app, MintToken::default()),
+    )
+  };
+  assert_eq!(exchange().await, StatusCode::OK);
+
+  for kept in ["", REDACTED] {
+    let updated = admin
+      .manage(UpdateTrustedIssuer {
+        issuer: reviewed_at(&created, &app.idp.issuer, kept),
+      })
+      .await
+      .unwrap();
+    assert_eq!(updated.issuer.keys.review_token(), Some(REDACTED));
+    assert_eq!(
+      exchange().await,
+      StatusCode::OK,
+      "saved with '{kept}'"
+    );
+  }
+
+  // The same api server under another url (a trailing slash).
+  let moved = format!("{}/", app.idp.issuer);
+  let res = admin
+    .manage(UpdateTrustedIssuer {
+      issuer: reviewed_at(&created, &moved, ""),
+    })
+    .await;
+  let Err(e) = res else {
+    panic!("A new url was saved without the credential");
+  };
+  assert_eq!(
+    example_client::error_status(&e),
+    Some(StatusCode::BAD_REQUEST)
+  );
+  assert!(
+    format!("{e:#}").contains("enter the reviewer credential again"),
+    "{e:#}"
+  );
+  let listed = admin.manage(ListTrustedIssuers {}).await.unwrap();
+  let TrustedIssuerKeys::TokenReview(stored) = &listed[0].issuer.keys
+  else {
+    panic!("Not a TokenReview issuer anymore");
+  };
+  assert_eq!(stored.url, app.idp.issuer);
+  admin
+    .manage(UpdateTrustedIssuer {
+      issuer: reviewed_at(&created, &moved, DEFAULT_REVIEWER_TOKEN),
+    })
+    .await
+    .unwrap();
+  assert_eq!(exchange().await, StatusCode::OK);
+
+  // The cluster rotated the reviewer's token: asked once, then spared.
+  app.idp.set_reviewer_token("rotated-reviewer-token");
+  let reviews = app.idp.token_reviews();
+  assert_eq!(exchange().await, StatusCode::SERVICE_UNAVAILABLE);
+  assert_eq!(app.idp.token_reviews(), reviews + 1);
+  for _ in 0..3 {
+    assert_eq!(exchange().await, StatusCode::SERVICE_UNAVAILABLE);
+  }
+  assert_eq!(app.idp.token_reviews(), reviews + 1);
+  // Saved with the new one, it is tried at once.
+  admin
+    .manage(UpdateTrustedIssuer {
+      issuer: reviewed_at(&created, &moved, "rotated-reviewer-token"),
+    })
+    .await
+    .unwrap();
+  assert_eq!(exchange().await, StatusCode::OK);
+  assert_eq!(app.idp.token_reviews(), reviews + 2);
+}
+
+/// A TokenReview issuer has its issuer url to itself: the review only
+/// says the cluster issued the token, so no other enabled issuer
+/// (reviewed or by keys) may take tokens naming the same `iss`,
+/// whichever is saved first (409). A disabled one collides with
+/// nothing until it is enabled.
+#[tokio::test]
+async fn token_review_issuer_url_is_its_own() {
+  let app = TestApp::spawn().await;
+  let admin = app.sign_up("admin").await;
+  admin
+    .manage(CreateTrustedIssuer {
+      issuer: review_issuer(&app.idp.issuer, DEFAULT_REVIEWER_TOKEN),
+    })
+    .await
+    .unwrap();
+  let keys_issuer = |issuer: &str| TrustedIssuer {
+    name: "Keys".into(),
+    issuer: issuer.into(),
+    keys: TrustedIssuerKeys::Static(app.idp.jwks_json()),
+    ..review_issuer(&app.idp.issuer, DEFAULT_REVIEWER_TOKEN)
+  };
+  for (case, issuer) in [
+    (
+      "another review issuer",
+      TrustedIssuer {
+        name: "Other cluster".into(),
+        ..review_issuer(&app.idp.issuer, DEFAULT_REVIEWER_TOKEN)
+      },
+    ),
+    ("a keys issuer", keys_issuer(CLUSTER_ISSUER)),
+    // The same url with a trailing slash names the same issuer.
+    (
+      "a keys issuer, slashed",
+      keys_issuer(&format!("{CLUSTER_ISSUER}/")),
+    ),
+  ] {
+    let res = admin.manage(CreateTrustedIssuer { issuer }).await;
+    assert_eq!(status_of(res), StatusCode::CONFLICT, "{case}");
+  }
+
+  // The other way around: a keys issuer first.
+  let other_cluster = "https://other-cluster.example.test";
+  admin
+    .manage(CreateTrustedIssuer {
+      issuer: keys_issuer(other_cluster),
+    })
+    .await
+    .unwrap();
+  let reviewed_other = TrustedIssuer {
+    name: "Other cluster".into(),
+    issuer: other_cluster.into(),
+    ..review_issuer(&app.idp.issuer, DEFAULT_REVIEWER_TOKEN)
+  };
+  let res = admin
+    .manage(CreateTrustedIssuer {
+      issuer: reviewed_other.clone(),
+    })
+    .await;
+  assert_eq!(status_of(res), StatusCode::CONFLICT);
+
+  // Disabled, it is stored; enabled, refused.
+  let disabled = admin
+    .manage(CreateTrustedIssuer {
+      issuer: TrustedIssuer {
+        enabled: false,
+        ..reviewed_other
+      },
+    })
+    .await
+    .unwrap()
+    .issuer;
+  let res = admin
+    .manage(UpdateTrustedIssuer {
+      issuer: TrustedIssuer {
+        enabled: true,
+        ..reviewed_at(&disabled, &app.idp.issuer, "")
+      },
+    })
+    .await;
+  assert_eq!(status_of(res), StatusCode::CONFLICT);
+  assert_eq!(
+    admin.manage(ListTrustedIssuers {}).await.unwrap().len(),
+    3
+  );
 }

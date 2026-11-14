@@ -6,14 +6,17 @@ use example_client::{
   api::write::*,
   entities::{NoData, Note},
 };
-use mogh_auth_server::middleware::{
-  AuthenticatedAt, authenticate_request, require_recent_login,
+use mogh_auth_server::{
+  middleware::{
+    AuthenticatedAt, authenticate_request, require_recent_login,
+  },
+  validations::normalize_cidr_whitelist,
 };
 use mogh_error::{
   AddStatusCode as _, AddStatusCodeError as _, Json, Variant,
   variant_request,
 };
-use mogh_request_ip::cidr::validate_cidr_whitelist;
+use mogh_request_ip::cidr::whitelist_widened;
 use mogh_resolver::Resolve;
 use mogh_validations::StringValidator;
 use serde::{Deserialize, Serialize};
@@ -182,27 +185,25 @@ impl Resolve<WriteArgs> for UpdateCidrWhitelist {
       authenticated_at,
     }: &WriteArgs,
   ) -> Result<Self::Response, Self::Error> {
-    validate_cidr_whitelist(&self.cidr_whitelist)
-      .status_code(StatusCode::BAD_REQUEST)?;
+    // The rules of every whitelist the auth server stores: entries
+    // trimmed, blank and repeated ones dropped, at most 64 (it is
+    // parsed again for every request of the user), each valid.
+    let cidr_whitelist = normalize_cidr_whitelist(
+      &ExampleAuthImpl,
+      self.cidr_whitelist,
+    )?;
     // A whitelist letting in an ip the current one doesn't needs a
     // recent login of a session, so a token which leaked can't open
     // the account to the attacker's network for good. Entries are
-    // compared as written: a narrower entry than one in the list is
-    // a new entry too. Removing entries (or setting one on an empty
-    // list, which lets every ip in) needs none.
-    let current = &user.user.cidr_whitelist;
-    let widens = !current.is_empty()
-      && (self.cidr_whitelist.is_empty()
-        || self
-          .cidr_whitelist
-          .iter()
-          .any(|cidr| !current.contains(cidr)));
-    if widens {
+    // compared as the whitelist is applied: a range within one of the
+    // list is no new access. Removing entries (or setting one on an
+    // empty list, which lets every ip in) needs none.
+    if whitelist_widened(&user.user.cidr_whitelist, &cidr_whitelist) {
       require_recent_login(&ExampleAuthImpl, *authenticated_at)?;
     }
     db::update_user(
       &user.user.id,
-      UserUpdate::CidrWhitelist(self.cidr_whitelist),
+      UserUpdate::CidrWhitelist(cidr_whitelist),
     )
     .await?;
     get_user(&user.user.id).await
@@ -218,6 +219,16 @@ impl Resolve<WriteArgs> for UpdateUserAccess {
     }: &WriteArgs,
   ) -> Result<Self::Response, Self::Error> {
     admin_only(user)?;
+    // Everything is checked before anything is written: a refused
+    // request changes nothing, then all of it is stored at once.
+    for group in self.groups.iter().flatten() {
+      StringValidator::default()
+        .min_length(1)
+        .max_length(100)
+        .validate(group)
+        .context("Failed to validate group")
+        .status_code(StatusCode::BAD_REQUEST)?;
+    }
     let target = db::find_user(&self.user_id)
       .await?
       .context("No user found with given id")
@@ -255,23 +266,19 @@ impl Resolve<WriteArgs> for UpdateUserAccess {
     if grants {
       require_recent_login(&ExampleAuthImpl, *authenticated_at)?;
     }
-    if let Some(enabled) = self.enabled {
-      db::update_user(&target.id, UserUpdate::Enabled(enabled))
-        .await?;
-    }
-    if let Some(admin) = self.admin {
-      db::update_user(&target.id, UserUpdate::Admin(admin)).await?;
-    }
-    if let Some(groups) = self.groups {
-      for group in &groups {
-        StringValidator::default()
-          .min_length(1)
-          .max_length(100)
-          .validate(group)
-          .context("Failed to validate group")
-          .status_code(StatusCode::BAD_REQUEST)?;
-      }
-      db::update_user(&target.id, UserUpdate::Groups(groups)).await?;
+    if self.enabled.is_some()
+      || self.admin.is_some()
+      || self.groups.is_some()
+    {
+      db::update_user(
+        &target.id,
+        UserUpdate::Access {
+          enabled: self.enabled,
+          admin: self.admin,
+          groups: self.groups,
+        },
+      )
+      .await?;
     }
     get_user(&target.id).await
   }

@@ -467,6 +467,53 @@ async fn user_cidr_whitelist_applies_to_logins_and_requests() {
   admin.read(GetRequestInfo {}).await.unwrap();
 }
 
+/// A user's whitelist follows the rules of every whitelist the auth
+/// server stores (`normalize_cidr_whitelist`): at most 64 entries,
+/// which are trimmed, the blank and repeated ones dropped. It is
+/// parsed again for every request of the user.
+#[tokio::test]
+async fn user_cidr_whitelist_is_normalized_and_capped() {
+  let app = TestApp::spawn().await;
+  let admin = app.sign_up("admin").await;
+  // The first one lets the test's own requests in.
+  let entries = |count: usize| -> Vec<String> {
+    std::iter::once(String::from("127.0.0.1"))
+      .chain((1..count).map(|i| format!("10.{i}.0.0/16")))
+      .collect()
+  };
+
+  let res = admin
+    .write(UpdateCidrWhitelist {
+      cidr_whitelist: entries(65),
+    })
+    .await;
+  let Err(e) = res else {
+    panic!("65 entries were stored");
+  };
+  assert_eq!(
+    example_client::error_status(&e),
+    Some(StatusCode::BAD_REQUEST)
+  );
+  assert!(format!("{e:#}").contains("at most 64 entries"), "{e:#}");
+  assert!(get_user(&admin).await.cidr_whitelist.is_empty());
+
+  // 64 entries, padded, repeated and with blank ones in between.
+  let mut sent: Vec<String> = entries(64)
+    .iter()
+    .map(|entry| format!(" {entry}\t"))
+    .collect();
+  sent.extend([String::new(), String::from("  ")]);
+  sent.extend(entries(64));
+  let user = admin
+    .write(UpdateCidrWhitelist {
+      cidr_whitelist: sent,
+    })
+    .await
+    .unwrap();
+  assert_eq!(user.cidr_whitelist, entries(64));
+  assert_eq!(get_user(&admin).await.cidr_whitelist, entries(64));
+}
+
 #[tokio::test]
 async fn responses_carry_security_headers() {
   let app = TestApp::spawn().await;

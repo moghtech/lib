@@ -346,15 +346,44 @@ async fn app_tokens_are_bound_to_the_secret_and_expire() {
   let res = tampered.read(GetCoreInfo {}).await;
   assert_eq!(status_of(res), StatusCode::UNAUTHORIZED);
 
-  // A token of another deployment (other secret), for the same user id.
-  let other = TestApp::spawn().await;
+  // A token of another deployment: its own secret, host and users.
+  const OTHER_SECRET: &str =
+    "jwt-secret-of-another-deployment-of-the-app";
+  let other = TestApp::spawn_with(TestAppOptions {
+    jwt_secret: OTHER_SECRET.into(),
+    ..Default::default()
+  })
+  .await;
   let other_admin = other.sign_up("admin").await;
   let res = admin
     .with_auth(other_admin.auth.clone())
     .read(GetCoreInfo {})
     .await;
   assert_eq!(status_of(res), StatusCode::UNAUTHORIZED);
-  assert!(!user_id.is_empty());
+
+  // The secret alone: a token for this app (its host and name) and
+  // this user, signed with the other secret, is refused. The same
+  // claims signed with the app's own secret are accepted.
+  let token_signed_with = |secret: &str| {
+    let jwt = mogh_auth_server::provider::jwt::JwtProvider::try_new(
+      secret.as_bytes(),
+      60_000,
+    )
+    .unwrap()
+    .with_iss(app.address.clone())
+    .with_aud("MoghExample")
+    .encode_sub(&user_id)
+    .unwrap()
+    .jwt;
+    admin.with_auth(ClientAuth::Jwt(jwt))
+  };
+  let res =
+    token_signed_with(OTHER_SECRET).read(GetCoreInfo {}).await;
+  assert_eq!(status_of(res), StatusCode::UNAUTHORIZED);
+  token_signed_with(SUITE_JWT_SECRET)
+    .read(GetCoreInfo {})
+    .await
+    .unwrap();
 
   // Expired tokens are accepted for 10 more seconds (clock skew).
   admin.read(GetCoreInfo {}).await.unwrap();

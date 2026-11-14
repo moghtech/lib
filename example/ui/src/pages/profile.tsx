@@ -15,9 +15,11 @@ import {
 import { notifications } from "@mantine/notifications";
 import {
   AuthProfileSections,
-  CopyButton,
+  HoldOpen,
   Page,
+  RevealOnce,
   Section,
+  useHoldOpen,
   useManageAuth,
 } from "mogh_ui";
 import { KeyRound, Plus, Trash, User } from "lucide-react";
@@ -169,32 +171,33 @@ function NewApiKeyModal({
       setCreated([{ label: "Private Key", value: private_key ?? "" }]);
     },
   });
+  // While the new secret shows: a stray click or Escape doesn't
+  // lose it, Done asks whether it was saved first.
+  const { held, setHeld } = useHoldOpen();
   const close = () => {
     setCreated(undefined);
     setName("");
     onClose();
   };
   return (
-    <Modal opened={opened} onClose={close} title="New Api Key" size="lg">
+    <Modal
+      opened={opened}
+      onClose={close}
+      title="New Api Key"
+      size="lg"
+      closeOnClickOutside={!held}
+      closeOnEscape={!held}
+      withCloseButton={!held}
+    >
       {created ? (
-        <Stack>
-          <Text>Save these now, they can't be shown again.</Text>
-          {created.map(({ label, value }) => (
-            <Group key={label} wrap="nowrap">
-              <Text w={90}>{label}</Text>
-              <Code
-                data-testid={`api-key-${label.toLowerCase().replace(" ", "-")}`}
-                style={{ wordBreak: "break-all" }}
-              >
-                {value}
-              </Code>
-              <CopyButton content={value} />
-            </Group>
-          ))}
-          <Group justify="end">
-            <Button onClick={close}>Done</Button>
-          </Group>
-        </Stack>
+        <HoldOpen.Provider value={setHeld}>
+          <RevealOnce
+            message="Save these now, they can't be shown again."
+            values={created.map((value) => ({ ...value, monospace: true }))}
+            onDone={close}
+            confirmSaved
+          />
+        </HoldOpen.Provider>
       ) : (
         <Stack>
           <TextInput

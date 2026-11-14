@@ -28,6 +28,11 @@ use tempfile::TempDir;
 
 pub const PASSWORD: &str = "correct-horse-battery";
 
+/// The `jwt_secret` of the suite's apps, unless a test gives one its
+/// own ([TestAppOptions::jwt_secret]).
+pub const SUITE_JWT_SECRET: &str =
+  "test-jwt-secret-of-the-example-api-suite";
+
 pub struct TestAppOptions {
   /// The config file contents, merged over the defaults of the harness.
   pub config: Value,
@@ -37,6 +42,9 @@ pub struct TestAppOptions {
   pub static_oidc: bool,
   /// (max attempts, window seconds). Disabled if `None`.
   pub rate_limit: Option<(usize, u64)>,
+  /// The contents of the `jwt_secret` file: [SUITE_JWT_SECRET] by
+  /// default, another for an app playing another deployment.
+  pub jwt_secret: String,
 }
 
 impl Default for TestAppOptions {
@@ -46,6 +54,7 @@ impl Default for TestAppOptions {
       env: Vec::new(),
       static_oidc: false,
       rate_limit: None,
+      jwt_secret: SUITE_JWT_SECRET.to_string(),
     }
   }
 }
@@ -142,7 +151,7 @@ impl TestApp {
     // 32 bytes at least, or the server refuses to start.
     std::fs::write(
       &jwt_secret_path,
-      "test-jwt-secret-of-the-example-api-suite\n",
+      format!("{}\n", options.jwt_secret),
     )
     .unwrap();
 

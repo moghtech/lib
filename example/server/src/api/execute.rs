@@ -5,7 +5,7 @@ use axum::{
 use example_client::api::execute::*;
 use mogh_auth_server::{
   middleware::authenticate_request,
-  validations::validate_public_http_url,
+  validations::validate_http_url_without_userinfo,
 };
 use mogh_error::{
   AddStatusCode as _, Json, Variant, variant_request,
@@ -150,7 +150,9 @@ impl Resolve<ExecuteArgs> for ValidateString {
         .min_length(1)
         .max_length(2000)
         .validate(&self.input)
-        .and_then(|_| validate_public_http_url("input", &self.input)),
+        .and_then(|_| {
+          validate_http_url_without_userinfo("input", &self.input)
+        }),
       ValidateStringKind::NoteTitle => {
         validate_note_title(&self.input)
       }

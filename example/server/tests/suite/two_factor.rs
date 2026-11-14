@@ -601,6 +601,41 @@ async fn a_pending_login_outlives_the_session_idle_expiry() {
   assert_eq!(user.username, "admin");
 }
 
+/// One enrollment confirmed twice at once (a double click on
+/// Confirm): every request works on its own copy of the session, so
+/// both find the enrollment, but only one confirms it. Two would each
+/// store their own recovery codes, and the user could keep the set
+/// the other overwrote. The codes of the one confirmation work.
+#[tokio::test]
+async fn an_enrollment_is_confirmed_once() {
+  let app = TestApp::spawn().await;
+  let admin = app.sign_up("admin").await;
+  for round in 0..5 {
+    let enrollment =
+      admin.manage(BeginTotpEnrollment {}).await.unwrap();
+    let totp = totp_from_uri(&enrollment.uri);
+    let code = totp.generate_current().to_string();
+    let confirm =
+      || admin.manage(ConfirmTotpEnrollment { code: code.clone() });
+    let (first, second) = tokio::join!(confirm(), confirm());
+    let confirmed = [first, second]
+      .into_iter()
+      .filter_map(Result::ok)
+      .map(|res| res.recovery_codes)
+      .collect::<Vec<_>>();
+    assert_eq!(confirmed.len(), 1, "round {round}");
+
+    let client = begin_login(&app, "admin").await;
+    client
+      .login(CompleteTotpRecoveryLogin {
+        code: confirmed[0][0].clone(),
+      })
+      .await
+      .unwrap_or_else(|e| panic!("round {round}: {e:#}"));
+    admin.manage(UnenrollTotp {}).await.unwrap();
+  }
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
   haystack
     .windows(needle.len())

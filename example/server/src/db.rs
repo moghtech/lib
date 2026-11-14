@@ -16,7 +16,8 @@ use mogh_auth_client::config::{
 };
 use mogh_auth_server::provider::workload::LiveIssuer;
 use mogh_auth_server::{
-  passkey::Passkey, provider::workload::WorkloadAccess,
+  Login, SecondFactor, passkey::Passkey,
+  provider::workload::WorkloadAccess,
 };
 use mogh_supporter::SupporterBranding;
 use serde::{Serialize, de::DeserializeOwned};
@@ -418,9 +419,15 @@ pub async fn insert_workload_user(
 pub enum UserUpdate {
   Username(String),
   Password(String),
-  Enabled(bool),
   Admin(bool),
   Groups(Vec<String>),
+  /// What an admin sets of another user (`UpdateUserAccess`), in one
+  /// statement: the fields which are `None` keep their value.
+  Access {
+    enabled: Option<bool>,
+    admin: Option<bool>,
+    groups: Option<Vec<String>>,
+  },
   Passkey(Option<Passkey>),
   Totp {
     secret: String,
@@ -464,14 +471,6 @@ pub async fn update_user(
         .execute(db())
         .await
     }
-    UserUpdate::Enabled(enabled) => {
-      sqlx::query(sqlx::AssertSqlSafe(query("enabled")))
-        .bind(enabled)
-        .bind(now)
-        .bind(id)
-        .execute(db())
-        .await
-    }
     UserUpdate::Admin(admin) => {
       sqlx::query(sqlx::AssertSqlSafe(query("admin")))
         .bind(admin)
@@ -487,6 +486,27 @@ pub async fn update_user(
         .bind(id)
         .execute(db())
         .await
+    }
+    UserUpdate::Access {
+      enabled,
+      admin,
+      groups,
+    } => {
+      sqlx::query(
+        "UPDATE users
+         SET enabled = COALESCE(?, enabled),
+             admin = COALESCE(?, admin),
+             groups = COALESCE(?, groups),
+             updated_at = ?
+         WHERE id = ?",
+      )
+      .bind(enabled)
+      .bind(admin)
+      .bind(groups.as_ref().map(to_json).transpose()?)
+      .bind(now)
+      .bind(id)
+      .execute(db())
+      .await
     }
     UserUpdate::Passkey(passkey) => {
       let passkey = match passkey {
@@ -966,16 +986,18 @@ pub async fn store_supporter_branding(
 // = TRUSTED ISSUERS =
 // ===================
 
+/// A token review issuer includes its reviewer credential, so the
+/// issuers are stored encrypted, like the login providers.
 pub async fn list_trusted_issuers()
 -> anyhow::Result<Vec<TrustedIssuer>> {
-  sqlx::query_scalar::<_, String>(
-    "SELECT data FROM trusted_issuers ORDER BY created_at",
+  sqlx::query_as::<_, (String, String)>(
+    "SELECT id, data FROM trusted_issuers ORDER BY created_at",
   )
   .fetch_all(db())
   .await
   .context("Failed to query trusted issuers")?
-  .iter()
-  .map(|data| from_json(data))
+  .into_iter()
+  .map(|(id, data)| from_json(&crypto::open(&data, &id)?))
   .collect()
 }
 
@@ -986,7 +1008,7 @@ pub async fn create_trusted_issuer(
     "INSERT INTO trusted_issuers (id, data, created_at) VALUES (?, ?, ?)",
   )
   .bind(&issuer.id)
-  .bind(to_json(issuer)?)
+  .bind(crypto::seal(&to_json(issuer)?, &issuer.id)?)
   .bind(unix_timestamp_ms())
   .execute(db())
   .await
@@ -999,7 +1021,7 @@ pub async fn update_trusted_issuer(
 ) -> anyhow::Result<()> {
   let res =
     sqlx::query("UPDATE trusted_issuers SET data = ? WHERE id = ?")
-      .bind(to_json(issuer)?)
+      .bind(crypto::seal(&to_json(issuer)?, &issuer.id)?)
       .bind(&issuer.id)
       .execute(db())
       .await
@@ -1025,6 +1047,38 @@ pub async fn delete_trusted_issuer(id: &str) -> anyhow::Result<()> {
     .await
     .context("Failed to delete the users of the trusted issuer")?;
   tx.commit().await.context("Failed to commit transaction")
+}
+
+// ==========
+// = LOGINS =
+// ==========
+
+/// Appends a login the auth server completed
+/// (`AuthImpl::record_login`).
+pub async fn record_login(login: &Login) -> anyhow::Result<()> {
+  let second_factor = match login.second_factor {
+    None => "",
+    Some(SecondFactor::Passkey) => "passkey",
+    Some(SecondFactor::Totp) => "totp",
+    Some(SecondFactor::TotpRecovery) => "totp_recovery",
+  };
+  sqlx::query(
+    "INSERT INTO logins
+      (id, user_id, username, ip, kind, second_factor, token_expires, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  )
+  .bind(new_id())
+  .bind(&login.user_id)
+  .bind(&login.username)
+  .bind(login.ip.to_string())
+  .bind(to_json(&login.kind)?)
+  .bind(second_factor)
+  .bind(i64::try_from(login.token_expires).unwrap_or(i64::MAX))
+  .bind(unix_timestamp_ms())
+  .execute(db())
+  .await
+  .context("Failed to record login")?;
+  Ok(())
 }
 
 // ========

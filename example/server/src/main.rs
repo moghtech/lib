@@ -37,6 +37,15 @@ async fn app() -> anyhow::Result<()> {
     )
     .context("Invalid 'host' / 'extra_hosts' config")?;
   info!("Signed Request Hosts: {signed_request_hosts:?}");
+  // The replay store keeps every signature for the timestamp
+  // tolerance (plus the body timeout), which is also how long a
+  // captured request can be replayed after a restart: at most a
+  // minute. The example keeps the default second, an app which
+  // configures it names its config key here.
+  mogh_auth_server::replay::check_timestamp_tolerance(
+    &auth::ExampleAuthImpl,
+  )
+  .context("Invalid signed request timestamp tolerance")?;
 
   db::init().await?;
   // Fails here if the encryption key is invalid.

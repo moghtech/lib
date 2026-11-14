@@ -2,13 +2,16 @@
 
 use example_client::{
   ClientAuth,
-  api::read::GetUser,
+  api::read::{GetUser, ListApiKeys},
   auth::api::{
     login::{
       GetLoginOptions, JwtOrTwoFactor, LoginLocalUser,
       SignUpLocalUser,
     },
-    manage::{GetUserId, UpdatePassword, UpdateUsername},
+    manage::{
+      CreateApiKey, CreateSigningKey, GetUserId,
+      UpdateExternalSkip2fa, UpdatePassword, UpdateUsername,
+    },
   },
 };
 use reqwest::StatusCode;
@@ -441,9 +444,30 @@ async fn locked_usernames_cannot_change_credentials() {
         })
         .await,
     ),
+    // A key would outlive the lock.
+    status_of(
+      demo
+        .manage(CreateApiKey {
+          name: "visitor".into(),
+          expires: 0,
+          cidr_whitelist: Vec::new(),
+        })
+        .await,
+    ),
+    status_of(
+      demo
+        .manage(CreateSigningKey {
+          name: "visitor".into(),
+          expires: 0,
+          cidr_whitelist: Vec::new(),
+          public_key: String::new(),
+        })
+        .await,
+    ),
   ] {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
   }
+  assert!(demo.read(ListApiKeys {}).await.unwrap().is_empty());
   // Still the same user.
   assert_eq!(
     get_user(&app.log_in("demo").await).await.username,
@@ -624,4 +648,42 @@ async fn changing_the_password_ends_the_other_sessions() {
   };
   let relogged = client.with_auth(ClientAuth::Jwt(jwt.jwt));
   assert_eq!(get_user(&relogged).await.username, "admin");
+}
+
+/// Turning off the skip of the second factor at provider logins ends
+/// the user's other sessions, like a password change: one of them may
+/// come from a provider login which skipped it. Turning it on ends
+/// none. The session which made the change goes on either way.
+#[tokio::test]
+async fn turning_off_the_2fa_skip_ends_the_other_sessions() {
+  let app = TestApp::spawn().await;
+  let other = app.sign_up("admin").await;
+  // Tokens carry whole seconds: the other session is from a second
+  // before the change.
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  let changing = app.log_in("admin").await;
+
+  changing
+    .manage(UpdateExternalSkip2fa {
+      external_skip_2fa: true,
+    })
+    .await
+    .unwrap();
+  assert!(get_user(&other).await.external_skip_2fa);
+
+  changing
+    .manage(UpdateExternalSkip2fa {
+      external_skip_2fa: false,
+    })
+    .await
+    .unwrap();
+  assert_eq!(
+    status_of(other.read(GetUser {}).await),
+    StatusCode::UNAUTHORIZED
+  );
+  assert_eq!(
+    status_of(other.manage(GetUserId {}).await),
+    StatusCode::UNAUTHORIZED
+  );
+  assert!(!get_user(&changing).await.external_skip_2fa);
 }
