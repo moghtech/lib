@@ -618,6 +618,11 @@ fn generate_write_and_load_round_trip() {
 }
 
 /// A fresh scratch directory per test (no tempfile dependency).
+/// A key file's text which holds no key: a short text (`garbage`)
+/// would read as a raw key (up to 32 bytes, see
+/// `Pkcs8PrivateKey::from_maybe_raw_bytes`).
+const NO_KEY: &str = "not a key: longer than a raw key's 32 bytes";
+
 fn scratch_dir(name: &str) -> std::path::PathBuf {
   let dir = std::env::temp_dir().join(format!(
     "mogh_pki_{name}_{}_{}",
@@ -1075,7 +1080,7 @@ fn a_rotation_file_of_the_other_algorithm_is_refused() {
       RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
     let candidate =
       pair.begin_rotation().unwrap().candidate().clone();
-    std::fs::write(super::sibling(&path, ".old"), "garbage").unwrap();
+    std::fs::write(super::sibling(&path, ".old"), NO_KEY).unwrap();
     let reloaded =
       RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
     assert!(reloaded.rotation_pending());
@@ -1574,7 +1579,7 @@ fn rotation_resumes_and_aborts_a_candidate() {
   );
 
   // An unreadable leftover is replaced.
-  std::fs::write(dir.join("test.key.next"), "garbage").unwrap();
+  std::fs::write(dir.join("test.key.next"), NO_KEY).unwrap();
   let fresh = pair.begin_rotation().unwrap();
   assert_ne!(fresh.candidate().public, candidate.public);
   fresh.abort().unwrap();
@@ -1590,6 +1595,232 @@ fn rotation_resumes_and_aborts_a_candidate() {
   assert!(inline.retired().unwrap().is_none());
   inline.finish_rotation().unwrap();
 
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// candidate_waiting tells beforehand what begin_rotation does with
+/// `<path>.next`: true exactly when it resumes the candidate there.
+#[test]
+fn candidate_waiting_tells_whether_begin_rotation_resumes() {
+  use super::RotatableKeyPair;
+
+  // Asks candidate_waiting, then begin_rotation (dropped, so the
+  // candidate stays as an interrupted rotation leaves it), and
+  // checks they agree. Returns the answer.
+  fn waiting_then_begin(
+    pair: &RotatableKeyPair,
+    next: &std::path::Path,
+  ) -> bool {
+    let waiting = pair.candidate_waiting();
+    let before = EncodedKeyPair::from_file(pair.kind(), next)
+      .ok()
+      .map(|keys| keys.public);
+    let rotation = pair.begin_rotation().unwrap();
+    let resumed =
+      before.as_ref() == Some(&rotation.candidate().public);
+    assert_eq!(waiting, resumed, "{next:?}");
+    // Never the live key.
+    assert_ne!(rotation.candidate().public, pair.load().public);
+    waiting
+  }
+
+  for kind in KINDS {
+    let dir = scratch_dir("candidate_waiting");
+    let path = dir.join("test.key");
+    let next = dir.join("test.key.next");
+    let spec = format!("file:{}", path.display());
+    let pair =
+      RotatableKeyPair::from_private_key_spec(kind, &spec).unwrap();
+    let live = pair.load().clone();
+
+    // None: a new candidate.
+    assert!(!next.exists());
+    assert!(!waiting_then_begin(&pair, &next), "{kind:?}");
+    // The one left by the interrupted rotation above: resumed (of
+    // the pair's kind, whichever).
+    assert!(next.exists());
+    assert!(waiting_then_begin(&pair, &next), "{kind:?}");
+    assert!(waiting_then_begin(&pair, &next), "{kind:?}");
+
+    // The live key (a commit which switched to it): replaced.
+    live.private.write_pem_sync(&next).unwrap();
+    assert!(!waiting_then_begin(&pair, &next), "{kind:?}");
+    assert!(waiting_then_begin(&pair, &next), "{kind:?}");
+
+    // Unreadable: replaced.
+    std::fs::write(&next, NO_KEY).unwrap();
+    assert!(!waiting_then_begin(&pair, &next), "{kind:?}");
+    // A key of the other kind (never usable as this pair's):
+    // replaced.
+    EncodedKeyPair::generate(other(kind))
+      .unwrap()
+      .private
+      .write_pem_sync(&next)
+      .unwrap();
+    assert!(!waiting_then_begin(&pair, &next), "{kind:?}");
+    assert!(waiting_then_begin(&pair, &next), "{kind:?}");
+
+    // Aborted: none left.
+    pair.begin_rotation().unwrap().abort().unwrap();
+    assert!(!pair.candidate_waiting(), "{kind:?}");
+
+    // Not file backed: never.
+    let inline = RotatableKeyPair::from_private_key_spec(
+      kind,
+      live.private.as_str(),
+    )
+    .unwrap();
+    assert!(!inline.candidate_waiting(), "{kind:?}");
+
+    std::fs::remove_dir_all(dir).unwrap();
+  }
+}
+
+/// A raw key of exactly 32 bytes in a key file may be followed by
+/// one line break (`echo`, most editors): the same key as without
+/// it, and the key a `_FILE` variable handed over trimmed. Nothing
+/// else about raw key files changes: a line break inside the 32
+/// bytes is a byte of the key, and other lengths are as before.
+#[test]
+fn a_raw_key_file_may_end_with_one_line_break() {
+  use super::RotatableKeyPair;
+
+  let dir = scratch_dir("raw_key_line_break");
+  for kind in KINDS {
+    let raw = "0123456789abcdef0123456789abcdef";
+    assert_eq!(raw.len(), 32);
+    let public =
+      EncodedKeyPair::from_private_key(kind, raw).unwrap().public;
+    for (name, contents) in [
+      ("plain", raw.to_string()),
+      ("lf", format!("{raw}\n")),
+      ("crlf", format!("{raw}\r\n")),
+    ] {
+      let path = dir.join(format!("{kind:?}.{name}.key"));
+      std::fs::write(&path, &contents).unwrap();
+      assert!(
+        EncodedKeyPair::from_file(kind, &path).unwrap().public
+          == public,
+        "{kind:?} {name}"
+      );
+      let spec = format!("file:{}", path.display());
+      assert!(
+        RotatableKeyPair::from_private_key_spec(kind, &spec)
+          .unwrap()
+          .load()
+          .public
+          == public,
+        "{kind:?} {name}"
+      );
+      // Read only: the file is left as it was written.
+      assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+    }
+
+    // Still no key: two line breaks, a space, half a line break.
+    for (name, contents) in [
+      ("two", format!("{raw}\n\n")),
+      ("space", format!("{raw} \n")),
+      ("cr", format!("{raw}\r")),
+      ("short-crlf", format!("{}\r\n", &raw[..31])),
+    ] {
+      let path = dir.join(format!("{kind:?}.{name}.key"));
+      std::fs::write(&path, &contents).unwrap();
+      assert!(
+        EncodedKeyPair::from_file(kind, &path).is_err(),
+        "{kind:?} {name}"
+      );
+    }
+
+    // Unchanged: 32 bytes whose last one is a line break are the
+    // key as written, and a shorter raw key is zero padded.
+    for contents in
+      [format!("{}\n", &raw[..31]), "short\n".to_string()]
+    {
+      let path = dir.join(format!("{kind:?}.as-written.key"));
+      std::fs::write(&path, &contents).unwrap();
+      assert!(
+        EncodedKeyPair::from_file(kind, &path).unwrap().public
+          == EncodedKeyPair::from_private_key(kind, &contents)
+            .unwrap()
+            .public,
+        "{kind:?} {contents:?}"
+      );
+    }
+  }
+  std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Key files are read as text. A binary one (a DER file as `openssl
+/// genpkey -outform DER` writes it, 32 random bytes) is refused with
+/// an error naming the forms a key file holds and how to convert it,
+/// never its bytes.
+#[test]
+fn a_binary_key_file_is_refused_naming_the_text_forms() {
+  use super::{RotatableKeyPair, SpkiPublicKey};
+
+  let dir = scratch_dir("binary_key_file");
+  for kind in KINDS {
+    let keys = EncodedKeyPair::generate(kind).unwrap();
+    let der = data_encoding::BASE64
+      .decode(keys.private.as_str().as_bytes())
+      .unwrap();
+    // Binary DER, and raw random bytes, neither of them UTF-8.
+    let raw = [0xffu8; 32];
+    for (name, bytes) in
+      [("key.der", &der[..]), ("key.raw", &raw[..])]
+    {
+      let path = dir.join(format!("{kind:?}.{name}"));
+      std::fs::write(&path, bytes).unwrap();
+      let spec = format!("file:{}", path.display());
+      for err in [
+        Pkcs8PrivateKey::from_file(kind, &path).err().unwrap(),
+        EncodedKeyPair::from_file(kind, &path).err().unwrap(),
+        RotatableKeyPair::from_private_key_spec(kind, &spec)
+          .err()
+          .unwrap(),
+      ] {
+        let message = format!("{err:#}");
+        assert!(message.contains("not UTF-8 text"), "{message}");
+        assert!(
+          message.contains(
+            "pem, base64 pkcs8 der, or a raw key of up to 32 characters"
+          ),
+          "{message}"
+        );
+        assert!(
+          message.contains("openssl pkey -inform DER"),
+          "{message}"
+        );
+        assert!(message.contains(name), "{message}");
+      }
+      // Left as it is: it may be the key the node is known by.
+      assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+    // The pem body of the same key, as text, is read.
+    let path = dir.join(format!("{kind:?}.key.b64"));
+    std::fs::write(&path, keys.private.as_str()).unwrap();
+    assert!(
+      EncodedKeyPair::from_file(kind, &path).unwrap().public
+        == keys.public
+    );
+
+    // A binary public key file alike.
+    let path = dir.join(format!("{kind:?}.pub.der"));
+    let der = data_encoding::BASE64
+      .decode(keys.public.as_str().as_bytes())
+      .unwrap();
+    std::fs::write(&path, der).unwrap();
+    let message = format!(
+      "{:#}",
+      SpkiPublicKey::from_file(kind, &path).err().unwrap()
+    );
+    assert!(message.contains("not UTF-8 text"), "{message}");
+    assert!(message.contains("pem or base64 spki der"), "{message}");
+    assert!(
+      message.contains("openssl pkey -pubin -inform DER"),
+      "{message}"
+    );
+  }
   std::fs::remove_dir_all(dir).unwrap();
 }
 

@@ -219,7 +219,7 @@ impl EncodedKeyPair {
   /// find it missing, so the file is created, never written over
   /// (see `mogh_secret_file::write_new`): one process creates it, the
   /// others load the key it holds, returned with `false`. Were it
-  /// written over (as before 3.1), each process would run on the key
+  /// written over (as before 4.0), each process would run on the key
   /// it generated, of which only the last one written stays on disk:
   /// the others would run on a key no restart loads again (and
   /// register a public key nobody holds anymore).
@@ -320,8 +320,9 @@ impl EncodedKeyPair {
     Ok(Self { private, public })
   }
 
-  /// Loads the pair from a private key file (raw / der / pem),
-  /// deriving the public key.
+  /// Loads the pair from a private key file, deriving the public
+  /// key. The file holds text: pem, base64 pkcs8 der, or a raw key
+  /// of up to 32 characters (see [Pkcs8PrivateKey::from_file]).
   pub fn from_file(
     pki_kind: PkiKind,
     private_key_path: impl AsRef<Path>,
@@ -371,6 +372,23 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 
 /// The candidate of an in-flight [RotatableKeyPair::begin_rotation].
 const NEXT_SUFFIX: &str = ".next";
+
+/// What a rotation candidate file (`<path>.next`) holds, see
+/// [RotatableKeyPair::read_candidate].
+enum Candidate {
+  /// No file: begin_rotation generates a new candidate.
+  Missing,
+  /// The live key, left by a commit which switched to it but did
+  /// not get to remove it: that rotation is done, begin_rotation
+  /// starts a new one.
+  Live,
+  /// No key of the pair's kind: never usable, so nothing can have
+  /// been registered under it. begin_rotation starts over.
+  Unreadable(anyhow::Error),
+  /// The candidate of an interrupted rotation, which begin_rotation
+  /// resumes: the caller may have registered it already.
+  Waiting(EncodedKeyPair),
+}
 /// The key a committed rotation retired, until
 /// [RotatableKeyPair::finish_rotation].
 const OLD_SUFFIX: &str = ".old";
@@ -563,8 +581,10 @@ pub struct RotatableKeyPair {
 }
 
 impl RotatableKeyPair {
-  /// Parses from either direct private key (raw / der / pem),
-  /// or from file containing raw / der / pem.
+  /// Parses the private key given inline (pem, base64 pkcs8 der, or
+  /// exactly 32 raw bytes, see below), or read from a file holding
+  /// text (pem, base64 pkcs8 der, or a raw key of up to 32
+  /// characters, see [Pkcs8PrivateKey::from_file]).
   /// Use `file:/path/to/private.key` to specify file: a key is
   /// generated and written there when the file does not exist. The
   /// file is created, never written over one: of processes starting
@@ -783,34 +803,28 @@ impl RotatableKeyPair {
       return Err(anyhow!(unfinished()));
     }
     let next_path = sibling(path, NEXT_SUFFIX);
-    let candidate = match next_path.try_exists()? {
-      true => match EncodedKeyPair::from_file(pki_kind, &next_path) {
-        // Left by a commit which switched to it, but did not get to
-        // remove it: that rotation is done. Start a new one.
-        Ok(candidate)
-          if candidate.public == self.keys.load().public =>
-        {
-          tracing::info!(
-            "Replacing the rotation candidate at {next_path:?}: it holds the live key, left by a key rotation which switched to it"
-          );
-          Self::write_candidate(pki_kind, &next_path)?
-        }
-        Ok(candidate) => {
-          tracing::info!(
-            "Resuming key rotation with the candidate at {next_path:?}"
-          );
-          candidate
-        }
-        // Unreadable leftover: it was never usable, so nothing can
-        // have been registered under it. Start over.
-        Err(e) => {
-          tracing::warn!(
-            "Replacing the unreadable rotation candidate at {next_path:?} | {e:#}"
-          );
-          Self::write_candidate(pki_kind, &next_path)?
-        }
-      },
-      false => Self::write_candidate(pki_kind, &next_path)?,
+    let candidate = match self.read_candidate(&next_path)? {
+      Candidate::Waiting(candidate) => {
+        tracing::info!(
+          "Resuming key rotation with the candidate at {next_path:?}"
+        );
+        candidate
+      }
+      Candidate::Live => {
+        tracing::info!(
+          "Replacing the rotation candidate at {next_path:?}: it holds the live key, left by a key rotation which switched to it"
+        );
+        Self::write_candidate(pki_kind, &next_path)?
+      }
+      Candidate::Unreadable(e) => {
+        tracing::warn!(
+          "Replacing the unreadable rotation candidate at {next_path:?} | {e:#}"
+        );
+        Self::write_candidate(pki_kind, &next_path)?
+      }
+      Candidate::Missing => {
+        Self::write_candidate(pki_kind, &next_path)?
+      }
     };
     Ok(KeyRotation {
       pair: self,
@@ -820,6 +834,27 @@ impl RotatableKeyPair {
       old_path,
       candidate,
       _rotating: guard,
+    })
+  }
+
+  /// What the rotation candidate file `next_path` (`<path>.next`)
+  /// holds: the one rule of whether [Self::begin_rotation] resumes
+  /// it, which [Self::candidate_waiting] tells beforehand.
+  fn read_candidate(
+    &self,
+    next_path: &Path,
+  ) -> anyhow::Result<Candidate> {
+    if !next_path.try_exists()? {
+      return Ok(Candidate::Missing);
+    }
+    Ok(match EncodedKeyPair::from_file(self.pki_kind, next_path) {
+      Ok(candidate)
+        if candidate.public == self.keys.load().public =>
+      {
+        Candidate::Live
+      }
+      Ok(candidate) => Candidate::Waiting(candidate),
+      Err(e) => Candidate::Unreadable(e),
     })
   }
 
@@ -914,6 +949,33 @@ impl RotatableKeyPair {
         && !Pkcs8PrivateKey::from_file(self.pki_kind, &next)
           .is_ok_and(|next| next == self.keys.load().private))
         || sibling(path, OLD_SUFFIX).exists()
+    })
+  }
+
+  /// Whether a candidate of an earlier, interrupted rotation waits
+  /// at `<path>.next`: the one [Self::begin_rotation] resumes
+  /// (rather than generate a new candidate), and which the caller
+  /// may therefore have registered already, eg. to ask the server
+  /// whether it takes it before registering it again. Read by the
+  /// same rule begin_rotation applies: a file holding a key of the
+  /// pair's kind other than the live one. A `<path>.next` holding the
+  /// live key (left by a commit which switched to it) or no key of
+  /// the pair's kind (unreadable, never usable, so never registered)
+  /// is none: begin_rotation replaces it with a new candidate. False
+  /// for a pair which is not file backed, and when the file can't be
+  /// told to exist (begin_rotation fails then).
+  ///
+  /// Asked before begin_rotation, it tells what begin_rotation does
+  /// with the file, as only a rotation of this pair changes it (one
+  /// process rotates a key file). It says nothing of whether
+  /// begin_rotation succeeds: a [retired][Self::retired] key still
+  /// waiting fails it.
+  pub fn candidate_waiting(&self) -> bool {
+    self.path.as_deref().is_some_and(|path| {
+      matches!(
+        self.read_candidate(&sibling(path, NEXT_SUFFIX)),
+        Ok(Candidate::Waiting(_))
+      )
     })
   }
 

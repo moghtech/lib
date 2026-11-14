@@ -93,16 +93,25 @@ impl SpkiPublicKey {
     }
   }
 
+  /// Reads a public key file in any of the forms
+  /// [Self::from_maybe_pem] accepts, which are text: pem, or base64
+  /// spki der (the pem body). A binary file (a DER file as `openssl
+  /// pkey -pubout -outform DER` writes it) is an error naming these
+  /// forms and how to convert it.
   pub fn from_file(
     pki_kind: PkiKind,
     path: impl AsRef<Path>,
   ) -> anyhow::Result<Self> {
     let path = path.as_ref();
-    let contents =
-      std::fs::read_to_string(path).with_context(|| {
-        format!("Failed to read public key at {path:?}")
-      })?;
-    Self::from_maybe_pem(pki_kind, &contents)
+    let contents = std::fs::read(path).with_context(|| {
+      format!("Failed to read public key at {path:?}")
+    })?;
+    let contents = std::str::from_utf8(&contents).map_err(|_| {
+      anyhow::anyhow!(
+        "Invalid public key file at {path:?}: it is not UTF-8 text. A public key file holds pem or base64 spki der: convert a binary DER key with `openssl pkey -pubin -inform DER -in <file>`"
+      )
+    })?;
+    Self::from_maybe_pem(pki_kind, contents)
       .with_context(|| format!("Invalid public key file at {path:?}"))
   }
 

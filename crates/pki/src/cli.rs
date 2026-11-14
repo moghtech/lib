@@ -2,10 +2,14 @@ use anyhow::Context as _;
 use colored::Colorize as _;
 
 /// Private-Public key utilities. (alias: `k`)
+///
+/// The texts say nothing of what the keys are for, as [handle] takes
+/// any [PkiKind][crate::PkiKind]: the app's own subcommand holding
+/// this one says that.
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum KeyCommand {
-  /// Generate a new public / private key pair
-  /// for use with Core - Periphery authentication.
+  /// Generate a new private / public key pair, printed (not written
+  /// to a file).
   /// (aliases: `gen`, `g`)
   #[clap(alias = "gen", alias = "g")]
   Generate {
@@ -18,10 +22,11 @@ pub enum KeyCommand {
   /// (aliases: `comp`, `c`)
   #[clap(alias = "comp", alias = "c")]
   Compute {
-    /// The private key: `file:/path/to/key` reads a key file (as
-    /// `private_key = "file:..."` does), `-` (the default) reads it
-    /// from stdin. The key itself works too, but is then visible in
-    /// the process list and the shell history.
+    /// Where to read the private key from: `-` (the default) reads it
+    /// from stdin (type it, then Ctrl-D, or pipe it in),
+    /// `file:/path/to/key` reads a key file (as
+    /// `private_key = "file:..."` does). The key itself is refused:
+    /// the process list and the shell history would show it.
     #[arg(default_value = "-")]
     private_key: String,
     /// Specify the format of the output.
@@ -84,6 +89,7 @@ pub async fn handle(
       private_key,
       format,
     } => {
+      check_private_key_argument(private_key)?;
       let public_key = if private_key == "-" {
         let mut stdin = std::io::stdin();
         if std::io::IsTerminal::is_terminal(&stdin) {
@@ -130,9 +136,26 @@ struct PublicKey<'a> {
   public_key: &'a str,
 }
 
+/// The argument of `key compute` says where to read the private key
+/// from: `-` (stdin) or a `file:` spec. Anything else is most likely
+/// the key itself, which every local user sees in the process list
+/// (`ps`, `/proc/<pid>/cmdline`) and the shell keeps in its history:
+/// refused, without repeating it. Read from stdin, the key itself is
+/// taken.
+fn check_private_key_argument(argument: &str) -> anyhow::Result<()> {
+  if argument == "-" || argument.trim().starts_with("file:") {
+    return Ok(());
+  }
+  // The argument isn't in the error: it is most likely the key.
+  anyhow::bail!(
+    "The private key isn't taken on the command line, where the process list and the shell history show it. Pass `-` to type it or pipe it in, or `file:/path/to/key` to read a key file"
+  )
+}
+
 /// The public key of a private key given as `file:/path` (the path
 /// read like a `file:` private key spec, see
-/// [crate::key_spec_path]), or as the key itself.
+/// [crate::key_spec_path]), or as the key itself (read from stdin:
+/// as the argument it is refused, see [check_private_key_argument]).
 fn compute_public_key(
   pki_kind: crate::PkiKind,
   private_key: &str,
@@ -205,6 +228,7 @@ fn print_json_pretty(
 
 #[cfg(test)]
 mod tests {
+  use super::KeyCommand;
   use crate::{EncodedKeyPair, PkiKind};
 
   #[test]
@@ -260,7 +284,7 @@ mod tests {
   fn format_help_names_the_real_aliases() {
     use clap::{Parser as _, ValueEnum as _};
 
-    use super::{KeyCommand, KeyOutputFormat};
+    use super::KeyOutputFormat;
 
     #[derive(clap::Parser)]
     struct Cli {
@@ -283,8 +307,8 @@ mod tests {
         "{help:?} names an alias clap doesn't take"
       );
       for args in [
-        vec!["km", "generate", "-f", documented],
-        vec!["km", "compute", "-", "--format", documented],
+        vec!["app", "generate", "-f", documented],
+        vec!["app", "compute", "-", "--format", documented],
       ] {
         let parsed = match Cli::try_parse_from(&args).unwrap().command
         {
@@ -297,6 +321,76 @@ mod tests {
           "{args:?}"
         );
       }
+    }
+  }
+
+  /// The help is the lib's, for any app and either kind of key:
+  /// what the keys are for is the app's to say.
+  #[test]
+  fn help_names_no_app() {
+    use clap::Subcommand as _;
+
+    let command =
+      KeyCommand::augment_subcommands(clap::Command::new("app"));
+    for sub in command.get_subcommands() {
+      for help in [sub.get_about(), sub.get_long_about()]
+        .into_iter()
+        .flatten()
+      {
+        let help = help.to_string();
+        for app in ["Core", "Periphery", "Komodo", "Cicada"] {
+          assert!(
+            !help.contains(app),
+            "{}: {help:?}",
+            sub.get_name()
+          );
+        }
+      }
+    }
+  }
+
+  /// The private key itself is refused as the argument of `key
+  /// compute`, without the error repeating it: only `-` (stdin) and
+  /// a `file:` spec are taken.
+  #[tokio::test]
+  async fn compute_refuses_an_inline_key() {
+    use super::{
+      KeyOutputFormat, check_private_key_argument, handle,
+    };
+    let keys = EncodedKeyPair::generate(PkiKind::Mutual).unwrap();
+    let private_key = keys.private.as_str().to_string();
+    let pem = format!(
+      "-----BEGIN PRIVATE KEY-----\n{private_key}\n-----END PRIVATE KEY-----"
+    );
+    for inline in [
+      private_key.as_str(),
+      pem.as_str(),
+      // Raw key bytes, and a path without its `file:`.
+      "0123456789abcdef0123456789abcdef",
+      "/config/keys/core.key",
+      "",
+    ] {
+      let err = handle(
+        &KeyCommand::Compute {
+          private_key: inline.to_string(),
+          format: KeyOutputFormat::Standard,
+        },
+        PkiKind::Mutual,
+      )
+      .await
+      .unwrap_err();
+      let message = format!("{err:#} {err:?}");
+      assert!(
+        message.contains("isn't taken on the command line"),
+        "{message}"
+      );
+      if !inline.is_empty() {
+        assert!(!message.contains(inline), "{message}");
+      }
+      assert!(!message.contains(&private_key), "{message}");
+    }
+    for taken in ["-", "file:/config/keys/core.key", " file: k "] {
+      check_private_key_argument(taken).unwrap();
     }
   }
 

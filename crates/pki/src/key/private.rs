@@ -17,6 +17,27 @@ const NOT_A_PRIVATE_KEY: &str =
 /// errors.
 const INLINE_KEY_FORMS: &str = "a private key given inline must be pkcs8 encoded (pem, or base64 der) or exactly 32 raw bytes";
 
+/// The contents of a key file without the one line break that
+/// follows a raw key of exactly 32 bytes; other contents as they
+/// are.
+///
+/// 33 or 34 bytes are no key in any form (pkcs8 is longer in pem and
+/// in base64 der, a raw key has at most 32), so such a file was an
+/// error before, and nothing that loaded reads differently. A value
+/// which a `_FILE` variable used to hand over trimmed (32 characters
+/// and the line break of `echo`) is the same key as a key file.
+fn raw_key_without_line_break(contents: &str) -> &str {
+  let key = contents
+    .strip_suffix("\r\n")
+    .or_else(|| contents.strip_suffix('\n'));
+  match key {
+    // A `\r` left at the end is half a line break, not a key byte
+    // somebody meant.
+    Some(key) if key.len() == 32 && !key.ends_with('\r') => key,
+    _ => contents,
+  }
+}
+
 /// The raw keys a parse of private key text takes, see
 /// [Pkcs8PrivateKey::maybe_raw_bytes] and
 /// [Pkcs8PrivateKey::from_inline_key].
@@ -167,20 +188,37 @@ impl Pkcs8PrivateKey {
   }
 
   /// Reads a private key file in any of the forms
-  /// [Self::from_maybe_raw_bytes] accepts. An empty (or whitespace
-  /// only) file is an error, not a key.
+  /// [Self::from_maybe_raw_bytes] accepts, which are text: pem,
+  /// base64 pkcs8 der (the pem body), or a raw key of up to 32
+  /// characters. A binary file (a DER file as `openssl genpkey
+  /// -outform DER` writes it, 32 random bytes) is an error naming
+  /// these forms and how to convert a DER file. An empty (or
+  /// whitespace only) file is an error, not a key.
+  ///
+  /// A raw key of exactly 32 bytes may be followed by one line break
+  /// (`echo` and most editors write one): the line break is not part
+  /// of the key then. Any other raw key is used as written.
   pub fn from_file(
     pki_kind: PkiKind,
     path: impl AsRef<Path>,
   ) -> anyhow::Result<Self> {
     let path = path.as_ref();
+    // Bytes first, so they are zeroized whatever they hold (also a
+    // binary key refused below).
     let contents =
-      Zeroizing::new(std::fs::read_to_string(path).with_context(
-        || format!("Failed to read private key at {path:?}"),
-      )?);
-    Self::from_maybe_raw_bytes(pki_kind, &contents).with_context(
-      || format!("Invalid private key file at {path:?}"),
+      Zeroizing::new(std::fs::read(path).with_context(|| {
+        format!("Failed to read private key at {path:?}")
+      })?);
+    let contents = std::str::from_utf8(&contents).map_err(|_| {
+      anyhow!(
+        "Invalid private key file at {path:?}: it is not UTF-8 text. A key file holds pem, base64 pkcs8 der, or a raw key of up to 32 characters: convert a binary DER key with `openssl pkey -inform DER -in <file>`"
+      )
+    })?;
+    Self::from_maybe_raw_bytes(
+      pki_kind,
+      raw_key_without_line_break(contents),
     )
+    .with_context(|| format!("Invalid private key file at {path:?}"))
   }
 
   /// Parses a private key in any of these forms, see

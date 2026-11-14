@@ -47,7 +47,14 @@ a malformed one.
   X25519 key, or the Ed25519 seed), with no key derivation, so a short
   value can be brute forced from the public key. Prefer generated
   keys. Raw bytes name no algorithm, so the same input is a different
-  key for each kind.
+  key for each kind. A key file holds one of these as text (pem,
+  base64 pkcs8 der, or a raw key of up to 32 characters, and public
+  key files pem or base64 spki der): a binary DER file (`openssl ...
+  -outform DER`) is refused with an error saying so, convert it with
+  `openssl pkey -inform DER` (`-pubin` for a public key). A raw key
+  of exactly 32 bytes may be followed by one line break (`echo`
+  writes one), which is not part of the key then; any other raw key
+  is used as written.
 - A private key given inline, as a person writes it down (the key of a
   node's own identity in `from_private_key_spec`, a key somebody
   chose: `Pkcs8PrivateKey::from_inline_key`,
@@ -110,7 +117,11 @@ a malformed one.
   wherever it is still registered).
   A file backed pair can rotate: in one step (`rotate`), or in two
   phases for a key registered elsewhere (`begin_rotation`, register
-  the candidate, `commit`, revoke `retired`, `finish_rotation`). One
+  the candidate, `commit`, revoke `retired`, `finish_rotation`).
+  `begin_rotation` resumes the candidate of an interrupted rotation
+  (`<path>.next`), which may be registered already;
+  `candidate_waiting()` tells beforehand whether it will, by the same
+  rule (a key of the pair's kind other than the live one). One
   rotation of a pair at a time, and only one process may rotate a
   given key file. Both write the key file with `mogh_secret_file`:
   an atomic replace keeping its owner, group and mode, or an in
@@ -125,6 +136,23 @@ a malformed one.
   points: the link stays, the file it points to holds the new key,
   and the rotation files and the public key file are written beside
   that file. A file it points to named `*.pub` is refused.
+
+## CLI
+
+With the `cli` feature, `mogh_pki::cli::KeyCommand` is a clap subcommand an app
+nests under its own (eg. `km key`, `periphery key`), handled by
+`mogh_pki::cli::handle(&command, kind)`:
+
+- `key generate` (`gen`, `g`) prints a new key pair, written to no file.
+- `key compute` (`comp`, `c`) prints the public key of a private key, read from
+  `-` (stdin, the default: typed then Ctrl-D, or piped in) or
+  `file:/path/to/key` (a key file, as a `file:` private key spec). The key
+  itself is refused as the argument, with an error which doesn't repeat it:
+  every local user can read a process's arguments (`ps`), and the shell keeps
+  them in its history. Read from stdin, the key itself is taken.
+
+`--format` (`-f`) prints `standard`, `json` or `json-pretty`. The private key
+given to `key compute` is never printed back.
 
 ## Since 3.0
 
@@ -153,12 +181,21 @@ public key alone.
   `begin_rotation` and `retired` take none.
 - `PkiKind::noise_params` is gone.
 
-## Since 3.1
+## Since 4.0
 
 Added `key_spec_path` (the `file:` rule, for apps which need the path
-of a spec) and `RotatableKeyPair::generated`. What a deployment can
-run into on upgrade:
+of a spec), `RotatableKeyPair::generated` and
+`Pkcs8PrivateKey::from_inline_key` / `EncodedKeyPair::from_inline_key`.
+What a deployment can run into on upgrade:
 
+- A private key given inline (not `file:`) must be pkcs8 encoded (pem,
+  or base64 der) or exactly 32 raw bytes: a shorter raw key, which
+  used to be zero padded into the key, stops the start. A short raw key
+  must be regenerated (`key generate`, then register its public key
+  where the old one was) or given as pkcs8: the pkcs8 form of the same
+  key is `EncodedKeyPair::from_private_key(kind, key).private`, but it
+  stays as guessable as it was, so regenerate when you can. Key files
+  are read in any form, as before.
 - `file:` specs (private and public) are read without the whitespace
   around them, also after `file:`, and `file:` without a path is an
   error. A stray space used to name another file, where a new private
@@ -174,20 +211,6 @@ run into on upgrade:
   on disk, and only one of them reports `generated()`. A symlink at
   the key path to a file which does not exist is an error: it used to
   be replaced by a new key file.
-
-## Since 4.0
-
-Added `Pkcs8PrivateKey::from_inline_key` / `EncodedKeyPair::from_inline_key`.
-What a deployment can run into on upgrade:
-
-- A private key given inline (not `file:`) must be pkcs8 encoded (pem,
-  or base64 der) or exactly 32 raw bytes: a shorter raw key, which
-  used to be zero padded into the key, stops the start. A short raw key
-  must be regenerated (`key generate`, then register its public key
-  where the old one was) or given as pkcs8: the pkcs8 form of the same
-  key is `EncodedKeyPair::from_private_key(kind, key).private`, but it
-  stays as guessable as it was, so regenerate when you can. Key files
-  are read in any form, as before.
 - A `file:` key path which is a symlink is rotated where it points
   (the link used to be replaced by a file holding the new key, while
   the file it pointed to kept the previous one). `<key>.next`,
