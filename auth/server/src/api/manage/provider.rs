@@ -27,13 +27,16 @@ use crate::{
   provider::external::{
     PROVIDER_ID_LENGTH, evict_built_provider,
     list_external_providers, redirect_uri, resolve_external_provider,
+    warn_plain_http_provider,
   },
   rand::random_string,
   user::AuthUserImpl,
-  validations::validate_public_http_url,
+  validations::{
+    clean_list, keep_credential, validate_http_url_without_userinfo,
+    validate_name,
+  },
 };
 
-const MAX_PROVIDER_NAME_LENGTH: usize = 100;
 const MAX_TOKEN_EXCHANGE_AUDIENCES: usize = 16;
 const MAX_AUDIENCE_LENGTH: usize = 256;
 
@@ -62,32 +65,10 @@ fn list_item<I: AuthImpl + ?Sized>(
   }
 }
 
-/// A provider's name, trimmed: shown on the login page, listed, and
-/// logged, so a control character (Unicode Cc) inside it is refused
-/// (the error doesn't repeat the name).
-fn validate_name(name: &str) -> mogh_error::Result<String> {
-  let name = name.trim();
-  if name.is_empty() {
-    return Err(
-      anyhow!("Provider name cannot be empty")
-        .status_code(StatusCode::BAD_REQUEST),
-    );
-  }
-  if name.chars().count() > MAX_PROVIDER_NAME_LENGTH {
-    return Err(
-      anyhow!(
-        "Provider name cannot be longer than {MAX_PROVIDER_NAME_LENGTH} characters"
-      )
-      .status_code(StatusCode::BAD_REQUEST),
-    );
-  }
-  if name.chars().any(char::is_control) {
-    return Err(
-      anyhow!("Provider name cannot contain control characters")
-        .status_code(StatusCode::BAD_REQUEST),
-    );
-  }
-  Ok(name.to_string())
+/// A provider's name, trimmed ([validate_name]): shown on the login
+/// page, listed, and logged.
+fn validate_provider_name(name: &str) -> mogh_error::Result<String> {
+  validate_name("Provider", name).status_code(StatusCode::BAD_REQUEST)
 }
 
 /// The slug a request gives, or the one made from the name. A slug
@@ -154,11 +135,14 @@ fn validate_config(
   match config {
     ExternalLoginProviderConfig::Oidc(config) => {
       if !config.provider.is_empty() {
-        validate_public_http_url("provider", &config.provider)
-          .status_code(StatusCode::BAD_REQUEST)?;
+        validate_http_url_without_userinfo(
+          "provider",
+          &config.provider,
+        )
+        .status_code(StatusCode::BAD_REQUEST)?;
       }
       if !config.redirect_host.is_empty() {
-        validate_public_http_url(
+        validate_http_url_without_userinfo(
           "redirect_host",
           &config.redirect_host,
         )
@@ -197,50 +181,31 @@ fn validate_token_exchange(
         .status_code(StatusCode::BAD_REQUEST),
     );
   }
-  let mut audiences = Vec::<String>::new();
-  for audience in &token_exchange.audiences {
-    let audience = audience.trim();
-    if audience.is_empty()
-      || audiences.iter().any(|existing| existing == audience)
-    {
-      continue;
-    }
-    if audience.len() > MAX_AUDIENCE_LENGTH {
-      return Err(
-        anyhow!(
-          "Token exchange audiences cannot be longer than {MAX_AUDIENCE_LENGTH} characters"
-        )
-        .status_code(StatusCode::BAD_REQUEST),
-      );
-    }
-    audiences.push(audience.to_string());
-  }
   // Every audience is another signature check on each exchange.
-  if audiences.len() > MAX_TOKEN_EXCHANGE_AUDIENCES {
-    return Err(
-      anyhow!(
-        "Token exchange accepts at most {MAX_TOKEN_EXCHANGE_AUDIENCES} audiences"
-      )
-      .status_code(StatusCode::BAD_REQUEST),
-    );
-  }
-  token_exchange.audiences = audiences;
+  token_exchange.audiences = clean_list(
+    "token_exchange.audiences",
+    std::mem::take(&mut token_exchange.audiences),
+    MAX_AUDIENCE_LENGTH,
+    MAX_TOKEN_EXCHANGE_AUDIENCES,
+  )
+  .status_code(StatusCode::BAD_REQUEST)?;
   Ok(token_exchange)
 }
 
-/// An empty or redacted client secret keeps the existing one,
-/// unless it is explicitly cleared.
+/// An empty or redacted client secret keeps the existing one
+/// ([keep_credential]), unless it is explicitly cleared.
 ///
 /// The secret is sent to the token endpoint the OIDC provider url
 /// points to. If the url changes, the secret has to be entered again,
 /// otherwise pointing the provider at another server would reveal
-/// the stored secret, which can't be read over the API.
+/// the stored secret, which can't be read over the API. Github and
+/// Google have fixed urls.
 fn keep_existing_secret(
   config: &mut ExternalLoginProviderConfig,
   existing: &ExternalLoginProviderConfig,
   clear: bool,
 ) -> mogh_error::Result<()> {
-  let secret = config.client_secret();
+  let secret = config.client_secret().trim();
   let new_secret = !secret.is_empty() && secret != REDACTED;
   if clear {
     if new_secret {
@@ -256,25 +221,21 @@ fn keep_existing_secret(
     config.client_secret_mut().clear();
     return Ok(());
   }
-  if new_secret {
-    return Ok(());
-  }
-  if let (
-    ExternalLoginProviderConfig::Oidc(config),
-    ExternalLoginProviderConfig::Oidc(existing),
-  ) = (&*config, existing)
-    && config.provider != existing.provider
-    && !existing.client_secret.is_empty()
-  {
-    return Err(
-      anyhow!(
-        "The client secret must be entered again when the provider url changes"
-      )
-      .status_code(StatusCode::BAD_REQUEST),
-    );
-  }
-  *config.client_secret_mut() = existing.client_secret().to_string();
-  Ok(())
+  let url_changed = match (&*config, existing) {
+    (
+      ExternalLoginProviderConfig::Oidc(config),
+      ExternalLoginProviderConfig::Oidc(existing),
+    ) => config.provider.trim() != existing.provider.trim(),
+    _ => false,
+  };
+  keep_credential(
+    config.client_secret_mut(),
+    existing.client_secret(),
+    url_changed,
+    "client secret",
+    "provider url",
+  )
+  .status_code(StatusCode::BAD_REQUEST)
 }
 
 //
@@ -313,7 +274,7 @@ pub async fn create_provider<I: AuthImpl + ?Sized>(
   check_admin(user)?;
   validate_config(&request.config)?;
 
-  let name = validate_name(&request.name)?;
+  let name = validate_provider_name(&request.name)?;
   let token_exchange =
     validate_token_exchange(request.token_exchange, &request.config)?;
   // Last: the only check which looks at the other providers.
@@ -342,6 +303,8 @@ pub async fn create_provider<I: AuthImpl + ?Sized>(
     kind = item.provider.kind().to_string(),
     "External login provider created"
   );
+  // The item, whose secret is redacted, has the url.
+  warn_plain_http_provider(&item.provider, false);
 
   Ok(item)
 }
@@ -434,7 +397,7 @@ pub async fn update_provider<I: AuthImpl + ?Sized>(
 ) -> mogh_error::Result<ExternalLoginProviderListItem> {
   check_admin(user)?;
 
-  let name = validate_name(&request.name)?;
+  let name = validate_provider_name(&request.name)?;
   let token_exchange = validate_token_exchange(
     std::mem::take(&mut request.token_exchange),
     &request.config,
@@ -519,6 +482,7 @@ pub async fn update_provider<I: AuthImpl + ?Sized>(
     provider = item.provider.name,
     "External login provider updated"
   );
+  warn_plain_http_provider(&item.provider, false);
 
   Ok(item)
 }
@@ -1233,6 +1197,11 @@ mod tests {
       .await
       .unwrap_err();
       assert_eq!(err.status, StatusCode::BAD_REQUEST);
+      // The same rule, and wording, as a TokenReview credential's.
+      assert_eq!(
+        format!("{:#}", err.error),
+        "The provider url changed: enter the client secret again"
+      );
     }
     assert_eq!(stored_secret(&auth, &id), "secret");
     assert_eq!(auth.stored.lock().unwrap()[0].name, "OIDC");

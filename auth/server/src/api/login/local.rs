@@ -133,7 +133,9 @@ async fn invalid_credentials_after_dummy_hash<
     .status_code(StatusCode::UNAUTHORIZED)
 }
 
-pub async fn login_local_user<I: AuthImpl + ?Sized>(
+/// `LoginLocalUser`. Crate private: it takes the request's
+/// [Session], which is the server's own, so no app could call it.
+pub(crate) async fn login_local_user<I: AuthImpl + ?Sized>(
   auth: &I,
   session: &Session,
   ip: IpAddr,

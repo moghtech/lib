@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 /// 8.0), so stored passkeys keep working.
 ///
 /// It is not in `mogh_auth_client` with the passkey challenges and
-/// credentials sent over the wire: reading it takes `webauthn-rs`, and
-/// with it OpenSSL, which clients have no use for.
+/// credentials sent over the wire: reading it takes `webauthn-rs`,
+/// which clients have no use for.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Passkey(pub webauthn_rs::prelude::Passkey);
 

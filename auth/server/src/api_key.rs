@@ -73,6 +73,11 @@ pub struct StoredApiKey {
   /// [AuthImpl::create_api_key][crate::AuthImpl::create_api_key] got
   /// it.
   pub hashed_secret: String,
+  /// Whether the key may be used. A disabled key is refused to
+  /// requests like an expired one, and still found by its owner, to
+  /// delete it (or for the app to enable it again). An app whose
+  /// keys can't be disabled sets `true`.
+  pub enabled: bool,
   /// When the key expires, unix milliseconds, `0` for never: the
   /// [CreateApiKey::expires][mogh_auth_client::api::manage::CreateApiKey::expires]
   /// it was created with.
@@ -86,6 +91,7 @@ impl std::fmt::Debug for StoredApiKey {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("StoredApiKey")
       .field("user_id", &self.user_id)
+      .field("enabled", &self.enabled)
       .field("expires", &self.expires)
       .field("cidr_whitelist", &self.cidr_whitelist)
       .finish_non_exhaustive()
@@ -100,6 +106,8 @@ impl std::fmt::Debug for StoredApiKey {
 pub struct StoredSigningKey {
   /// The id of the user which owns the key.
   pub user_id: String,
+  /// Whether the key may be used, see [StoredApiKey::enabled].
+  pub enabled: bool,
   /// When the key expires, unix milliseconds, `0` for never: the
   /// [CreateApiKey::expires][mogh_auth_client::api::manage::CreateApiKey::expires]
   /// it was created with.
@@ -132,6 +140,16 @@ impl From<StoredSigningKey> for BoxAuthApiKey {
 /// has expired at `now_ms`.
 pub(crate) fn expired(expires: u64, now_ms: u64) -> bool {
   expires != 0 && expires <= now_ms
+}
+
+/// Whether a key which is `enabled` and `expires` (unix milliseconds,
+/// `0` for never) may be used at `now_ms`.
+pub(crate) fn usable(
+  enabled: bool,
+  expires: u64,
+  now_ms: u64,
+) -> bool {
+  enabled && !expired(expires, now_ms)
 }
 
 /// A new api key, see [generate_api_key_parts]. Built by the server
@@ -268,6 +286,7 @@ mod tests {
     let stored = || StoredApiKey {
       user_id: String::from("user"),
       hashed_secret: parts.hashed_secret.clone(),
+      enabled: true,
       expires: 0,
       cidr_whitelist: Vec::new(),
     };
@@ -306,15 +325,26 @@ mod tests {
   }
 
   #[test]
+  fn test_usable() {
+    assert!(usable(true, 0, u64::MAX));
+    assert!(usable(true, 1_001, 1_000));
+    assert!(!usable(true, 1_000, 1_000));
+    assert!(!usable(false, 0, 1_000));
+    assert!(!usable(false, 1_001, 1_000));
+  }
+
+  #[test]
   fn test_stored_api_key_debug_leaves_out_the_hash() {
     let stored = StoredApiKey {
       user_id: String::from("user"),
       hashed_secret: String::from("$2b$04$hash"),
+      enabled: true,
       expires: 0,
       cidr_whitelist: Vec::new(),
     };
     let debug = format!("{stored:?}");
     assert!(debug.contains("user"), "{debug}");
+    assert!(debug.contains("enabled: true"), "{debug}");
     assert!(!debug.contains("hash"), "{debug}");
   }
 }

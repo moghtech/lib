@@ -36,9 +36,7 @@ use tracing::{debug, error};
 
 use crate::{
   AcceptedSignature, AuthImpl, DynFuture, RequestAuthentication,
-  api_key::{
-    AuthApiKeyImpl, StoredApiKey, StoredSigningKey, expired,
-  },
+  api_key::{AuthApiKeyImpl, StoredApiKey, StoredSigningKey, usable},
   bcrypt_pool::spawn_api_key_bcrypt,
   user::{AuthUserImpl, BoxAuthUser},
 };
@@ -221,9 +219,13 @@ pub async fn accept_signed_request<I: AuthImpl>(
 /// doesn't count against [AuthImpl::signing_key_timestamp_tolerance_ms].
 ///
 /// Other requests are returned as they are, with an empty body: theirs
-/// isn't read. So is a signed request which also carries a jwt or an
+/// isn't read. So is a signed request which also carries a jwt (an
+/// `Authorization` of the `Bearer` scheme, or without a scheme) or an
 /// api key: [extract_request_authentication_rate_limited] takes those
-/// first, its signature isn't checked.
+/// first, its signature isn't checked. An `Authorization` of another
+/// scheme (eg. the `Basic` credentials of a proxy in front of the
+/// app, passed on) is no credential of this server: the signed
+/// request's body is read as without it.
 ///
 /// A signed request which fails for a reason known without the body
 /// is refused right away (UNAUTHORIZED, as its verification would):
@@ -276,9 +278,15 @@ pub async fn read_signed_request_body<I: AuthImpl>(
   mut req: Request,
 ) -> mogh_error::Result<(Request, SignedRequestBody)> {
   let headers = req.headers();
+  // As extract_request_authentication looks at them: the signature
+  // only after a jwt and an api key. An AUTHORIZATION it refuses
+  // (not UTF-8) is refused without the body.
   if !headers.contains_key(API_SIGNATURE_HEADER)
-    || headers.contains_key(AUTHORIZATION)
     || headers.contains_key(API_KEY_HEADER)
+    || !matches!(
+      read_authorization(headers),
+      Ok(Authorization::None | Authorization::OtherScheme)
+    )
   {
     return Ok((req, SignedRequestBody::default()));
   }
@@ -397,6 +405,11 @@ pub(crate) async fn read_request_body(
 /// this server, over this request and its body). None of them is
 /// authenticated as a client's yet, see [RequestAuthentication].
 ///
+/// An `Authorization` of another scheme than `Bearer` (eg. a proxy's
+/// `Basic` credentials, passed on) is passed over for the api key or
+/// the signature, and refused (uncounted) only when the request
+/// carries neither.
+///
 /// Requests without credentials are UNAUTHORIZED, and credentials
 /// which are presented
 /// but unusable count against [AuthImpl::general_rate_limiter] for the
@@ -436,6 +449,14 @@ pub async fn extract_request_authentication_rate_limited<
 /// trying [extract_request_jwt], [extract_request_api_key],
 /// and [verify_request_signature] in order.
 ///
+/// An `Authorization` of another scheme than `Bearer` (eg. the `Basic`
+/// credentials of a proxy in front of the app, passed on) is no
+/// credential of this server: the request's api key or signature is
+/// looked at as without it. Alone, it is refused as
+/// [extract_request_jwt] refuses it (UNAUTHORIZED "Unsupported
+/// authorization scheme", uncounted), so a client sending only a
+/// proxy's credentials is told why.
+///
 /// `body` is only used to verify a request signature, which covers
 /// it: pass what [read_signed_request_body] read for requests carrying
 /// X-API-SIGNATURE. Its X-API-TIMESTAMP was checked then, the signature
@@ -454,9 +475,13 @@ pub(crate) fn extract_request_authentication<I: AuthImpl>(
   headers: &HeaderMap,
   body: &SignedRequestBody,
 ) -> mogh_error::Result<Option<RequestAuthentication>> {
-  if let Some(jwt) = extract_request_jwt(headers)? {
-    return Ok(Some(RequestAuthentication::Jwt(jwt)));
-  }
+  let other_scheme = match read_authorization(headers)? {
+    Authorization::Jwt(jwt) => {
+      return Ok(Some(RequestAuthentication::Jwt(jwt)));
+    }
+    Authorization::None => false,
+    Authorization::OtherScheme => true,
+  };
 
   if let Some((key, secret)) = extract_request_api_key(headers)? {
     return Ok(Some(RequestAuthentication::ApiKey { key, secret }));
@@ -473,25 +498,31 @@ pub(crate) fn extract_request_authentication<I: AuthImpl>(
     return Ok(Some(RequestAuthentication::PublicKey(public_key)));
   }
 
+  if other_scheme {
+    return Err(unsupported_authorization_scheme());
+  }
+
   Ok(None)
 }
 
-/// Extracts the jwt from the AUTHORIZATION header, stripping the
-/// `Bearer` scheme, which is matched case insensitively
-/// (RFC 7235). A value without a scheme is taken as the jwt.
-///
-/// Another scheme (eg. the `Basic` credentials of a proxy in front
-/// of the app) is refused, UNAUTHORIZED "Unsupported authorization
-/// scheme". It is no guess at a credential of this server, so the
-/// refusal is uncounted ([mogh_error::Error::uncounted]).
-///
-/// DANGER ⚠️ The jwt is not validated here, see
-/// [get_jwt_user_id].
-pub fn extract_request_jwt(
+/// What the AUTHORIZATION header of a request holds for this server.
+enum Authorization {
+  /// The request has none.
+  None,
+  /// A jwt: the `Bearer` scheme (matched case insensitively, RFC
+  /// 7235), or a value without a scheme.
+  Jwt(String),
+  /// Another scheme (eg. the `Basic` credentials of a proxy in front
+  /// of the app): no credential of this server.
+  OtherScheme,
+}
+
+/// Reads the AUTHORIZATION header, UNAUTHORIZED when it is not UTF-8.
+fn read_authorization(
   headers: &HeaderMap,
-) -> mogh_error::Result<Option<String>> {
+) -> mogh_error::Result<Authorization> {
   let Some(authorization) = headers.get(AUTHORIZATION) else {
-    return Ok(None);
+    return Ok(Authorization::None);
   };
   let maybe_bearer = authorization
     .to_str()
@@ -505,16 +536,47 @@ pub fn extract_request_jwt(
       jwt.trim_start()
     }
     // A jwt has no whitespace: this is another scheme.
-    Some(_) => {
-      return Err(
-        anyhow!("Unsupported authorization scheme")
-          .status_code(StatusCode::UNAUTHORIZED)
-          .uncounted(),
-      );
-    }
+    Some(_) => return Ok(Authorization::OtherScheme),
     None => maybe_bearer,
   };
-  Ok(Some(jwt.to_string()))
+  Ok(Authorization::Jwt(jwt.to_string()))
+}
+
+/// The refusal of an AUTHORIZATION of another scheme than `Bearer`,
+/// where nothing else authenticates the request. It is no guess at a
+/// credential of this server, so it is uncounted
+/// ([mogh_error::Error::uncounted]).
+fn unsupported_authorization_scheme() -> mogh_error::Error {
+  anyhow!("Unsupported authorization scheme")
+    .status_code(StatusCode::UNAUTHORIZED)
+    .uncounted()
+}
+
+/// Extracts the jwt from the AUTHORIZATION header, stripping the
+/// `Bearer` scheme, which is matched case insensitively
+/// (RFC 7235). A value without a scheme is taken as the jwt.
+///
+/// Another scheme (eg. the `Basic` credentials of a proxy in front
+/// of the app) is refused, UNAUTHORIZED "Unsupported authorization
+/// scheme". It is no guess at a credential of this server, so the
+/// refusal is uncounted ([mogh_error::Error::uncounted]). The
+/// middleware doesn't refuse it when the request carries an api key
+/// or a signature, which then authenticate it
+/// ([extract_request_authentication_rate_limited]); this is for a
+/// caller which takes a jwt only.
+///
+/// DANGER ⚠️ The jwt is not validated here, see
+/// [get_jwt_user_id].
+pub fn extract_request_jwt(
+  headers: &HeaderMap,
+) -> mogh_error::Result<Option<String>> {
+  match read_authorization(headers)? {
+    Authorization::None => Ok(None),
+    Authorization::Jwt(jwt) => Ok(Some(jwt)),
+    Authorization::OtherScheme => {
+      Err(unsupported_authorization_scheme())
+    }
+  }
 }
 
 /// Extracts the (key, secret) from the
@@ -1355,10 +1417,10 @@ pub fn get_key_user_id<I: AuthImpl + ?Sized>(
 }
 
 /// Helper for implementing [AuthImpl::get_api_key] (prefer
-/// [verify_api_key], which also refuses expired keys): bcrypt verifies
-/// the incoming secret against the stored hash, returning
-/// UNAUTHORIZED for an unknown key (`None`) or a secret which doesn't
-/// match.
+/// [verify_api_key], which also refuses disabled and expired keys):
+/// bcrypt verifies the incoming secret against the stored hash,
+/// returning UNAUTHORIZED for an unknown key (`None`) or a secret
+/// which doesn't match.
 ///
 /// bcrypt runs on tokio's blocking thread pool: at most one api key
 /// secret is verified per available core at a time, the other
@@ -1429,16 +1491,31 @@ fn refuse_unknown_api_key() -> mogh_error::Error {
 }
 
 /// Authenticates an api key ([AuthImpl::get_api_key] does with the
-/// key [AuthImpl::find_api_key] found): the request's X-API-SECRET is
-/// verified against the stored hash ([verify_api_key_secret_async]:
-/// off the async runtime, on a bounded budget of its own; a key which
-/// doesn't exist (`None`) is refused without one), then an expired
-/// key is refused. After the verification, so its timing doesn't
-/// tell an expired key apart. Every refusal is the same `401 Invalid
-/// client credentials`.
+/// key [AuthImpl::find_api_key] found): a key which doesn't exist
+/// (`None`) is refused, then a disabled ([StoredApiKey::enabled]) or
+/// expired key is refused, both without a bcrypt. Only then is the
+/// request's X-API-SECRET verified against the stored hash
+/// ([verify_api_key_secret_async]: off the async runtime, on a
+/// bounded budget of its own). Every refusal is `401 Invalid client
+/// credentials`.
+///
+/// The refusal of a disabled or expired key is
+/// [uncounted][mogh_error::Error::uncounted], whatever the secret
+/// sent with it: such a key opens nothing, so a guess at its secret
+/// gains nothing, and a script still polling with the key must not
+/// lock its ip (and everybody behind it) out of logins and api
+/// requests. Its answer then lacks the rate limiter's note of the
+/// attempts remaining. Being refused before the bcrypt, an unusable
+/// key costs no permit of the api key budget either: a leaked key
+/// whose owner disabled it, or which expired, can't be replayed to
+/// stall the server's live keys. The answer (right away, uncounted)
+/// tells whoever holds the key id that the key exists but can't be
+/// used, which is no secret: key ids are random, listed by UIs and
+/// logged at creation. A wrong secret of a usable key, and a key
+/// which doesn't exist, count.
 ///
 /// Returns the key, for an app overriding [AuthImpl::get_api_key] to
-/// refuse what else it refuses (eg. a key which can be disabled).
+/// refuse what else it refuses.
 ///
 /// `_auth` is no longer used (a verification costs what the stored
 /// hash says), it stays for the callers.
@@ -1456,46 +1533,56 @@ pub(crate) async fn verify_stored_api_key(
   stored: Option<StoredApiKey>,
   secret: String,
 ) -> mogh_error::Result<StoredApiKey> {
-  let hashed_secret =
-    stored.as_ref().map(|stored| stored.hashed_secret.clone());
-  verify_api_key_secret(secret, hashed_secret).await?;
-  match stored {
-    Some(stored) if !expired(stored.expires, unix_timestamp_ms()) => {
-      Ok(stored)
-    }
-    // The secret verified, the key just aged out: an authentic
-    // credential is no guess (uncounted), like an expired session
-    // jwt — a script polling with its expired key must not lock
-    // its whole ip out.
-    Some(_) => Err(invalid_client_credentials().uncounted()),
-    None => Err(invalid_client_credentials()),
-  }
+  let Some(stored) = stored else {
+    return Err(refuse_unknown_api_key());
+  };
+  // Before the bcrypt: an unusable key costs no permit.
+  refuse_unusable_key(stored.enabled, stored.expires)?;
+  verify_api_key_secret(secret, Some(stored.hashed_secret.clone()))
+    .await?;
+  Ok(stored)
 }
 
 /// Authenticates a signing key ([AuthImpl::get_signing_key] does with
 /// the key [AuthImpl::find_signing_key] found; its signature verified
-/// before): refused when there is none, or it expired, with
-/// `401 Invalid client credentials`.
+/// before): refused when there is none, or it is disabled
+/// ([StoredSigningKey::enabled]) or expired, with `401 Invalid client
+/// credentials`.
+///
+/// The refusal of a disabled or expired key is
+/// [uncounted][mogh_error::Error::uncounted], as for
+/// [verify_api_key]: the request's signature verified, so it is no
+/// guess. A key which doesn't exist counts: anybody can sign with a
+/// key pair of their own.
 ///
 /// Returns the key, for an app overriding [AuthImpl::get_signing_key]
 /// to refuse what else it refuses.
 pub fn verify_signing_key(
   stored: Option<StoredSigningKey>,
 ) -> mogh_error::Result<StoredSigningKey> {
-  match stored {
-    Some(stored) if !expired(stored.expires, unix_timestamp_ms()) => {
-      Ok(stored)
-    }
-    // The request's signature verified for the stored key before
-    // this ran: an aged-out key is no guess (uncounted), like an
-    // expired session jwt.
-    Some(_) => Err(invalid_client_credentials().uncounted()),
-    None => Err(invalid_client_credentials()),
+  let stored = stored.ok_or_else(invalid_client_credentials)?;
+  refuse_unusable_key(stored.enabled, stored.expires)?;
+  Ok(stored)
+}
+
+/// Refuses a key which is disabled or expired,
+/// [uncounted][mogh_error::Error::uncounted]: a signing key after the
+/// request's signature verified (an authentic credential, like an
+/// expired session jwt), an api key before its secret is (a guess at
+/// the secret of a key which opens nothing gains nothing). Every
+/// client still sending such a key (a polling script, a CI pool
+/// behind one NAT) would otherwise lock its ip out.
+fn refuse_unusable_key(
+  enabled: bool,
+  expires: u64,
+) -> mogh_error::Result<()> {
+  if usable(enabled, expires, unix_timestamp_ms()) {
+    Ok(())
+  } else {
+    Err(invalid_client_credentials().uncounted())
   }
 }
 
-/// The one refusal of credentials which don't authenticate, so it
-/// doesn't tell what was wrong with them.
 /// Whether a web browser sent the request from a page of another
 /// site. Unauthenticated endpoints which count failures against the
 /// client ip refuse such a request before anything counts.
@@ -1562,7 +1649,12 @@ fn is_app_origin<I: AuthImpl + ?Sized>(
     .any(|host| host.origin() == origin)
 }
 
-fn invalid_client_credentials() -> mogh_error::Error {
+/// The one refusal of credentials which don't authenticate, so it
+/// doesn't tell what was wrong with them. The refusal of a key which
+/// can't be used (disabled, expired) marks it
+/// [uncounted][mogh_error::Error::uncounted] on top
+/// ([refuse_unusable_key]).
+pub(crate) fn invalid_client_credentials() -> mogh_error::Error {
   anyhow!("Invalid client credentials")
     .status_code(StatusCode::UNAUTHORIZED)
 }
@@ -1848,17 +1940,33 @@ mod tests {
         "Unsupported authorization scheme"
       );
       assert!(err.is_uncounted(), "{authorization}");
-      // As the middleware sees it.
-      let err = extract_request_authentication(
-        &TestAuth,
-        &Method::POST,
-        &Uri::from_static("/read"),
-        &headers,
-        &SignedRequestBody::default(),
-      )
-      .err()
-      .unwrap();
+      // As the middleware sees it: alone, refused the same.
+      let extract = |headers: &HeaderMap| {
+        extract_request_authentication(
+          &TestAuth,
+          &Method::POST,
+          &Uri::from_static("/read"),
+          headers,
+          &SignedRequestBody::default(),
+        )
+      };
+      let err = extract(&headers).err().unwrap();
+      assert_eq!(
+        format!("{:#}", err.error),
+        "Unsupported authorization scheme"
+      );
       assert!(err.is_uncounted(), "{authorization}");
+      // Beside an api key, which it doesn't hide.
+      headers.insert(API_KEY_HEADER, HeaderValue::from_static("K"));
+      headers.insert("x-api-secret", HeaderValue::from_static("S"));
+      assert!(
+        matches!(
+          extract(&headers),
+          Ok(Some(RequestAuthentication::ApiKey { key, secret }))
+            if key == "K" && secret == "S"
+        ),
+        "{authorization}"
+      );
     }
   }
 
@@ -1925,7 +2033,7 @@ mod tests {
         auth_time: None,
         jti: None,
       },
-      &jsonwebtoken::EncodingKey::from_secret(b"secret"),
+      &jsonwebtoken::EncodingKey::from_secret(b"secret").unwrap(),
     )
     .unwrap();
     let err = get_jwt_user_id(&TestAuth, &expired).unwrap_err();
@@ -2008,6 +2116,53 @@ mod tests {
       );
       assert!(!err.is_uncounted());
     }
+  }
+
+  /// A disabled or expired key is refused before its secret is
+  /// verified: right away, without a bcrypt on the budget of api keys
+  /// (all of it taken here), whatever the secret, and uncounted. The
+  /// same key while usable waits for a permit.
+  #[tokio::test]
+  async fn test_unusable_api_keys_cost_no_bcrypt() {
+    let hashed_secret = bcrypt::hash("S_def_S", 4).unwrap();
+    let stored = |enabled: bool, expires: u64| StoredApiKey {
+      user_id: String::from("user"),
+      hashed_secret: hashed_secret.clone(),
+      enabled,
+      expires,
+      cidr_whitelist: Vec::new(),
+    };
+    let held = crate::bcrypt_pool::hold_api_key_permits().await;
+    for (key, secret) in [
+      // Expired at the epoch's first millisecond.
+      (stored(true, 1), "S_def_S"),
+      (stored(true, 1), "S_wrong_S"),
+      (stored(false, 0), "S_def_S"),
+      (stored(false, 0), "S_wrong_S"),
+    ] {
+      let err = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        verify_api_key(&TestAuth, Some(key), secret.into()),
+      )
+      .await
+      .expect("an unusable key waited for the bcrypt budget")
+      .unwrap_err();
+      assert_eq!(err.status, StatusCode::UNAUTHORIZED, "{secret}");
+      assert_eq!(
+        format!("{:#}", err.error),
+        "Invalid client credentials"
+      );
+      assert!(err.is_uncounted(), "{secret}");
+    }
+    let verify = tokio::spawn(verify_api_key(
+      &TestAuth,
+      Some(stored(true, 0)),
+      "S_def_S".into(),
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!verify.is_finished(), "verified without a permit");
+    drop(held);
+    verify.await.unwrap().unwrap();
   }
 
   /// [TestAuth] with signing keys enabled, so signatures are checked.
@@ -3378,6 +3533,25 @@ mod tests {
     }
   }
 
+  /// The `Basic` credentials of a proxy in front of the app, passed
+  /// on with a signed request, are no jwt: the body is read as
+  /// without them, so the signature can be verified.
+  #[tokio::test]
+  async fn test_read_signed_request_body_with_basic_authorization() {
+    let mut req = signed_request(Some(now_ms()), BODY);
+    req.headers_mut().insert(
+      AUTHORIZATION,
+      HeaderValue::from_static("Basic dXNlcjpwYXNz"),
+    );
+    let (req, body) = read_signed_request_body(&KEYED, READ_IP, req)
+      .await
+      .unwrap();
+    assert_eq!(body.body(), BODY);
+    // Put back for the handler.
+    let (_, handler_body) = read_request_body(req).await.unwrap();
+    assert_eq!(handler_body, BODY);
+  }
+
   /// The signature of a request which also carries a jwt or an api
   /// key isn't checked: passed on without its body being read.
   #[tokio::test]
@@ -4047,6 +4221,34 @@ mod tests {
     assert_eq!(err.status, StatusCode::UNAUTHORIZED);
   }
 
+  /// Behind a proxy doing basic auth which passes its `Authorization`
+  /// on, a signed request authenticates with its signature, also
+  /// behind two middlewares of the auth server.
+  #[tokio::test]
+  async fn test_authenticate_request_signed_behind_basic_auth() {
+    let address = serve_authenticated().await;
+    for path in ["/read", "/stacked"] {
+      let signed =
+        sign(&Method::POST, &Uri::from_static(path), now_ms(), BODY);
+      let (status, body) = send_request_with(
+        address,
+        "203.0.113.71",
+        path,
+        &signed,
+        SendBody::After(std::time::Duration::ZERO),
+        "authorization: Basic dXNlcjpwYXNz\r\n",
+      )
+      .await;
+      assert_eq!(
+        status,
+        StatusCode::OK,
+        "{path}: {}",
+        String::from_utf8_lossy(&body)
+      );
+      assert_eq!(body, BODY, "{path}");
+    }
+  }
+
   /// Behind two middlewares of the auth server the body is read
   /// once, its timestamp checked once when the headers arrived: the
   /// inner middleware takes a body which arrived after the tolerance
@@ -4590,6 +4792,119 @@ mod tests {
     );
   }
 
+  /// [ServedAuth] whose hook remembers the signatures it accepts in
+  /// a [SeenSignatures](crate::replay::SeenSignatures), as an app
+  /// opting in does: the store's window is the short tolerance plus
+  /// the body timeout of [ServedAuth].
+  struct SeenSignaturesAuth(ServedAuth);
+
+  impl AuthImpl for SeenSignaturesAuth {
+    fn new() -> Self {
+      SeenSignaturesAuth(ServedAuth::new())
+    }
+    fn host(&self) -> &str {
+      self.0.host()
+    }
+    fn extra_hosts(&self) -> &[String] {
+      self.0.extra_hosts()
+    }
+    fn signing_keys_enabled(&self) -> bool {
+      self.0.signing_keys_enabled()
+    }
+    fn signing_key_timestamp_tolerance_ms(&self) -> u64 {
+      self.0.signing_key_timestamp_tolerance_ms()
+    }
+    fn signed_request_body_timeout(&self) -> std::time::Duration {
+      self.0.signed_request_body_timeout()
+    }
+    fn general_rate_limiter(&self) -> &mogh_rate_limit::RateLimiter {
+      self.0.general_rate_limiter()
+    }
+    fn get_user(
+      &self,
+      user_id: String,
+    ) -> DynFuture<mogh_error::Result<crate::user::BoxAuthUser>> {
+      self.0.get_user(user_id)
+    }
+    fn handle_request_authentication(
+      &self,
+      auth: RequestAuthentication,
+      ip: IpAddr,
+      require_user_enabled: bool,
+      req: Request,
+    ) -> DynFuture<mogh_error::Result<Request>> {
+      self.0.handle_request_authentication(
+        auth,
+        ip,
+        require_user_enabled,
+        req,
+      )
+    }
+    fn accept_signed_request(
+      &self,
+      accepted: AcceptedSignature,
+    ) -> DynFuture<mogh_error::Result<()>> {
+      static SEEN: crate::replay::SeenSignatures =
+        crate::replay::SeenSignatures::new();
+      let res = SEEN.accept_once(self, &accepted);
+      Box::pin(async move { res })
+    }
+    fn jwt_provider(&self) -> &JwtProvider {
+      self.0.jwt_provider()
+    }
+  }
+
+  /// The late body bypass, through the middlewares: the timestamp is
+  /// checked when the headers arrive, the replay once the body has.
+  /// A replay whose headers come at once but whose body is held back
+  /// three tolerances (where a store keeping signatures for the
+  /// tolerance alone has forgotten the original) is refused as a
+  /// replay, while a request signed anew whose body takes as long is
+  /// accepted: the store's window is the tolerance plus the body
+  /// timeout. On an app's api and behind two middlewares alike.
+  #[tokio::test]
+  async fn test_seen_signatures_refuse_replays_with_late_bodies() {
+    let address = serve_for::<SeenSignaturesAuth>().await;
+    let late = || {
+      SendBody::After(std::time::Duration::from_millis(
+        3 * SERVED_TOLERANCE_MS,
+      ))
+    };
+    let now = || SendBody::After(std::time::Duration::ZERO);
+    let replay_refusal = |path: &str, answer: &[u8]| {
+      let answer = String::from_utf8_lossy(answer);
+      assert!(
+        answer.contains("Invalid client credentials")
+          && !answer.contains(SIGNED_AT_ANOTHER_TIME),
+        "{path}: {answer}"
+      );
+    };
+    // Each client its own, so no refusal locks another out.
+    for (i, path) in ["/read", "/stacked"].into_iter().enumerate() {
+      let ip = |k: usize| format!("198.51.100.{}", 10 * i + k);
+      let uri = Uri::from_static(path);
+      let original = sign(&Method::POST, &uri, now_ms(), BODY);
+      let (status, _) =
+        send_request(address, &ip(1), path, &original, now()).await;
+      assert_eq!(status, StatusCode::OK, "{path}");
+      let (status, answer) =
+        send_request(address, &ip(2), path, &original, now()).await;
+      assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+      replay_refusal(path, &answer);
+      let signed_anew = sign(&Method::POST, &uri, now_ms(), BODY);
+      let (replay_ip, slow_ip) = (ip(3), ip(4));
+      let (replay, slow) = tokio::join!(
+        send_request(address, &replay_ip, path, &original, late()),
+        send_request(address, &slow_ip, path, &signed_anew, late()),
+      );
+      // Refused as the replay it is: its headers were in time.
+      assert_eq!(replay.0, StatusCode::UNAUTHORIZED, "{path}");
+      replay_refusal(path, &replay.1);
+      assert_eq!(slow.0, StatusCode::OK, "{path}");
+      assert_eq!(slow.1, BODY, "{path}");
+    }
+  }
+
   /// A middleware of an app's own built on [authenticate_user], with
   /// a policy of its own: disabled users are refused everything (as
   /// the supporter api does).
@@ -4979,5 +5294,209 @@ mod tests {
       format!("replay-user Some({iat})")
     );
     assert_eq!(accepted(), 1);
+  }
+
+  /// An app api on the defaults of the api key hooks
+  /// ([AuthImpl::get_api_key] over [AuthImpl::find_api_key]), with a
+  /// limiter of its own which locks a client out after one counted
+  /// failure.
+  struct StoredKeyAuth;
+
+  const STORED_SECRET: &str = "S_stored_S";
+
+  impl AuthImpl for StoredKeyAuth {
+    fn new() -> Self {
+      StoredKeyAuth
+    }
+    fn general_rate_limiter(&self) -> &mogh_rate_limit::RateLimiter {
+      static LIMITER: std::sync::LazyLock<
+        std::sync::Arc<mogh_rate_limit::RateLimiter>,
+      > = std::sync::LazyLock::new(|| {
+        mogh_rate_limit::RateLimiter::new(
+          false,
+          1,
+          std::time::Duration::from_secs(60),
+        )
+      });
+      &LIMITER
+    }
+    fn get_user(
+      &self,
+      user_id: String,
+    ) -> DynFuture<mogh_error::Result<crate::user::BoxAuthUser>> {
+      TestAuth.get_user(user_id)
+    }
+    /// As an app does: the credentials authenticated by the
+    /// defaults.
+    fn handle_request_authentication(
+      &self,
+      auth: RequestAuthentication,
+      ip: IpAddr,
+      _require_user_enabled: bool,
+      req: Request,
+    ) -> DynFuture<mogh_error::Result<Request>> {
+      let user_id =
+        self.get_user_id_from_request_authentication(auth, ip);
+      Box::pin(async move { user_id.await.map(|_| req) })
+    }
+    fn jwt_provider(&self) -> &JwtProvider {
+      TestAuth.jwt_provider()
+    }
+    fn find_api_key(
+      &self,
+      key: String,
+    ) -> DynFuture<mogh_error::Result<Option<StoredApiKey>>> {
+      static HASH: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| {
+          bcrypt::hash(STORED_SECRET, 4).unwrap()
+        });
+      let found = match key.as_str() {
+        "K_live_K" => Some((true, 0)),
+        // Expired at the epoch's first millisecond.
+        "K_expired_K" => Some((true, 1)),
+        "K_disabled_K" => Some((false, 0)),
+        _ => None,
+      }
+      .map(|(enabled, expires)| StoredApiKey {
+        user_id: String::from("user"),
+        hashed_secret: HASH.clone(),
+        enabled,
+        expires,
+        cidr_whitelist: Vec::new(),
+      });
+      Box::pin(async move { Ok(found) })
+    }
+  }
+
+  /// Through [authenticate_request], with one failure allowed per
+  /// client, behind a proxy doing basic auth which passes its
+  /// `Authorization` on: the request's api key authenticates it. The
+  /// basic credentials alone are refused (401 "Unsupported
+  /// authorization scheme") as often as they are sent, and never lock
+  /// the client out: they are no guess at a credential of this
+  /// server.
+  #[tokio::test]
+  async fn test_api_keys_authenticate_behind_basic_auth() {
+    async fn ok() -> &'static str {
+      "ok"
+    }
+    let router = axum::Router::new()
+      .route("/read", axum::routing::post(ok))
+      .layer(axum::middleware::from_fn(
+        authenticate_request::<StoredKeyAuth, false>,
+      ));
+    let address = serve_router(router).await;
+    let client = reqwest::Client::new();
+    let url = format!("http://{address}/read");
+    // From `client_ip`: the loopback peer is a trusted proxy.
+    let client_ip = "203.0.113.72";
+    let send = |api_key: Option<&'static str>| {
+      let mut request = client
+        .post(&url)
+        .header("x-forwarded-for", client_ip)
+        .header(AUTHORIZATION, "Basic dXNlcjpwYXNz");
+      if let Some(key) = api_key {
+        request = request
+          .header(API_KEY_HEADER, key)
+          .header("x-api-secret", STORED_SECRET);
+      }
+      async move {
+        let response = request.send().await.unwrap();
+        let status = response.status();
+        (status, response.text().await.unwrap())
+      }
+    };
+    for _ in 0..3 {
+      let (status, body) = send(None).await;
+      assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+      let error: serde_json::Value =
+        serde_json::from_str(&body).unwrap();
+      assert_eq!(error["error"], "Unsupported authorization scheme");
+    }
+    let (status, body) = send(Some("K_live_K")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "ok");
+  }
+
+  /// Through [authenticate_request], with one failure allowed per
+  /// client: an expired or disabled key, sent with any secret, is
+  /// refused (401) as often as it is sent, and never locks its client
+  /// out (429), which can still use its live key. A wrong secret of a
+  /// usable key, and a key which doesn't exist, are guesses: the
+  /// first locks the client out, its live key included.
+  #[tokio::test]
+  async fn test_refused_unusable_keys_never_lock_out_their_client() {
+    async fn ok() -> &'static str {
+      "ok"
+    }
+    let router = axum::Router::new()
+      .route("/read", axum::routing::post(ok))
+      .layer(axum::middleware::from_fn(
+        authenticate_request::<StoredKeyAuth, false>,
+      ));
+    let address = serve_router(router).await;
+    let client = reqwest::Client::new();
+    let url = format!("http://{address}/read");
+    // From `client_ip`: the loopback peer is a trusted proxy.
+    let send =
+      |client_ip: &'static str, key: &'static str, secret| {
+        let request = client
+          .post(&url)
+          .header("x-forwarded-for", client_ip)
+          .header(API_KEY_HEADER, key)
+          .header("x-api-secret", secret);
+        async move {
+          let response = request.send().await.unwrap();
+          let status = response.status();
+          (status, response.text().await.unwrap())
+        }
+      };
+    let error = |body: &str| {
+      let error: serde_json::Value =
+        serde_json::from_str(body).unwrap();
+      error["error"].as_str().unwrap().to_string()
+    };
+
+    let authentic = "203.0.113.91";
+    for _ in 0..3 {
+      for key in ["K_expired_K", "K_disabled_K"] {
+        for secret in [STORED_SECRET, "S_wrong_S"] {
+          let (status, body) = send(authentic, key, secret).await;
+          assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{key} {secret}: {body}"
+          );
+          // Returned as it is, without the limiter's note.
+          assert_eq!(
+            error(&body),
+            "Invalid client credentials",
+            "{key} {secret}"
+          );
+        }
+      }
+    }
+    let (status, body) =
+      send(authentic, "K_live_K", STORED_SECRET).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for (client_ip, key, secret) in [
+      ("203.0.113.92", "K_live_K", "S_wrong_S"),
+      ("203.0.113.94", "K_unknown_K", STORED_SECRET),
+    ] {
+      let (status, body) = send(client_ip, key, secret).await;
+      assert_eq!(status, StatusCode::UNAUTHORIZED, "{key}: {body}");
+      assert!(
+        error(&body).contains("You have 0 attempts remaining"),
+        "{key}: {body}"
+      );
+      let (status, body) =
+        send(client_ip, "K_live_K", STORED_SECRET).await;
+      assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{key}: {body}"
+      );
+    }
   }
 }

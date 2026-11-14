@@ -21,3 +21,17 @@ Used by:
   tests),
 - `example/mock_idp` (the identity provider of the example app's
   suites).
+
+## TLS
+
+A certificate chain for a test api server over TLS, generated for this
+repository with `openssl req -x509 -newkey ec` (P-256, valid 2026 to
+2126). It protects nothing either.
+
+- `tls_system_root.pem`: a CA certificate, which the test makes the only
+  system root (`SSL_CERT_FILE`). Its key was discarded after signing.
+- `tls_server.pem` / `tls_server_key.pem`: the server certificate it
+  issued for `127.0.0.1`, and its key.
+
+Used by `auth/server/tests/review_ca.rs` (a TokenReview source's `ca`
+replaces the system roots).

@@ -144,6 +144,23 @@ pub fn normalize_cidr_whitelist<I: AuthImpl + ?Sized>(
   Ok(normalized)
 }
 
+/// Refuses (BAD_REQUEST) an `expires` of a new api key / signing key
+/// that an app cannot store: a unix timestamp in milliseconds above
+/// `i64::MAX` (apps store it signed: cast, it wraps to a time long
+/// past, a key that works for no request). `0` means no expiry.
+/// `CreateApiKey` / `CreateSigningKey` run it before the key is made.
+pub fn validate_key_expires(expires: u64) -> mogh_error::Result<()> {
+  if expires > i64::MAX as u64 {
+    return Err(
+      anyhow!(
+        "'expires' is out of range: a unix timestamp in milliseconds, or 0 for no expiry"
+      )
+      .status_code(StatusCode::BAD_REQUEST),
+    );
+  }
+  Ok(())
+}
+
 /// Compare two secrets (eg oauth `state` / csrf tokens)
 /// in constant time with respect to their contents.
 pub fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -156,19 +173,24 @@ pub(crate) fn url_has_credentials(url: &reqwest::Url) -> bool {
   !url.username().is_empty() || url.password().is_some()
 }
 
-/// Validate a url the app uses without authentication, such as
-/// an OIDC issuer / discovery endpoint, a JWKS url or a redirect host.
+/// Validate a url the app sends requests to, such as an OIDC issuer /
+/// discovery endpoint, a JWKS url, a redirect host or a TokenReview
+/// api server. Whatever authenticates those requests (a reviewer
+/// credential, client credentials) is configured apart from the url.
 ///
 /// - Parses as a url
-/// - Has the `http` or `https` scheme
-/// - Carries no credentials (`scheme://user:password@host`, a username
-///   or any password): these would be
-///   stored and shown in plain text with the url, sent along with
-///   every request to it, and end up in error messages and logs.
+/// - Has the `http` or `https` scheme. Plain `http` is accepted (the
+///   server warns about it where it matters, see the README's "Plain
+///   http urls").
+/// - Carries no credentials in its userinfo
+///   (`scheme://user:password@host`, a username or any password):
+///   these would be stored and shown in plain text with the url, sent
+///   along with every request to it, and end up in error messages and
+///   logs.
 ///
 /// `field` names the url in the error, and nothing of the url
 /// itself is in it.
-pub fn validate_public_http_url(
+pub fn validate_http_url_without_userinfo(
   field: &str,
   url: &str,
 ) -> anyhow::Result<()> {
@@ -180,10 +202,114 @@ pub fn validate_public_http_url(
   if url_has_credentials(&parsed) {
     return Err(anyhow!(
       "'{field}' must not carry credentials (scheme://user:password@host): \
-      it is used without authentication, and credentials in a url \
-      would be stored and logged in plain text"
+      credentials in a url would be stored, shown and logged in plain \
+      text with it. Configure them apart from the url"
     ));
   }
+  Ok(())
+}
+
+// ===================
+// = MANAGED CONFIGS =
+// ===================
+//
+// The rules shared by the management api of login providers and of
+// trusted issuers (and the trusted issuers of the app
+// configuration, held to the same), kept in one place so they stay
+// the same for both, and for whatever is managed next.
+
+/// The longest name of a login provider, trusted issuer or rule.
+pub(crate) const MAX_NAME_LENGTH: usize = 100;
+
+/// The name of a login provider, trusted issuer or rule (`kind` says
+/// which, eg. `Provider`), trimmed. It is listed, shown on the login
+/// page, logged, and repeated in errors about it, so a control
+/// character (Unicode Cc: a tab, a line break, an escape sequence)
+/// inside it is refused. The error doesn't repeat the name.
+pub(crate) fn validate_name(
+  kind: &str,
+  name: &str,
+) -> anyhow::Result<String> {
+  let name = name.trim();
+  if name.is_empty() {
+    return Err(anyhow!("{kind} name cannot be empty"));
+  }
+  if name.chars().count() > MAX_NAME_LENGTH {
+    return Err(anyhow!(
+      "{kind} name cannot be longer than {MAX_NAME_LENGTH} characters"
+    ));
+  }
+  if name.chars().any(char::is_control) {
+    return Err(anyhow!(
+      "{kind} name cannot contain control characters"
+    ));
+  }
+  Ok(name.to_string())
+}
+
+/// The values of the list `field` (eg. audiences, groups) trimmed,
+/// without empty entries or duplicates. Each may be at most
+/// `max_length` bytes long, and there may be at most `max_count`
+/// (counted once cleaned): every audience is another signature check
+/// on each exchange, every value another comparison.
+pub(crate) fn clean_list(
+  field: &str,
+  values: Vec<String>,
+  max_length: usize,
+  max_count: usize,
+) -> anyhow::Result<Vec<String>> {
+  let mut cleaned = Vec::<String>::new();
+  for value in values {
+    let value = value.trim();
+    if value.is_empty() || cleaned.iter().any(|v| v == value) {
+      continue;
+    }
+    if value.len() > max_length {
+      return Err(anyhow!(
+        "'{field}' values cannot be longer than {max_length} characters"
+      ));
+    }
+    cleaned.push(value.to_string());
+  }
+  if cleaned.len() > max_count {
+    return Err(anyhow!(
+      "'{field}' accepts at most {max_count} values"
+    ));
+  }
+  Ok(cleaned)
+}
+
+/// The credential an update stores, in place of the one it carries
+/// (`entered`): a login provider's client secret, a TokenReview
+/// source's reviewer credential.
+///
+/// - A new credential is stored as entered.
+/// - An empty or [REDACTED][mogh_auth_client::config::REDACTED] one
+///   keeps the `stored` credential: it is never shown, so the edit
+///   form of the configuration sends one of those back.
+/// - Unless the url the credential is sent to changed (`url_changed`)
+///   and there is a stored one: it must be entered again. Otherwise
+///   pointing the configuration at another server would send it the
+///   stored credential, which can't be read over the api.
+///
+/// `what` and `url` name the credential and its url in the error.
+pub(crate) fn keep_credential(
+  entered: &mut String,
+  stored: &str,
+  url_changed: bool,
+  what: &str,
+  url: &str,
+) -> anyhow::Result<()> {
+  let trimmed = entered.trim();
+  if !trimmed.is_empty()
+    && trimmed != mogh_auth_client::config::REDACTED
+  {
+    return Ok(());
+  }
+  if url_changed && !stored.is_empty() {
+    return Err(anyhow!("The {url} changed: enter the {what} again"));
+  }
+  *entered = stored.to_string();
   Ok(())
 }
 
@@ -237,7 +363,7 @@ mod tests {
   }
 
   #[test]
-  fn test_validate_public_http_url() {
+  fn test_validate_http_url_without_userinfo() {
     for url in [
       "https://issuer.example.com",
       "http://localhost:8080/keys?v=2",
@@ -245,7 +371,10 @@ mod tests {
       "https://example.com/users/@me",
       "https://example.com/keys?owner=a@b",
     ] {
-      assert!(validate_public_http_url("url", url).is_ok(), "{url}");
+      assert!(
+        validate_http_url_without_userinfo("url", url).is_ok(),
+        "{url}"
+      );
     }
     for url in [
       "not a url",
@@ -257,9 +386,12 @@ mod tests {
       "https://user:@issuer.example.com/keys",
       "http:user:password@issuer.example.com",
     ] {
-      assert!(validate_public_http_url("url", url).is_err(), "{url}");
+      assert!(
+        validate_http_url_without_userinfo("url", url).is_err(),
+        "{url}"
+      );
     }
-    let err = validate_public_http_url(
+    let err = validate_http_url_without_userinfo(
       "keys url",
       "https://user:hunter2@issuer.example.com/keys",
     )
@@ -267,6 +399,12 @@ mod tests {
     let err = format!("{err:#}");
     assert!(err.contains("'keys url' must not carry credentials"));
     assert!(!err.contains("hunter2"), "{err}");
+    // True for every caller: a TokenReview url is sent a credential.
+    assert!(!err.contains("without authentication"), "{err}");
+    assert!(
+      err.contains("Configure them apart from the url"),
+      "{err}"
+    );
   }
 
   #[test]
@@ -440,6 +578,19 @@ mod tests {
     assert_eq!(err.status, StatusCode::BAD_REQUEST);
   }
 
+  /// An expiry an app would store wrapped is refused; no expiry and
+  /// the largest signed timestamp pass.
+  #[test]
+  fn key_expiry_fits_a_signed_timestamp() {
+    assert!(validate_key_expires(0).is_ok());
+    assert!(validate_key_expires(1_794_600_000_000).is_ok());
+    assert!(validate_key_expires(i64::MAX as u64).is_ok());
+    for expires in [i64::MAX as u64 + 1, u64::MAX] {
+      let err = validate_key_expires(expires).unwrap_err();
+      assert_eq!(err.status, StatusCode::BAD_REQUEST, "{expires}");
+    }
+  }
+
   /// The app's own validation applies, to what is left after the
   /// trimming and dedupe.
   #[test]
@@ -466,5 +617,91 @@ mod tests {
       .unwrap(),
       ["10.0.0.0/8"]
     );
+  }
+
+  #[test]
+  fn test_validate_name() {
+    assert_eq!(
+      validate_name("Rule", "  Deploy (prod) ").unwrap(),
+      "Deploy (prod)"
+    );
+    let long = "ü".repeat(MAX_NAME_LENGTH);
+    assert_eq!(validate_name("Rule", &long).unwrap(), long);
+    for (name, error) in [
+      ("  ", "Rule name cannot be empty"),
+      (
+        &format!("{long}a"),
+        "Rule name cannot be longer than 100 characters",
+      ),
+      ("CI\tjobs", "Rule name cannot contain control characters"),
+      (
+        "CI\u{85}jobs",
+        "Rule name cannot contain control characters",
+      ),
+    ] {
+      let err = validate_name("Rule", name).unwrap_err();
+      assert_eq!(format!("{err:#}"), error, "{name:?}");
+    }
+  }
+
+  #[test]
+  fn test_clean_list() {
+    let list = |values: &[&str]| {
+      values.iter().map(|v| v.to_string()).collect::<Vec<_>>()
+    };
+    assert_eq!(
+      clean_list("groups", list(&[" a ", "", "b", "a", "  "]), 3, 2)
+        .unwrap(),
+      ["a", "b"]
+    );
+    let err =
+      clean_list("groups", list(&["a", "abcd"]), 3, 2).unwrap_err();
+    assert_eq!(
+      format!("{err:#}"),
+      "'groups' values cannot be longer than 3 characters"
+    );
+    // Counted once cleaned.
+    let err = clean_list("groups", list(&["a", "b", "c", "a"]), 3, 2)
+      .unwrap_err();
+    assert_eq!(
+      format!("{err:#}"),
+      "'groups' accepts at most 2 values"
+    );
+    assert!(
+      clean_list("groups", list(&["a", "b", "a"]), 3, 2).is_ok()
+    );
+  }
+
+  #[test]
+  fn test_keep_credential() {
+    use mogh_auth_client::config::REDACTED;
+    let keep = |entered: &str, stored: &str, url_changed: bool| {
+      let mut entered = entered.to_string();
+      keep_credential(
+        &mut entered,
+        stored,
+        url_changed,
+        "secret",
+        "url",
+      )
+      .map(|()| entered)
+    };
+    // A new one is stored as entered, also with a new url.
+    assert_eq!(keep("new", "stored", false).unwrap(), "new");
+    assert_eq!(keep("new", "stored", true).unwrap(), "new");
+    // Empty or redacted keeps the stored one.
+    for kept in ["", " ", REDACTED, &format!(" {REDACTED} ")] {
+      assert_eq!(keep(kept, "stored", false).unwrap(), "stored");
+    }
+    // Never for another url.
+    for kept in ["", REDACTED] {
+      let err = keep(kept, "stored", true).unwrap_err();
+      assert_eq!(
+        format!("{err:#}"),
+        "The url changed: enter the secret again"
+      );
+    }
+    // Nothing stored, nothing to protect.
+    assert_eq!(keep("", "", true).unwrap(), "");
   }
 }

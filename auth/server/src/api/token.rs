@@ -1,12 +1,14 @@
 //! The OAuth 2.0 token endpoint, implementing
 //! [RFC 8693 Token Exchange](https://www.rfc-editor.org/rfc/rfc8693):
-//! a token issued by an external login provider is
-//! exchanged for an app token, without any user interaction.
+//! a token is exchanged for an app token, without any user
+//! interaction. Either a user's token of an external login provider:
 //!
 //! - Only providers which opt in with `token_exchange.enabled` take part.
 //! - Only tokens signed by the provider are accepted (ID tokens / JWTs),
-//!   and they must be issued to an accepted audience.
-//! - The user must already exist, the endpoint never signs anyone up.
+//!   verified against the keys it publishes, and they must be issued
+//!   to an accepted audience.
+//! - The user must already exist and be linked to the provider, the
+//!   endpoint never signs anyone up.
 //! - Users who need a second factor for external logins are rejected,
 //!   there is nobody to ask for it.
 //! - The app token of a user counts as a login at the time the
@@ -14,6 +16,16 @@
 //!   `iat`), not at the exchange: a provider token can be exchanged
 //!   again until it expires, so an old one is no recent login for
 //!   [AuthImpl::reauthentication_window_secs].
+//!
+//! Or a workload's token of a trusted issuer (workload identity, see
+//! [crate::provider::workload]):
+//!
+//! - Verified with the keys the issuer publishes, or by the cluster
+//!   which issued it ([AuthImpl::review_workload_token] for a
+//!   TokenReview issuer), for one of the issuer's audiences.
+//! - Matched to one of the issuer's rules, whose user acts for the
+//!   workload: the app creates it on the first exchange
+//!   ([AuthImpl::get_or_create_workload_user]).
 //!
 //! Errors are OAuth errors (RFC 6749 section 5.2). A malformed request
 //! is `invalid_request`, and a token which is rejected for any reason
@@ -97,7 +109,7 @@ use crate::{
       unverified_issuer,
     },
     workload::{
-      Claims, WorkloadIdentity, hold_off_removal,
+      Claims, WorkloadIdentity, gated_review, hold_off_removal,
       list_trusted_issuers, load_verification_keys,
       lock_workload_user, lookup_claim, match_rule,
     },
@@ -912,6 +924,7 @@ pub struct VerifiedWorkload {
 /// Fails the same as other token exchange:
 /// - `400` for a token no trusted issuer accepts or none of whose admitted rules match
 /// - `503` for an issuer whose keys could not be loaded (it might have accepted the token).
+///
 /// Failures count against the failure rate limit of
 /// `ip` ([AuthImpl::token_exchange_rate_limiter]) like the
 /// exchange's, the surface served being unauthenticated too.
@@ -999,6 +1012,11 @@ where
 /// rule, and the rule matched is the first enabled one of them the
 /// claims meet. `unmatched` words the refusal of a verified token
 /// matching no rules.
+///
+/// A TokenReview issuer sharing the token's issuer url with any other
+/// enabled issuer is never asked to review it: it is unavailable
+/// (`503`, logged as an error once per attempt), see
+/// `ensure_distinct_review_issuer` of the management api.
 async fn verify_workload_by<I, K, G, A, U>(
   auth: &I,
   token: &str,
@@ -1022,15 +1040,36 @@ where
   // Issuers aren't always unique. Kubernetes clusters share a default
   // issuer and only differ by their keys, so each candidate gets to
   // verify the token with its own.
-  let candidates = list_trusted_issuers(auth)
+  let of_issuer = list_trusted_issuers(auth)
     .await
     .map_err(NotAccepted::unavailable)?
     .into_iter()
     .map(|resolved| resolved.issuer)
     .filter(|trusted| {
-      trusted.enabled
-        && issuers_match(&trusted.issuer, &issuer)
-        && trusted.rules.iter().any(|rule| accept(trusted, rule))
+      trusted.enabled && issuers_match(&trusted.issuer, &issuer)
+    })
+    .collect::<Vec<_>>();
+  // Every one of them, whatever the rules `accept` admits: a token
+  // review posts the whole token to the issuer's cluster, which must
+  // never receive the tokens of another issuer of the url (another
+  // cluster's live tokens). The management api refuses such issuers
+  // (409); static ones, and those stored before it did, still reach
+  // this.
+  let shared_with_review = of_issuer.len() > 1
+    && of_issuer.iter().any(|trusted| {
+      matches!(trusted.keys, TrustedIssuerKeys::TokenReview(_))
+    });
+  let names = shared_with_review.then(|| {
+    of_issuer
+      .iter()
+      .map(|trusted| format!("'{}'", trusted.name))
+      .collect::<Vec<_>>()
+      .join(", ")
+  });
+  let candidates = of_issuer
+    .into_iter()
+    .filter(|trusted| {
+      trusted.rules.iter().any(|rule| accept(trusted, rule))
     })
     .collect::<Vec<_>>();
 
@@ -1041,17 +1080,54 @@ where
   let mut unavailable = None;
   let mut rejected = None;
   let mut unmatched_error = None;
+  let mut refusal_logged = false;
   for trusted in candidates {
     let claims = if matches!(
       trusted.keys,
       TrustedIssuerKeys::TokenReview(_)
     ) {
+      if let Some(names) = &names {
+        // Once per attempt, naming all of them.
+        if !refusal_logged {
+          refusal_logged = true;
+          error!(
+            issuer_id = trusted.id,
+            issuer = trusted.name,
+            "Not reviewing the token: the trusted issuers {names} share its issuer url, \
+               and a token review would send another issuer's tokens to this issuer's cluster. \
+               Give each cluster its own issuer url, or verify them with keys"
+          );
+        }
+        unavailable.get_or_insert(
+          anyhow::anyhow!(
+            "Trusted issuer '{}' is not available",
+            trusted.name
+          )
+          .status_code(StatusCode::SERVICE_UNAVAILABLE),
+        );
+        continue;
+      }
+      // The claims the review would have to vouch for, checked before
+      // it: a token which is expired, not yet valid, too old or for
+      // another audience needs no review, and never reaches the
+      // cluster (the request is unauthenticated).
+      if let Err(e) = check_reviewed_payload(
+        token,
+        &trusted.audiences,
+        trusted.max_token_age_secs,
+      ) {
+        // Only describes the token the caller presented
+        rejected = Some(invalid_grant(format!("{e:#}")));
+        continue;
+      }
       // The cluster which issued the token verifies it. The claims
-      // are authentic once it does, and checked here like the keys
-      // path checks them ([check_reviewed_payload]).
-      match auth
-        .review_workload_token(trusted.clone(), token.to_string())
-        .await
+      // are authentic once it does, and checked again here like the
+      // keys path checks them ([check_reviewed_payload]): time passed
+      // during the review.
+      match gated_review(&trusted, || {
+        auth.review_workload_token(trusted.clone(), token.to_string())
+      })
+      .await
       {
         Ok(_reviewed) => {}
         // Only a client error describes the token itself; everything

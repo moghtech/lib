@@ -23,6 +23,7 @@ use tracing::warn;
 use crate::{
   AuthImpl,
   provider::{
+    http::{UrlOwner, is_plain_http, warn_plain_http},
     load_cache::LoadCache,
     named::{github::GithubProvider, google::GoogleProvider},
     oidc::{OidcProvider, TokenResponse},
@@ -727,12 +728,52 @@ fn merge_providers(
       );
       continue;
     }
+    warn_plain_http_provider(&provider, true);
     providers.push(ResolvedProvider {
       provider,
       is_static,
     });
   }
   providers
+}
+
+/// The url of an enabled provider the server reaches over plain
+/// `http://`: an OIDC provider's (Github and Google have fixed https
+/// urls).
+fn plain_http_url(provider: &ExternalLoginProvider) -> Option<&str> {
+  match &provider.config {
+    ExternalLoginProviderConfig::Oidc(config)
+      if provider.enabled() && is_plain_http(&config.provider) =>
+    {
+      Some(&config.provider)
+    }
+    _ => None,
+  }
+}
+
+/// Warns ([warn_plain_http]) when an enabled OIDC provider is reached
+/// over plain `http://`: its discovery and key set (which anyone on
+/// the path could replace, and sign ID tokens for any user), and the
+/// token request carrying the client secret and the login's code.
+/// `once`: see [warn_plain_http].
+pub(crate) fn warn_plain_http_provider(
+  provider: &ExternalLoginProvider,
+  once: bool,
+) {
+  if let Some(url) = plain_http_url(provider) {
+    warn_plain_http(
+      UrlOwner::Provider {
+        id: &provider.id,
+        name: &provider.name,
+      },
+      "provider",
+      url,
+      "read the client secret, the login codes and the tokens they \
+       are redeemed for, and replace the key set ID tokens are \
+       verified with",
+      once,
+    );
+  }
 }
 
 #[cfg(test)]
@@ -754,6 +795,39 @@ mod tests {
         client_secret: client_secret.to_string(),
       }),
     }
+  }
+
+  /// An enabled OIDC provider reached over plain http is warned about.
+  #[test]
+  fn test_plain_http_url() {
+    let oidc = |enabled: bool, url: &str| ExternalLoginProvider {
+      id: "oidc".to_string(),
+      name: "OIDC".to_string(),
+      registration_disabled: false,
+      slug: String::new(),
+      token_exchange: Default::default(),
+      config: ExternalLoginProviderConfig::Oidc(
+        mogh_auth_client::config::OidcConfig {
+          enabled,
+          provider: url.to_string(),
+          client_id: "client-id".to_string(),
+          ..Default::default()
+        },
+      ),
+    };
+    assert_eq!(
+      plain_http_url(&oidc(true, "http://idp.local:8080")),
+      Some("http://idp.local:8080")
+    );
+    assert_eq!(
+      plain_http_url(&oidc(true, "https://idp.example.com")),
+      None
+    );
+    assert_eq!(
+      plain_http_url(&oidc(false, "http://idp.local")),
+      None
+    );
+    assert_eq!(plain_http_url(&github("github", "secret")), None);
   }
 
   #[test]

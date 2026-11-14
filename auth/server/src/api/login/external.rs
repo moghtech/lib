@@ -32,8 +32,11 @@ use crate::{
   session::Session,
 };
 
-/// `load_client` loads the client which verifies tokens of a provider.
-pub async fn exchange_external_for_jwt<I, L, F>(
+/// `ExchangeExternalForJwt`. `load_client` loads the client which
+/// verifies tokens of a provider. Crate private: it takes the
+/// request's [Session], which is the server's own, so no app could
+/// call it.
+pub(crate) async fn exchange_external_for_jwt<I, L, F>(
   auth: &I,
   session: &Session,
   ip: IpAddr,

@@ -9,9 +9,7 @@ use mogh_auth_client::{
     DeleteTrustedIssuerResponse, ListTrustedIssuers,
     TrustedIssuerListItem, UpdateTrustedIssuer,
   },
-  config::{
-    REDACTED, TrustedIssuer, TrustedIssuerKeys, WorkloadRule,
-  },
+  config::{TrustedIssuer, TrustedIssuerKeys, WorkloadRule},
 };
 use std::sync::Arc;
 
@@ -24,18 +22,126 @@ use crate::{
   api::manage::ManageArgs,
   provider::{
     external::PROVIDER_ID_LENGTH,
+    token_exchange::issuers_match,
     workload::{
       WorkloadAccess, ensure_in_cluster_review,
       evict_verification_keys, list_trusted_issuers,
       lock_trusted_issuer, normalize_trusted_issuer, parse_jwks,
+      warn_plain_http_urls,
     },
   },
   rand::random_string,
   user::AuthUserImpl,
+  validations::keep_credential,
 };
 
 fn bad_request(message: impl std::fmt::Display) -> mogh_error::Error {
   anyhow!("{message}").status_code(StatusCode::BAD_REQUEST)
+}
+
+fn reviews_tokens(issuer: &TrustedIssuer) -> bool {
+  matches!(issuer.keys, TrustedIssuerKeys::TokenReview(_))
+}
+
+/// Refuses (400) a TokenReview issuer naming a `device` when the app
+/// has no review devices ([AuthImpl::reviews_through_devices]): the
+/// default review refuses every token of such an issuer, so its
+/// exchanges could only ever fail.
+fn ensure_review_device<I: AuthImpl + ?Sized>(
+  auth: &I,
+  issuer: &TrustedIssuer,
+) -> mogh_error::Result<()> {
+  match &issuer.keys {
+    TrustedIssuerKeys::TokenReview(config)
+      if !config.device.is_empty()
+        && !auth.reviews_through_devices() =>
+    {
+      Err(bad_request(
+        "This app has no review devices: review through the cluster \
+         api server 'url', or 'in_cluster'",
+      ))
+    }
+    _ => Ok(()),
+  }
+}
+
+/// Held from [ensure_distinct_review_issuer] until the issuer it
+/// checked is stored, so two admins creating or updating issuers at
+/// the same time can't both pass the check with issuers which collide.
+/// Taken after the issuer's own lock ([lock_trusted_issuer]), never
+/// before it, and nothing holding it waits for an issuer's lock.
+///
+/// This only covers one instance of the app: the exchange refuses to
+/// review the tokens of an issuer url which is shared all the same
+/// (see `verify_workload_by` in [crate::api::token]).
+fn distinct_review_issuer_lock() -> Arc<tokio::sync::Mutex<()>> {
+  static LOCK: std::sync::OnceLock<Arc<tokio::sync::Mutex<()>>> =
+    std::sync::OnceLock::new();
+  LOCK.get_or_init(Default::default).clone()
+}
+
+/// Refuses (409) an issuer which, stored as it is, would leave an
+/// enabled TokenReview issuer sharing its issuer url (compared with
+/// [issuers_match]) with another enabled issuer, static ones and those
+/// verifying with keys included.
+///
+/// The exchange tries every enabled issuer of a token's `iss`, and
+/// trying a TokenReview issuer posts the whole token to that issuer's
+/// cluster (or review device). Sharing the url, that cluster would
+/// receive the live tokens of the other issuer: a captured one acts as
+/// the other's workload until it expires, and a compromise of one
+/// cluster extends to the workload identities of the other. Issuers
+/// verifying with keys check a token locally, and may share a url
+/// among themselves (the Kubernetes default issuer url is the same for
+/// every cluster).
+///
+/// It checks the issuer as it would be stored: created, given another
+/// `issuer` url or keys, or enabled again. A disabled issuer is never
+/// refused, nor is one which collides only with disabled ones.
+async fn ensure_distinct_review_issuer<I: AuthImpl + ?Sized>(
+  auth: &I,
+  issuer: &TrustedIssuer,
+) -> mogh_error::Result<()> {
+  if !issuer.enabled {
+    return Ok(());
+  }
+  let reviews = reviews_tokens(issuer);
+  let Some(other) = list_trusted_issuers(auth)
+    .await?
+    .into_iter()
+    .map(|resolved| resolved.issuer)
+    .find(|other| {
+      other.id != issuer.id
+        && other.enabled
+        && issuers_match(&other.issuer, &issuer.issuer)
+        && (reviews || reviews_tokens(other))
+    })
+  else {
+    return Ok(());
+  };
+  let reviewer = if reviews {
+    String::from("this issuer's cluster")
+  } else {
+    format!("the cluster of '{}'", other.name)
+  };
+  let tokens_of = if reviews {
+    format!("'{}'", other.name)
+  } else {
+    String::from("this issuer")
+  };
+  Err(
+    anyhow!(
+      "Trusted issuer '{}' already uses this issuer url. A token \
+       review issuer has to be the only enabled issuer of its url: \
+       the exchange tries every issuer of a token's url, so \
+       {reviewer} would receive the live tokens of {tokens_of} for \
+       review. Give each cluster its own issuer url (kube-apiserver \
+       --service-account-issuer), or verify both with keys \
+       (Discovery, JwksUri or Static) instead",
+      other.name
+    )
+    .status_code(StatusCode::CONFLICT),
+  )
 }
 
 fn check_admin(user: &dyn AuthUserImpl) -> mogh_error::Result<()> {
@@ -120,11 +226,16 @@ pub async fn create_issuer<I: AuthImpl + ?Sized>(
 
   let mut issuer = validate_issuer(issuer, None)?;
   ensure_in_cluster_review(&issuer, auth.in_cluster_env().as_ref())?;
+  ensure_review_device(auth, &issuer)?;
   // Random ids are never reused, so a new issuer
   // can't inherit the users of a deleted one.
   issuer.id = random_string(PROVIDER_ID_LENGTH);
 
+  let distinct = distinct_review_issuer_lock();
+  let distinct = distinct.lock().await;
+  ensure_distinct_review_issuer(auth, &issuer).await?;
   auth.create_trusted_issuer(issuer.clone()).await?;
+  drop(distinct);
 
   info!(
     admin_id = user.id(),
@@ -133,8 +244,8 @@ pub async fn create_issuer<I: AuthImpl + ?Sized>(
     issuer = issuer.name,
     "Trusted issuer created"
   );
+  warn_plain_http_urls(&issuer, false);
 
-  let mut issuer = issuer;
   issuer.redact_secrets();
   Ok(TrustedIssuerListItem {
     issuer,
@@ -159,12 +270,13 @@ impl Resolve<ManageArgs> for CreateTrustedIssuer {
 
 //
 
-/// An empty or redacted reviewer credential keeps the stored one,
-/// like the login providers' client secret. The stored credential is
-/// only kept for the url it was entered for: a changed url needs the
-/// credential entered again, so it is never sent anywhere else. An
-/// issuer naming a `device` reviews with the device's own
-/// credentials, so there is nothing to keep.
+/// An empty or redacted reviewer credential keeps the stored one
+/// ([keep_credential]), like the login providers' client secret. The
+/// stored credential is only kept for the url it was entered for: a
+/// changed url needs the credential entered again, so it is never
+/// sent anywhere else. An issuer naming a `device`, or reviewing
+/// in its own cluster, reviews with credentials of its own, so there
+/// is nothing to keep.
 fn keep_existing_review_token(
   issuer: &mut TrustedIssuer,
   existing: &TrustedIssuer,
@@ -177,26 +289,21 @@ fn keep_existing_review_token(
     // These modes review with their own credentials: nothing kept.
     return Ok(());
   }
-  let token = config.token.trim();
-  if !token.is_empty() && token != REDACTED {
-    // A new credential
-    return Ok(());
-  }
-  let (existing_token, existing_url) = match &existing.keys {
+  let (stored, stored_url) = match &existing.keys {
     TrustedIssuerKeys::TokenReview(existing) => {
       (existing.token.as_str(), existing.url.as_str())
     }
     _ => ("", ""),
   };
-  if !existing_token.is_empty()
-    && config.url.trim() != existing_url
-  {
-    return Err(bad_request(
-      "The cluster api server url changed: enter the reviewer credential again",
-    ));
-  }
-  config.token = existing_token.to_string();
-  Ok(())
+  let url_changed = config.url.trim() != stored_url.trim();
+  keep_credential(
+    &mut config.token,
+    stored,
+    url_changed,
+    "reviewer credential",
+    "cluster api server url",
+  )
+  .status_code(StatusCode::BAD_REQUEST)
 }
 
 /// Finds an issuer which can be managed over the API.
@@ -252,12 +359,18 @@ pub async fn update_issuer<I: AuthImpl + ?Sized>(
   keep_existing_review_token(&mut issuer, &existing)?;
   let mut issuer = validate_issuer(issuer, Some(&existing))?;
   ensure_in_cluster_review(&issuer, auth.in_cluster_env().as_ref())?;
+  ensure_review_device(auth.as_ref(), &issuer)?;
   issuer.id = existing.id;
+
+  let distinct = distinct_review_issuer_lock().lock_owned().await;
+  ensure_distinct_review_issuer(auth.as_ref(), &issuer).await?;
 
   let admin_id = user.id().to_string();
   let admin = user.username().to_string();
   let update = async move {
-    auth.update_trusted_issuer(issuer.clone()).await?;
+    let stored = auth.update_trusted_issuer(issuer.clone()).await;
+    drop(distinct);
+    stored?;
 
     evict_verification_keys(&issuer.id);
 
@@ -268,6 +381,7 @@ pub async fn update_issuer<I: AuthImpl + ?Sized>(
       issuer = issuer.name,
       "Trusted issuer updated"
     );
+    warn_plain_http_urls(&issuer, false);
 
     if let Err(e) = auth
       .sync_workload_users(
@@ -382,7 +496,7 @@ impl Resolve<ManageArgs> for DeleteTrustedIssuer {
 mod tests {
   use std::sync::{Arc, Mutex};
 
-  use mogh_auth_client::config::WorkloadClaim;
+  use mogh_auth_client::config::{REDACTED, WorkloadClaim};
 
   use super::*;
   use crate::provider::{
@@ -428,6 +542,8 @@ mod tests {
     /// The cluster the server runs in, None outside one. Tests
     /// always answer from here, never from the real environment.
     in_cluster: Option<crate::provider::workload::InClusterEnv>,
+    /// [AuthImpl::reviews_through_devices]
+    review_devices: bool,
   }
 
   /// Whether an exchange of a rule of the issuer has to wait.
@@ -465,6 +581,10 @@ mod tests {
       &self,
     ) -> Option<crate::provider::workload::InClusterEnv> {
       self.in_cluster.clone()
+    }
+
+    fn reviews_through_devices(&self) -> bool {
+      self.review_devices
     }
 
     fn static_trusted_issuers(&self) -> Vec<TrustedIssuer> {
@@ -973,6 +1093,8 @@ mod tests {
     level: tracing::Level,
     issuer_id: String,
     message: String,
+    /// The `url` field, if any.
+    url: Option<String>,
   }
 
   /// Records the events logged with an `issuer_id`, by every test.
@@ -1032,6 +1154,7 @@ mod tests {
       struct Fields {
         issuer_id: Option<String>,
         message: String,
+        url: Option<String>,
       }
       impl tracing::field::Visit for Fields {
         fn record_str(
@@ -1039,8 +1162,10 @@ mod tests {
           field: &tracing::field::Field,
           value: &str,
         ) {
-          if field.name() == "issuer_id" {
-            self.issuer_id = Some(value.to_string());
+          match field.name() {
+            "issuer_id" => self.issuer_id = Some(value.to_string()),
+            "url" => self.url = Some(value.to_string()),
+            _ => {}
           }
         }
         fn record_debug(
@@ -1062,6 +1187,7 @@ mod tests {
         level: *event.metadata().level(),
         issuer_id,
         message: fields.message,
+        url: fields.url,
       });
     }
     fn enter(&self, _: &tracing::span::Id) {}
@@ -1250,24 +1376,22 @@ mod tests {
     }]);
     issuer.issuer =
       "https://kubernetes.default.svc.cluster.local".to_string();
-    issuer.keys =
-      TrustedIssuerKeys::TokenReview(TokenReviewConfig {
-        url: url.to_string(),
-        ca: String::new(),
-        token: token.to_string(),
-        device: String::new(),
-        in_cluster: false,
-      });
+    issuer.keys = TrustedIssuerKeys::TokenReview(TokenReviewConfig {
+      url: url.to_string(),
+      ca: String::new(),
+      token: token.to_string(),
+      device: String::new(),
+      in_cluster: false,
+    });
     issuer
   }
 
   fn in_cluster_issuer() -> TrustedIssuer {
     let mut issuer = review_issuer("", "");
-    issuer.keys =
-      TrustedIssuerKeys::TokenReview(TokenReviewConfig {
-        in_cluster: true,
-        ..Default::default()
-      });
+    issuer.keys = TrustedIssuerKeys::TokenReview(TokenReviewConfig {
+      in_cluster: true,
+      ..Default::default()
+    });
     issuer
   }
 
@@ -1292,9 +1416,7 @@ mod tests {
   fn stored_review_token(auth: &TestAuth) -> String {
     let stored = auth.stored.lock().unwrap();
     match &stored[0].keys {
-      TrustedIssuerKeys::TokenReview(config) => {
-        config.token.clone()
-      }
+      TrustedIssuerKeys::TokenReview(config) => config.token.clone(),
       _ => unreachable!(),
     }
   }
@@ -1315,15 +1437,11 @@ mod tests {
     assert_eq!(created.keys.review_token(), Some(REDACTED));
     assert_eq!(stored_review_token(&auth), "reviewer-secret");
     let listed = list_issuers(&auth, &ADMIN).await.unwrap();
-    assert_eq!(
-      listed[0].issuer.keys.review_token(),
-      Some(REDACTED)
-    );
+    assert_eq!(listed[0].issuer.keys.review_token(), Some(REDACTED));
 
     // An empty or redacted credential keeps the stored one
     for kept in ["", REDACTED] {
-      let mut update =
-        review_issuer("https://10.0.0.1:6443", kept);
+      let mut update = review_issuer("https://10.0.0.1:6443", kept);
       update.id = created.id.clone();
       let updated =
         update_issuer(Arc::new(auth.clone()), &ADMIN, update)
@@ -1346,10 +1464,9 @@ mod tests {
     // A changed url needs the credential entered again
     let mut update = review_issuer("https://10.0.0.2:6443", "");
     update.id = created.id.clone();
-    let error =
-      update_issuer(Arc::new(auth.clone()), &ADMIN, update)
-        .await
-        .unwrap_err();
+    let error = update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+      .await
+      .unwrap_err();
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert!(
       format!("{:#}", error.error)
@@ -1391,23 +1508,28 @@ mod tests {
         issuer
       }),
     ] {
-      let error = create_issuer(&auth, &ADMIN, issuer)
-        .await
-        .unwrap_err();
+      let error =
+        create_issuer(&auth, &ADMIN, issuer).await.unwrap_err();
       assert_eq!(error.status, StatusCode::BAD_REQUEST, "{what}");
     }
     assert!(auth.stored.lock().unwrap().is_empty());
 
     // A device reviews with its own credentials: the stale ones
     // of the form are dropped
-    let mut issuer = review_issuer("", "stale");
-    if let TrustedIssuerKeys::TokenReview(config) =
-      &mut issuer.keys
-    {
-      config.device = "dev_123".to_string();
-      config.ca = "stale".to_string();
-    }
-    create_issuer(&auth, &ADMIN, issuer).await.unwrap();
+    let device_issuer = || {
+      let mut issuer = review_issuer("", "stale");
+      if let TrustedIssuerKeys::TokenReview(config) = &mut issuer.keys
+      {
+        config.device = "dev_123".to_string();
+        config.ca = "stale".to_string();
+      }
+      issuer
+    };
+    let auth = TestAuth {
+      review_devices: true,
+      ..Default::default()
+    };
+    create_issuer(&auth, &ADMIN, device_issuer()).await.unwrap();
     let stored = auth.stored.lock().unwrap();
     let TrustedIssuerKeys::TokenReview(config) = &stored[0].keys
     else {
@@ -1416,6 +1538,47 @@ mod tests {
     assert_eq!(config.device, "dev_123");
     assert!(config.token.is_empty());
     assert!(config.ca.is_empty());
+  }
+
+  /// An app without review devices (the default) refuses an issuer
+  /// naming one, created or updated: the default review could only
+  /// refuse its every token.
+  #[tokio::test]
+  async fn test_review_device_needs_an_app_with_devices() {
+    let auth = TestAuth::default();
+    let mut device_issuer = review_issuer("", "");
+    if let TrustedIssuerKeys::TokenReview(config) =
+      &mut device_issuer.keys
+    {
+      config.device = "dev_123".to_string();
+    }
+    let error = create_issuer(&auth, &ADMIN, device_issuer.clone())
+      .await
+      .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+      format!("{:#}", error.error)
+        .contains("This app has no review devices"),
+      "{:#}",
+      error.error
+    );
+    assert!(auth.stored.lock().unwrap().is_empty());
+
+    let created = create_issuer(
+      &auth,
+      &ADMIN,
+      review_issuer("https://10.0.0.1:6443", "reviewer-secret"),
+    )
+    .await
+    .unwrap()
+    .issuer;
+    let mut update = device_issuer;
+    update.id = created.id.clone();
+    let error = update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+      .await
+      .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(stored_review_token(&auth), "reviewer-secret");
   }
 
   #[tokio::test]
@@ -1431,9 +1594,8 @@ mod tests {
     };
     let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
     let mint = || {
-      let mut token = TestToken::new(
-        openidconnect::EmptyAdditionalClaims {},
-      );
+      let mut token =
+        TestToken::new(openidconnect::EmptyAdditionalClaims {});
       token.issuer =
         "https://kubernetes.default.svc.cluster.local".to_string();
       token.subject = "system:serviceaccount:ns:app".to_string();
@@ -1510,6 +1672,103 @@ mod tests {
     assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
   }
 
+  /// The exchange is unauthenticated: a token failing the checks
+  /// which need no key (expiry, audience, age) never reaches the
+  /// cluster, and a cluster failing reviews is asked once, not by
+  /// every request.
+  #[tokio::test]
+  async fn test_reviews_spare_the_cluster() {
+    use crate::{
+      api::token::verify_workload_token,
+      provider::{
+        token_exchange::test_tokens::TestToken,
+        workload::test_reviews::{authenticated, serve_cluster},
+      },
+    };
+    let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    let token = || {
+      let mut token =
+        TestToken::new(openidconnect::EmptyAdditionalClaims {});
+      token.issuer =
+        "https://kubernetes.default.svc.cluster.local".to_string();
+      token.subject = "system:serviceaccount:ns:app".to_string();
+      token.audiences = vec!["https://app.example.com".to_string()];
+      token
+    };
+
+    let (address, requests) = serve_cluster(
+      201,
+      authenticated("system:serviceaccount:ns:app"),
+    )
+    .await;
+    let auth = TestAuth::default();
+    let mut issuer = review_issuer(&address, "reviewer-secret");
+    issuer.max_token_age_secs = 600;
+    create_issuer(&auth, &ADMIN, issuer).await.unwrap();
+    for (what, token) in [
+      ("expired", {
+        let mut token = token();
+        token.expires_in = chrono::Duration::minutes(-5);
+        token.issued_ago = chrono::Duration::minutes(10);
+        token
+      }),
+      ("another audience", {
+        let mut token = token();
+        token.audiences = vec!["https://other.example.com".into()];
+        token
+      }),
+      ("too old", {
+        let mut token = token();
+        token.expires_in = chrono::Duration::hours(1);
+        token.issued_ago = chrono::Duration::hours(1);
+        token
+      }),
+    ] {
+      let error =
+        verify_workload_token(&auth, ip, &token.mint(), |_, _| true)
+          .await
+          .unwrap_err();
+      assert_eq!(error.status, StatusCode::BAD_REQUEST, "{what}");
+    }
+    assert!(requests.lock().unwrap().is_empty());
+    // A token passing them is reviewed.
+    verify_workload_token(&auth, ip, &token().mint(), |_, _| true)
+      .await
+      .unwrap();
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    // The cluster fails every review (the reviewer credential
+    // refused): asked once, the next requests are unavailable
+    // without a review.
+    let (address, requests) =
+      serve_cluster(401, serde_json::json!({"message": "no"})).await;
+    let auth = TestAuth::default();
+    create_issuer(&auth, &ADMIN, review_issuer(&address, "revoked"))
+      .await
+      .unwrap();
+    for _ in 0..3 {
+      let error =
+        verify_workload_token(&auth, ip, &token().mint(), |_, _| {
+          true
+        })
+        .await
+        .unwrap_err();
+      assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    // Saving the issuer (a new credential) tries again right away.
+    let created = auth.stored.lock().unwrap()[0].clone();
+    let mut update = review_issuer(&address, "renewed");
+    update.id = created.id;
+    update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+      .await
+      .unwrap();
+    verify_workload_token(&auth, ip, &token().mint(), |_, _| true)
+      .await
+      .unwrap_err();
+    assert_eq!(requests.lock().unwrap().len(), 2);
+  }
+
   #[tokio::test]
   async fn test_in_cluster_review_needs_a_cluster() {
     // Outside a cluster the configuration is refused up front.
@@ -1547,14 +1806,11 @@ mod tests {
 
     // A credential pasted along anyway is dropped, not stored.
     let mut issuer = in_cluster_issuer();
-    if let TrustedIssuerKeys::TokenReview(config) = &mut issuer.keys
-    {
+    if let TrustedIssuerKeys::TokenReview(config) = &mut issuer.keys {
       config.token = "pasted-by-mistake".to_string();
     }
-    let created = create_issuer(&auth, &ADMIN, issuer)
-      .await
-      .unwrap()
-      .issuer;
+    let created =
+      create_issuer(&auth, &ADMIN, issuer).await.unwrap().issuer;
     assert_eq!(created.keys.review_token(), Some(""));
     assert_eq!(stored_review_token(&auth), "");
     std::fs::remove_dir_all(&dir).ok();
@@ -1583,8 +1839,7 @@ mod tests {
       .unwrap();
     assert_eq!(stored_review_token(&auth), "");
     let stored = auth.stored.lock().unwrap()[0].clone();
-    let TrustedIssuerKeys::TokenReview(config) = &stored.keys
-    else {
+    let TrustedIssuerKeys::TokenReview(config) = &stored.keys else {
       unreachable!()
     };
     assert!(config.in_cluster);
@@ -1602,9 +1857,8 @@ mod tests {
     };
     let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
     let mint = || {
-      let mut token = TestToken::new(
-        openidconnect::EmptyAdditionalClaims {},
-      );
+      let mut token =
+        TestToken::new(openidconnect::EmptyAdditionalClaims {});
       token.issuer =
         "https://kubernetes.default.svc.cluster.local".to_string();
       token.subject = "system:serviceaccount:ns:app".to_string();
@@ -1638,16 +1892,364 @@ mod tests {
     // Stored, but the server no longer runs in a cluster: the
     // issuer is unavailable, never the token's fault.
     let auth = TestAuth::default();
-    auth.stored.lock().unwrap().push({
-      let mut issuer = in_cluster_issuer();
-      issuer.id = "icl".to_string();
-      issuer.rules[0].id = "rule".to_string();
-      issuer
-    });
+    auth
+      .stored
+      .lock()
+      .unwrap()
+      .push(stored_as("icl", in_cluster_issuer()));
     let error =
       verify_workload_token(&auth, ip, &mint(), |_, _| true)
         .await
         .unwrap_err();
     assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+  }
+
+  /// An issuer verifying with keys, on the url of [review_issuer].
+  fn keys_issuer(jwks: String) -> TrustedIssuer {
+    let mut issuer = review_issuer("", "");
+    issuer.name = "Keys".to_string();
+    issuer.keys = TrustedIssuerKeys::Static(jwks);
+    issuer
+  }
+
+  /// `issuer` as the management api would have stored it, with `id`:
+  /// for rows stored before the api refused them.
+  fn stored_as(id: &str, issuer: TrustedIssuer) -> TrustedIssuer {
+    let mut issuer = validate_issuer(issuer, None).unwrap();
+    issuer.id = id.to_string();
+    issuer
+  }
+
+  fn assert_conflict(error: mogh_error::Error, other: &str) {
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    let message = format!("{:#}", error.error);
+    assert!(
+      message.contains(&format!(
+        "Trusted issuer '{other}' already uses this issuer url"
+      )),
+      "{message}"
+    );
+    assert!(
+      message.contains("--service-account-issuer"),
+      "{message}"
+    );
+    assert!(!message.contains("reviewer-secret"), "{message}");
+  }
+
+  /// A TokenReview issuer posts every token of its issuer url to its
+  /// cluster: it may share the url with no other enabled issuer, of
+  /// any kind, created in either order. Issuers verifying with keys
+  /// may share one.
+  #[tokio::test]
+  async fn test_token_review_issuer_url_is_its_own() {
+    let review = || {
+      let mut issuer =
+        review_issuer("https://10.0.0.1:6443", "reviewer-secret");
+      issuer.name = "Review".to_string();
+      issuer
+    };
+    let keys = || keys_issuer(jwks_json());
+    let other_review = || {
+      let mut issuer =
+        review_issuer("https://10.0.0.2:6443", "reviewer-secret");
+      issuer.name = "Other review".to_string();
+      // The same url, written another way.
+      issuer.issuer.push('/');
+      issuer
+    };
+
+    for (first, second, other) in [
+      (keys(), review(), "Keys"),
+      (review(), keys(), "Review"),
+      (review(), other_review(), "Review"),
+      (other_review(), review(), "Other review"),
+    ] {
+      let auth = TestAuth::default();
+      create_issuer(&auth, &ADMIN, first).await.unwrap();
+      let error =
+        create_issuer(&auth, &ADMIN, second).await.unwrap_err();
+      assert_conflict(error, other);
+      assert_eq!(auth.stored.lock().unwrap().len(), 1);
+    }
+
+    // Keys and keys share a url.
+    let auth = TestAuth::default();
+    create_issuer(&auth, &ADMIN, keys()).await.unwrap();
+    let mut discovery = keys();
+    discovery.keys = TrustedIssuerKeys::Discovery {};
+    let discovery = create_issuer(&auth, &ADMIN, discovery)
+      .await
+      .unwrap()
+      .issuer;
+
+    // Turning one of them into a TokenReview issuer collides.
+    let mut update = review();
+    update.id = discovery.id.clone();
+    let error = update_issuer(Arc::new(auth.clone()), &ADMIN, update)
+      .await
+      .unwrap_err();
+    assert_conflict(error, "Keys");
+    assert_eq!(
+      auth.stored.lock().unwrap()[1].keys,
+      TrustedIssuerKeys::Discovery {}
+    );
+
+    // A disabled TokenReview issuer collides with nothing, until it
+    // is enabled.
+    let disabled = TrustedIssuer {
+      enabled: false,
+      ..review()
+    };
+    let disabled =
+      create_issuer(&auth, &ADMIN, disabled).await.unwrap().issuer;
+    let enable = TrustedIssuer {
+      enabled: true,
+      id: disabled.id.clone(),
+      ..review()
+    };
+    let error = update_issuer(Arc::new(auth.clone()), &ADMIN, enable)
+      .await
+      .unwrap_err();
+    assert_conflict(error, "Keys");
+    assert!(!auth.stored.lock().unwrap()[2].enabled);
+    // Nor do disabled ones collide with an enabled one.
+    let auth = TestAuth::default();
+    create_issuer(
+      &auth,
+      &ADMIN,
+      TrustedIssuer {
+        enabled: false,
+        ..keys()
+      },
+    )
+    .await
+    .unwrap();
+    create_issuer(&auth, &ADMIN, review()).await.unwrap();
+
+    // Moving a TokenReview issuer onto a url in use collides.
+    let auth = TestAuth::default();
+    create_issuer(&auth, &ADMIN, keys()).await.unwrap();
+    let elsewhere = TrustedIssuer {
+      issuer: "https://cluster-b.example.com".to_string(),
+      ..review()
+    };
+    let elsewhere = create_issuer(&auth, &ADMIN, elsewhere)
+      .await
+      .unwrap()
+      .issuer;
+    let mut moved = review();
+    moved.id = elsewhere.id.clone();
+    let error = update_issuer(Arc::new(auth.clone()), &ADMIN, moved)
+      .await
+      .unwrap_err();
+    assert_conflict(error, "Keys");
+    assert_eq!(
+      auth.stored.lock().unwrap()[1].issuer,
+      "https://cluster-b.example.com"
+    );
+
+    // An issuer of the app configuration counts too.
+    let auth = TestAuth {
+      static_issuers: vec![stored_as("configured", keys())],
+      ..Default::default()
+    };
+    let error =
+      create_issuer(&auth, &ADMIN, review()).await.unwrap_err();
+    assert_conflict(error, "Keys");
+    assert!(auth.stored.lock().unwrap().is_empty());
+  }
+
+  /// Issuers which share a url with a TokenReview issuer though (of
+  /// the app configuration, or stored before the management api
+  /// refused them): the exchange never posts a token to the cluster.
+  /// The TokenReview issuer is unavailable, the others verify as ever.
+  #[tokio::test]
+  async fn test_shared_review_issuer_url_is_never_reviewed() {
+    use crate::{
+      api::token::verify_workload_token,
+      provider::{
+        token_exchange::test_tokens::{TestToken, other_jwks_json},
+        workload::test_reviews::{authenticated, serve_cluster},
+      },
+    };
+    let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    let mint = || {
+      let mut token =
+        TestToken::new(openidconnect::EmptyAdditionalClaims {});
+      token.issuer =
+        "https://kubernetes.default.svc.cluster.local".to_string();
+      token.subject = "system:serviceaccount:ns:app".to_string();
+      token.audiences = vec!["https://app.example.com".to_string()];
+      token.mint()
+    };
+    let (address, requests) = serve_cluster(
+      201,
+      authenticated("system:serviceaccount:ns:app"),
+    )
+    .await;
+    let review =
+      stored_as("shared-review", review_issuer(&address, "secret"));
+
+    // The keys issuer rejects the token (other keys): unavailable,
+    // as the TokenReview issuer could not be asked.
+    let rejecting = stored_as(
+      "shared-keys-rejecting",
+      keys_issuer(other_jwks_json()),
+    );
+    for stored in [
+      vec![review.clone(), rejecting.clone()],
+      vec![rejecting.clone(), review.clone()],
+    ] {
+      let auth = TestAuth::default();
+      *auth.stored.lock().unwrap() = stored;
+      let error =
+        verify_workload_token(&auth, ip, &mint(), |_, _| true)
+          .await
+          .unwrap_err();
+      assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // The keys issuer verifies the token, listed after the
+    // TokenReview issuer, and of the app configuration.
+    let accepting =
+      stored_as("shared-keys-accepting", keys_issuer(jwks_json()));
+    let auth = TestAuth {
+      static_issuers: vec![accepting],
+      ..Default::default()
+    };
+    auth.stored.lock().unwrap().push(review.clone());
+    let verified =
+      verify_workload_token(&auth, ip, &mint(), |_, _| true)
+        .await
+        .unwrap();
+    assert_eq!(verified.issuer.id, "shared-keys-accepting");
+
+    // Even when no rule of the other issuer is admitted.
+    let auth = TestAuth::default();
+    *auth.stored.lock().unwrap() = vec![rejecting, review.clone()];
+    let error =
+      verify_workload_token(&auth, ip, &mint(), |issuer, _| {
+        issuer.id == "shared-review"
+      })
+      .await
+      .unwrap_err();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+
+    assert!(requests.lock().unwrap().is_empty());
+
+    // Alone on its url, it reviews.
+    let auth = TestAuth::default();
+    auth.stored.lock().unwrap().push(review);
+    verify_workload_token(&auth, ip, &mint(), |_, _| true)
+      .await
+      .unwrap();
+    assert_eq!(requests.lock().unwrap().len(), 1);
+  }
+
+  /// An enabled issuer reached over plain http is stored (tests and
+  /// loopback setups rely on it), with a warning naming the issuer
+  /// and the url (without userinfo or query). Listed, the issuers of
+  /// the app configuration (and rows stored before) are warned about
+  /// once in the life of the process.
+  #[tokio::test]
+  async fn test_plain_http_urls_are_warned_about() {
+    Events::of_issuer("");
+    let plain_http_warnings = |issuer_id: &str| {
+      Events::of_issuer(issuer_id)
+        .into_iter()
+        .filter(|event| {
+          event.level == tracing::Level::WARN
+            && event.message.contains("plain http")
+        })
+        .collect::<Vec<_>>()
+    };
+    let auth = TestAuth::default();
+    let create = |change: fn(&mut TrustedIssuer)| {
+      let mut issuer = issuer(vec![rule("", "Deploy")]);
+      change(&mut issuer);
+      create_issuer(&auth, &ADMIN, issuer)
+    };
+
+    for (change, warned) in [
+      (
+        (|i: &mut TrustedIssuer| {
+          i.keys = TrustedIssuerKeys::JwksUri(
+            "http://keys.example.com/keys?v=2".into(),
+          )
+        }) as fn(&mut TrustedIssuer),
+        Some(("keys url", "the key set")),
+      ),
+      (
+        |i| i.issuer = "http://issuer.example.com".into(),
+        Some(("issuer", "the key set")),
+      ),
+      (
+        |i| {
+          // Its own issuer url: a TokenReview issuer shares none.
+          i.issuer = "https://cluster.example.com".into();
+          i.keys =
+            TrustedIssuerKeys::TokenReview(TokenReviewConfig {
+              url: "http://10.0.0.1:6443".into(),
+              token: "reviewer-secret".into(),
+              ..Default::default()
+            });
+        },
+        Some(("token review url", "the reviewer credential")),
+      ),
+      // Static keys are fetched from nowhere.
+      (
+        |i| {
+          i.issuer = "http://issuer.example.com".into();
+          i.keys = TrustedIssuerKeys::Static(jwks_json());
+        },
+        None,
+      ),
+      // Nothing is sent for a disabled issuer.
+      (
+        |i| {
+          i.enabled = false;
+          i.issuer = "http://issuer.example.com".into();
+        },
+        None,
+      ),
+      (|_| {}, None),
+    ] {
+      let created = create(change).await.unwrap().issuer;
+      let warnings = plain_http_warnings(&created.id);
+      let Some((field, exposed)) = warned else {
+        assert!(warnings.is_empty(), "{warnings:?}");
+        continue;
+      };
+      assert_eq!(warnings.len(), 1, "{field}: {warnings:?}");
+      assert!(warnings[0].message.contains(exposed), "{warnings:?}");
+      let url = warnings[0].url.clone().unwrap();
+      assert!(url.starts_with("http://"), "{url}");
+      // Listing the stored issuer doesn't repeat it.
+      list_issuers(&auth, &ADMIN).await.unwrap();
+      assert_eq!(plain_http_warnings(&created.id).len(), 1);
+    }
+
+    // An issuer of the app configuration, listed by every exchange:
+    // once, the url without userinfo and with the query masked.
+    let mut configured = issuer(vec![rule("deploy", "Deploy")]);
+    configured.id = "plain-http-configured".into();
+    configured.keys = TrustedIssuerKeys::JwksUri(
+      "http://keys.example.com/keys?token=hunter2".into(),
+    );
+    let auth = TestAuth {
+      static_issuers: vec![configured],
+      ..Default::default()
+    };
+    for _ in 0..3 {
+      list_issuers(&auth, &ADMIN).await.unwrap();
+    }
+    let warnings = plain_http_warnings("plain-http-configured");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let url = warnings[0].url.clone().unwrap();
+    assert!(!url.contains("hunter2"), "{url}");
+    assert!(
+      url.starts_with("http://keys.example.com/keys?"),
+      "{url}"
+    );
   }
 }

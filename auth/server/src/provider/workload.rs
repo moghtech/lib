@@ -6,7 +6,7 @@ use std::{
   collections::HashMap,
   hash::{DefaultHasher, Hash, Hasher as _},
   sync::{Arc, Mutex, OnceLock},
-  time::Duration,
+  time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, anyhow};
@@ -25,10 +25,16 @@ use crate::{
   AuthImpl,
   provider::{
     external::validate_provider_id,
+    http::{
+      USER_AGENT, UrlOwner, client_builder, read_capped,
+      warn_plain_http,
+    },
     load_cache::LoadCache,
     token_exchange::{TokenVerificationKeys, issuers_match},
   },
-  validations::validate_public_http_url,
+  validations::{
+    clean_list, validate_http_url_without_userinfo, validate_name,
+  },
 };
 
 /// Fetched keys are reused for 5min, so a rotation at the issuer is picked up.
@@ -181,23 +187,28 @@ pub fn parse_jwks(jwks: &str) -> anyhow::Result<CoreJsonWebKeySet> {
   Ok(jwks)
 }
 
-fn http_client() -> &'static reqwest::Client {
+/// The client key sets and discovery documents are fetched with
+/// ([client_builder]), built by the first fetch which needs it.
+///
+/// Building it can fail: without a CA in the system store (a minimal
+/// image without ca-certificates, `SSL_CERT_FILE` naming a missing
+/// file) the TLS verifier can't be built. That fails the load of the
+/// keys, which reports the issuer unavailable with the reason logged
+/// (and tried again after a while, see [LoadCache]), never a panic in
+/// the exchange. Nothing is kept then: the next load builds it again.
+fn http_client() -> anyhow::Result<reqwest::Client> {
   static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-  CLIENT.get_or_init(|| {
-    reqwest::Client::builder()
-      .redirect(reqwest::redirect::Policy::none())
-      .timeout(FETCH_TIMEOUT)
-      .user_agent(concat!(
-        env!("CARGO_PKG_NAME"),
-        "/",
-        env!("CARGO_PKG_VERSION")
-      ))
-      .build()
-      .expect("Invalid workload identity reqwest client")
-  })
+  if let Some(client) = CLIENT.get() {
+    return Ok(client.clone());
+  }
+  let client = client_builder(FETCH_TIMEOUT, USER_AGENT)
+    .build()
+    .context("Failed to build the workload identity http client")?;
+  Ok(CLIENT.get_or_init(|| client).clone())
 }
 
-/// Reads at most [MAX_JWKS_LENGTH], whatever the server sends.
+/// Reads at most [MAX_JWKS_LENGTH], whatever the server sends
+/// ([read_capped]).
 ///
 /// The management api refuses urls with credentials, but issuers
 /// configured elsewhere (static ones, rows stored before) may still
@@ -206,7 +217,7 @@ fn http_client() -> &'static reqwest::Client {
 /// errors, which would repeat it with its query, without it.
 async fn fetch_text(url: &str) -> anyhow::Result<String> {
   let shown = redact_url_credentials(url);
-  let mut response = http_client()
+  let response = http_client()?
     .get(url)
     .send()
     .await
@@ -215,25 +226,10 @@ async fn fetch_text(url: &str) -> anyhow::Result<String> {
     .error_for_status()
     .map_err(reqwest::Error::without_url)
     .with_context(|| format!("Request to {shown} failed"))?;
-  let too_large = || anyhow!("Response of {shown} is too large");
-  if response
-    .content_length()
-    .is_some_and(|length| length > MAX_JWKS_LENGTH as u64)
-  {
-    return Err(too_large());
-  }
-  let mut body = Vec::<u8>::new();
-  while let Some(chunk) = response
-    .chunk()
-    .await
-    .map_err(reqwest::Error::without_url)
-    .with_context(|| format!("Failed to read response of {shown}"))?
-  {
-    if body.len() + chunk.len() > MAX_JWKS_LENGTH {
-      return Err(too_large());
-    }
-    body.extend_from_slice(&chunk);
-  }
+  let body =
+    read_capped(response, MAX_JWKS_LENGTH).await.with_context(
+      || format!("Failed to read the response of {shown}"),
+    )?;
   String::from_utf8(body).with_context(|| {
     format!("Response of {shown} is not valid UTF-8")
   })
@@ -324,9 +320,16 @@ pub async fn load_verification_keys(
     .await
 }
 
+/// Drops what is cached for the issuer: its keys, its review client,
+/// and the state of its reviews (`gated_review`), so a changed
+/// configuration is used, and tried, right away.
 pub fn evict_verification_keys(issuer_id: &str) {
   keys_cache().evict(issuer_id);
   review_clients().evict(issuer_id);
+  review_gates()
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .remove(issuer_id);
 }
 
 // ================
@@ -390,7 +393,10 @@ fn normalize_token_review(
     config.ca.clear();
     return Ok(());
   }
-  validate_public_http_url("token review url", &config.url)?;
+  validate_http_url_without_userinfo(
+    "token review url",
+    &config.url,
+  )?;
   if config.token.is_empty() {
     return Err(anyhow!(
       "A reviewer credential ('token') is required with 'url'"
@@ -402,10 +408,9 @@ fn normalize_token_review(
     ));
   }
   if !config.ca.is_empty() {
-    let certificates = reqwest::Certificate::from_pem_bundle(
-      config.ca.as_bytes(),
-    )
-    .context("'ca' is not a valid PEM certificate bundle")?;
+    let certificates =
+      reqwest::Certificate::from_pem_bundle(config.ca.as_bytes())
+        .context("'ca' is not a valid PEM certificate bundle")?;
     if certificates.is_empty() {
       return Err(anyhow!("'ca' holds no PEM certificate"));
     }
@@ -442,30 +447,43 @@ async fn review_client(
       review_client_fingerprint(url, ca),
       None,
       || async {
-        let mut builder = reqwest::Client::builder()
-          .redirect(reqwest::redirect::Policy::none())
-          .timeout(FETCH_TIMEOUT)
-          .user_agent(concat!(
-            env!("CARGO_PKG_NAME"),
-            "/",
-            env!("CARGO_PKG_VERSION")
-          ));
-        if !ca.is_empty() {
-          let certificates =
-            reqwest::Certificate::from_pem_bundle(ca.as_bytes())
-              .context(
-                "The 'ca' is not a valid PEM certificate bundle",
-              )?;
-          for certificate in certificates {
-            builder = builder.add_root_certificate(certificate);
-          }
-        }
+        let builder = client_builder(FETCH_TIMEOUT, USER_AGENT);
+        let builder = match review_roots(ca)? {
+          Some(roots) => builder.tls_certs_only(roots),
+          None => builder,
+        };
         builder
           .build()
           .context("Failed to build the token review client")
       },
     )
     .await
+}
+
+/// The roots the api server's certificate is verified against: the
+/// `ca` of the source (or the mounted service account's `ca.crt`) and
+/// only it, or the system roots (`None`) when it is empty.
+///
+/// Only, like the `certificate-authority-data` of a kubeconfig: added
+/// to the system roots instead, any certificate a system root vouches
+/// for (a public CA, a TLS inspecting proxy's, every CA mounted for
+/// other services) could answer for the api server's name, receive
+/// the reviewer credential and the live tokens, and answer
+/// `authenticated` for tokens it forged.
+fn review_roots(
+  ca: &str,
+) -> anyhow::Result<Option<Vec<reqwest::Certificate>>> {
+  if ca.trim().is_empty() {
+    return Ok(None);
+  }
+  let roots = reqwest::Certificate::from_pem_bundle(ca.as_bytes())
+    .context("The 'ca' is not a valid PEM certificate bundle")?;
+  // None would trust nothing, and fail every review at the handshake
+  // with a less telling error.
+  if roots.is_empty() {
+    return Err(anyhow!("The 'ca' holds no PEM certificate"));
+  }
+  Ok(Some(roots))
 }
 
 /// A review failure which is the operator's or the cluster's, never
@@ -480,8 +498,139 @@ fn review_unavailable(
     issuer = issuer.name,
     "Token review failed | {context}"
   );
+  issuer_unavailable(issuer)
+}
+
+/// The `503` answered for an issuer which can't review a token now.
+/// It names the issuer only: the reason is the operator's, and
+/// logged where there is one to log.
+fn issuer_unavailable(issuer: &TrustedIssuer) -> mogh_error::Error {
   anyhow!("Trusted issuer '{}' is not available", issuer.name)
     .status_code(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+/// The most reviews of one issuer in flight at once. The exchange is
+/// unauthenticated, and every request naming the issuer's `iss` (whose
+/// claims pass the local checks) would otherwise become a request to
+/// the cluster, made with the reviewer's credential.
+const MAX_REVIEWS_IN_FLIGHT: usize = 16;
+/// After a review failed for a reason other than the token (the
+/// cluster down or slow, the reviewer credential refused, the api
+/// server throttling the reviewer), the cluster is left alone this
+/// long, like a failed key load (`load_cache`).
+const RETRY_FAILED_REVIEW_AFTER: Duration = Duration::from_secs(30);
+
+/// The reviews of one issuer, see [gated_review].
+struct ReviewGate {
+  /// What the reviews depend on ([review_gate_fingerprint]): a
+  /// changed configuration starts afresh.
+  fingerprint: u64,
+  in_flight: Arc<tokio::sync::Semaphore>,
+  /// When a review last failed, not for the token.
+  failed_at: Mutex<Option<Instant>>,
+  /// When the refusal of a review for [MAX_REVIEWS_IN_FLIGHT] was
+  /// last logged.
+  busy_logged_at: Mutex<Option<Instant>>,
+}
+
+impl ReviewGate {
+  fn new(fingerprint: u64) -> ReviewGate {
+    ReviewGate {
+      fingerprint,
+      in_flight: Arc::new(tokio::sync::Semaphore::new(
+        MAX_REVIEWS_IN_FLIGHT,
+      )),
+      failed_at: Default::default(),
+      busy_logged_at: Default::default(),
+    }
+  }
+}
+
+/// Whether `at` is less than [RETRY_FAILED_REVIEW_AFTER] ago.
+fn within_review_window(at: &Mutex<Option<Instant>>) -> bool {
+  at.lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .is_some_and(|at| at.elapsed() < RETRY_FAILED_REVIEW_AFTER)
+}
+
+fn review_gates() -> &'static Mutex<HashMap<String, Arc<ReviewGate>>>
+{
+  static GATES: OnceLock<Mutex<HashMap<String, Arc<ReviewGate>>>> =
+    OnceLock::new();
+  GATES.get_or_init(Default::default)
+}
+
+/// What a review depends on: the source (url, CA, credential, device,
+/// in cluster) and the audiences it asks about.
+fn review_gate_fingerprint(issuer: &TrustedIssuer) -> u64 {
+  let mut hasher = DefaultHasher::new();
+  issuer.keys.hash(&mut hasher);
+  issuer.audiences.hash(&mut hasher);
+  hasher.finish()
+}
+
+fn review_gate(issuer: &TrustedIssuer) -> Arc<ReviewGate> {
+  let fingerprint = review_gate_fingerprint(issuer);
+  let mut gates =
+    review_gates().lock().unwrap_or_else(|e| e.into_inner());
+  let gate = gates
+    .entry(issuer.id.clone())
+    .or_insert_with(|| Arc::new(ReviewGate::new(fingerprint)));
+  if gate.fingerprint != fingerprint {
+    *gate = Arc::new(ReviewGate::new(fingerprint));
+  }
+  gate.clone()
+}
+
+/// Runs `review`, the review of a token of the TokenReview `issuer`
+/// ([AuthImpl::review_workload_token], the app's override included),
+/// unless the issuer's cluster should be left alone:
+///
+/// - After a review failed with anything but a client error (which
+///   is the token's rejection), the issuer is unavailable (`503`) for
+///   [RETRY_FAILED_REVIEW_AFTER] without asking the cluster again.
+///   The failure was logged by the review which failed; the requests
+///   refused meanwhile log nothing.
+/// - At most [MAX_REVIEWS_IN_FLIGHT] reviews of the issuer run at
+///   once. A request finding them all taken is unavailable (`503`)
+///   right away, rather than queued, logged at most once per
+///   [RETRY_FAILED_REVIEW_AFTER].
+///
+/// A changed configuration of the issuer (its keys or audiences), or
+/// [evict_verification_keys], starts afresh.
+pub(crate) async fn gated_review<F, Fut>(
+  issuer: &TrustedIssuer,
+  review: F,
+) -> mogh_error::Result<ReviewedToken>
+where
+  F: FnOnce() -> Fut,
+  Fut: Future<Output = mogh_error::Result<ReviewedToken>>,
+{
+  let gate = review_gate(issuer);
+  if within_review_window(&gate.failed_at) {
+    return Err(issuer_unavailable(issuer));
+  }
+  let Ok(_permit) = gate.in_flight.clone().try_acquire_owned() else {
+    if !within_review_window(&gate.busy_logged_at) {
+      *gate
+        .busy_logged_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+      warn!(
+        issuer_id = issuer.id,
+        issuer = issuer.name,
+        "Refusing token reviews: {MAX_REVIEWS_IN_FLIGHT} reviews of the issuer are in flight already"
+      );
+    }
+    return Err(issuer_unavailable(issuer));
+  };
+  let reviewed = review().await;
+  let failed = reviewed
+    .as_ref()
+    .is_err_and(|e| !e.status.is_client_error());
+  *gate.failed_at.lock().unwrap_or_else(|e| e.into_inner()) =
+    failed.then(Instant::now);
+  reviewed
 }
 
 /// Where a pod finds its own cluster: the api server from the
@@ -597,9 +746,11 @@ pub async fn in_cluster_token_review(
   env: &InClusterEnv,
   token: &str,
 ) -> mogh_error::Result<ReviewedToken> {
-  // Without the CA the api server's certificate cannot be verified
-  // and the review fails closed at the TLS handshake, so a missing
-  // file only surfaces a step later.
+  // The mounted cluster CA is the only root the api server's
+  // certificate is verified against ([review_roots]). Without it,
+  // the system roots: those don't vouch for a cluster's own
+  // certificate, and the review fails closed at the TLS handshake,
+  // so a missing file only surfaces a step later.
   let ca = tokio::fs::read_to_string(&env.ca_path)
     .await
     .unwrap_or_default();
@@ -666,7 +817,15 @@ async fn review_with(
     })?;
 
   let status = response.status();
-  let body = read_review_body(response).await;
+  let body = read_capped(response, MAX_REVIEW_RESPONSE)
+    .await
+    .map_err(|e| {
+      unavailable(format!(
+        "The cluster answered the review with {status}, and the answer \
+         could not be read: {e:#}"
+      ))
+    })?;
+  let body = String::from_utf8_lossy(&body);
   if !status.is_success() {
     // 401/403 mean the reviewer credential was refused: the
     // operator's problem, never the presented token's.
@@ -722,8 +881,7 @@ pub fn default_review_workload_token<I: AuthImpl + ?Sized>(
 ) -> crate::DynFuture<mogh_error::Result<ReviewedToken>> {
   let env = auth.in_cluster_env();
   Box::pin(async move {
-    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
-    else {
+    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys else {
       return Err(
         anyhow!(
           "Trusted issuer '{}' does not verify through token reviews",
@@ -754,19 +912,6 @@ pub fn default_review_workload_token<I: AuthImpl + ?Sized>(
     }
     direct_token_review(&issuer, config, &token).await
   })
-}
-
-/// Reads at most [MAX_REVIEW_RESPONSE], whatever the cluster sends.
-async fn read_review_body(response: reqwest::Response) -> String {
-  let mut body = Vec::new();
-  let mut response = response;
-  while let Ok(Some(chunk)) = response.chunk().await {
-    if body.len() + chunk.len() > MAX_REVIEW_RESPONSE {
-      break;
-    }
-    body.extend_from_slice(&chunk);
-  }
-  String::from_utf8_lossy(&body).into_owned()
 }
 
 /// Cluster errors end up in the log, and are as long as it likes.
@@ -1158,7 +1303,6 @@ pub async fn sync_all_workload_users<I: AuthImpl + ?Sized>(
 // = VALIDATION =
 // ==============
 
-const MAX_NAME_LENGTH: usize = 100;
 const MAX_AUDIENCES: usize = 16;
 /// The most rules an issuer can have.
 pub(crate) const MAX_RULES: usize = 64;
@@ -1174,53 +1318,6 @@ const MAX_VALUE_LENGTH: usize = 512;
 /// any audience there.
 const VERIFIED_CLAIMS: [&str; 6] =
   ["iss", "aud", "exp", "iat", "nbf", "jti"];
-
-/// The name of an issuer or rule (`kind`), trimmed: listed, logged,
-/// and repeated in the errors about the rule, so a control character
-/// (Unicode Cc) inside it is refused (the error doesn't repeat the
-/// name).
-fn validate_name(kind: &str, name: &str) -> anyhow::Result<String> {
-  let name = name.trim();
-  if name.is_empty() {
-    return Err(anyhow!("{kind} name cannot be empty"));
-  }
-  if name.chars().count() > MAX_NAME_LENGTH {
-    return Err(anyhow!(
-      "{kind} name cannot be longer than {MAX_NAME_LENGTH} characters"
-    ));
-  }
-  if name.chars().any(char::is_control) {
-    return Err(anyhow!(
-      "{kind} name cannot contain control characters"
-    ));
-  }
-  Ok(name.to_string())
-}
-
-/// Trimmed, without empty entries or duplicates.
-fn clean_list(
-  field: &str,
-  values: Vec<String>,
-  max: usize,
-) -> anyhow::Result<Vec<String>> {
-  let mut cleaned = Vec::<String>::new();
-  for value in values {
-    let value = value.trim();
-    if value.is_empty() || cleaned.iter().any(|v| v == value) {
-      continue;
-    }
-    if value.len() > MAX_VALUE_LENGTH {
-      return Err(anyhow!(
-        "'{field}' values cannot be longer than {MAX_VALUE_LENGTH} characters"
-      ));
-    }
-    cleaned.push(value.to_string());
-  }
-  if cleaned.len() > max {
-    return Err(anyhow!("'{field}' accepts at most {max} values"));
-  }
-  Ok(cleaned)
-}
 
 fn validate_rule(
   mut rule: WorkloadRule,
@@ -1274,9 +1371,52 @@ fn validate_rule(
       rule.name
     ));
   }
-  rule.groups =
-    clean_list("groups", rule.groups, MAX_GROUPS_PER_RULE)?;
+  rule.groups = clean_list(
+    "groups",
+    rule.groups,
+    MAX_VALUE_LENGTH,
+    MAX_GROUPS_PER_RULE,
+  )?;
   Ok(rule)
+}
+
+/// Warns ([warn_plain_http]) about each url of an enabled `issuer`
+/// the server reaches over plain `http://`: the key set (fetched
+/// from a `JwksUri`, or found through the discovery below the
+/// `issuer` url), which anyone on the path could replace to sign
+/// tokens for any rule, and a TokenReview `url`, which receives the
+/// reviewer credential and every presented token. `once`: see
+/// [warn_plain_http].
+pub(crate) fn warn_plain_http_urls(
+  issuer: &TrustedIssuer,
+  once: bool,
+) {
+  if !issuer.enabled {
+    return;
+  }
+  let owner = || UrlOwner::Issuer {
+    id: &issuer.id,
+    name: &issuer.name,
+  };
+  const KEYS: &str = "replace the key set its tokens are verified \
+    with, and sign tokens any rule accepts";
+  match &issuer.keys {
+    TrustedIssuerKeys::Discovery {} => {
+      warn_plain_http(owner(), "issuer", &issuer.issuer, KEYS, once)
+    }
+    TrustedIssuerKeys::JwksUri(url) => {
+      warn_plain_http(owner(), "keys url", url, KEYS, once)
+    }
+    TrustedIssuerKeys::TokenReview(config) => warn_plain_http(
+      owner(),
+      "token review url",
+      &config.url,
+      "read the reviewer credential and every presented token, and \
+       answer the reviews",
+      once,
+    ),
+    TrustedIssuerKeys::Static(_) => {}
+  }
 }
 
 /// [validate_trusted_issuer], returning the issuer as the management
@@ -1287,10 +1427,14 @@ pub(crate) fn normalize_trusted_issuer(
   issuer.name = validate_name("Issuer", &issuer.name)?;
 
   issuer.issuer = issuer.issuer.trim().to_string();
-  validate_public_http_url("issuer", &issuer.issuer)?;
+  validate_http_url_without_userinfo("issuer", &issuer.issuer)?;
 
-  issuer.audiences =
-    clean_list("audiences", issuer.audiences, MAX_AUDIENCES)?;
+  issuer.audiences = clean_list(
+    "audiences",
+    issuer.audiences,
+    MAX_VALUE_LENGTH,
+    MAX_AUDIENCES,
+  )?;
   if issuer.audiences.is_empty() {
     return Err(anyhow!(
       "At least one audience is required. Use one specific to this app, eg. its url."
@@ -1298,7 +1442,7 @@ pub(crate) fn normalize_trusted_issuer(
   }
 
   if let TrustedIssuerKeys::JwksUri(url) = &issuer.keys {
-    validate_public_http_url("keys url", url)?;
+    validate_http_url_without_userinfo("keys url", url)?;
   }
   if let TrustedIssuerKeys::TokenReview(config) = &mut issuer.keys {
     normalize_token_review(config)?;
@@ -1397,6 +1541,7 @@ pub async fn list_trusted_issuers<I: AuthImpl + ?Sized>(
       );
       continue;
     }
+    warn_plain_http_urls(&issuer, true);
     issuers.push(ResolvedIssuer { issuer, is_static });
   }
   Ok(issuers)
@@ -1848,7 +1993,7 @@ mod tests {
       .await
       .expect("the read must stop at the limit")
       .unwrap_err();
-      assert!(format!("{err:#}").contains("too large"), "{err:#}");
+      assert!(format!("{err:#}").contains("larger than"), "{err:#}");
     }
   }
 
@@ -2424,10 +2569,64 @@ mod tests {
     )
   }
 
+  /// A self signed CA certificate made for this test (no key kept):
+  /// the cluster CA of a review source.
+  const TEST_CLUSTER_CA: &str = "-----BEGIN CERTIFICATE-----
+MIIBnzCCAUWgAwIBAgIUIuvSPYqV4+n1sabgMijcZ10yCP8wCgYIKoZIzj0EAwIw
+JDEiMCAGA1UEAwwZbW9naC1hdXRoIHRlc3QgY2x1c3RlciBDQTAgFw0yNjExMTQw
+MDUwNTdaGA8yMTI2MTAyMTAwNTA1N1owJDEiMCAGA1UEAwwZbW9naC1hdXRoIHRl
+c3QgY2x1c3RlciBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABHQdpeYkEEZM
+BEvColbhKbwJ1FkyxjqpqvtidUIJZ1e7rkFWMBPt8t20i34VDGc/sIGDI2YyKyTx
+kNzMf5ea4wmjUzBRMB0GA1UdDgQWBBS4c1NEW7+ai18hMXApm8z4EQD5PjAfBgNV
+HSMEGDAWgBS4c1NEW7+ai18hMXApm8z4EQD5PjAPBgNVHRMBAf8EBTADAQH/MAoG
+CCqGSM49BAMCA0gAMEUCIQDGD46RxHJF58R/0QYazl83zwyyXuCTeT36xviDwWaK
+YQIgO/cghak0+HrYEOzcV9qmMhhKzWhsiTYu9iV+UdRt1IQ=
+-----END CERTIFICATE-----
+";
+
+  /// A review source's CA replaces the system roots: with one, the
+  /// review client trusts it alone. Without, the system roots.
+  #[tokio::test]
+  async fn test_review_roots() {
+    assert!(review_roots("").unwrap().is_none());
+    assert!(review_roots(" \n").unwrap().is_none());
+    let roots = review_roots(TEST_CLUSTER_CA).unwrap().unwrap();
+    assert_eq!(roots.len(), 1);
+    let bundle = format!("{TEST_CLUSTER_CA}{TEST_CLUSTER_CA}");
+    assert_eq!(review_roots(&bundle).unwrap().unwrap().len(), 2);
+    for invalid in ["not pem", "-----BEGIN PRIVATE KEY-----\n"] {
+      assert!(review_roots(invalid).is_err(), "{invalid}");
+    }
+
+    // The client builds with the CA as its only root (a CA the
+    // trust store could not parse fails here, not at a review).
+    review_client("review-roots", "https://10.0.0.1:6443", "")
+      .await
+      .unwrap();
+    review_client(
+      "review-roots-ca",
+      "https://10.0.0.1:6443",
+      TEST_CLUSTER_CA,
+    )
+    .await
+    .unwrap();
+    let garbage_der = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+    assert!(
+      review_client(
+        "review-roots-garbage",
+        "https://10.0.0.1:6443",
+        garbage_der
+      )
+      .await
+      .is_err()
+    );
+  }
+
   #[test]
   fn test_normalize_token_review() {
     // Direct mode: url + token
-    let mut config = review_config("https://10.0.0.1:6443 ", " reviewer ");
+    let mut config =
+      review_config("https://10.0.0.1:6443 ", " reviewer ");
     normalize_token_review(&mut config).unwrap();
     assert_eq!(config.url, "https://10.0.0.1:6443");
     assert_eq!(config.token, "reviewer");
@@ -2500,10 +2699,7 @@ mod tests {
       ),
     ] {
       let mut config = config;
-      assert!(
-        normalize_token_review(&mut config).is_err(),
-        "{what}"
-      );
+      assert!(normalize_token_review(&mut config).is_err(), "{what}");
     }
   }
 
@@ -2517,8 +2713,7 @@ mod tests {
     )
     .await;
     let issuer = review_issuer(&address, "reviewer-secret");
-    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
-    else {
+    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys else {
       unreachable!()
     };
 
@@ -2588,10 +2783,9 @@ mod tests {
 
     // A missing token answers unavailable, naming only the issuer.
     std::fs::remove_file(&token_path).unwrap();
-    let error =
-      in_cluster_token_review(&issuer, &env, "the-token")
-        .await
-        .unwrap_err();
+    let error = in_cluster_token_review(&issuer, &env, "the-token")
+      .await
+      .unwrap_err();
     assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
     let shown = format!("{:#}", error.error);
     assert!(shown.contains("not available"), "{shown}");
@@ -2606,8 +2800,7 @@ mod tests {
     let (address, _) =
       serve_cluster(201, rejected("token has expired")).await;
     let issuer = review_issuer(&address, "reviewer-secret");
-    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
-    else {
+    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys else {
       unreachable!()
     };
     let error = direct_token_review(&issuer, config, "the-token")
@@ -2625,8 +2818,7 @@ mod tests {
     let (address, _) =
       serve_cluster(401, json!({"message": "Unauthorized"})).await;
     let issuer = review_issuer(&address, "wrong");
-    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
-    else {
+    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys else {
       unreachable!()
     };
     let error = direct_token_review(&issuer, config, "the-token")
@@ -2639,8 +2831,7 @@ mod tests {
 
     // The cluster cannot be reached at all
     let issuer = review_issuer("http://127.0.0.1:1", "reviewer");
-    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
-    else {
+    let TrustedIssuerKeys::TokenReview(config) = &issuer.keys else {
       unreachable!()
     };
     let error = direct_token_review(&issuer, config, "the-token")
@@ -2650,5 +2841,154 @@ mod tests {
 
     // A TokenReview issuer has no keys to load
     assert!(load_verification_keys(&issuer).await.is_err());
+
+    // An answer larger than any review is refused, not truncated:
+    // unavailable, the cluster's (or a middlebox's) doing.
+    for address in crate::provider::oversized_servers().await {
+      let issuer = review_issuer(&address, "reviewer");
+      let TrustedIssuerKeys::TokenReview(config) = &issuer.keys
+      else {
+        unreachable!()
+      };
+      let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        direct_token_review(&issuer, config, "the-token"),
+      )
+      .await
+      .expect("the read must stop at the limit")
+      .unwrap_err();
+      assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+  }
+
+  /// A review which failed, not for the token, leaves the cluster
+  /// alone for a while: the next requests are unavailable without a
+  /// review. A rejected token doesn't, a changed configuration and an
+  /// eviction start afresh.
+  #[tokio::test]
+  async fn test_failed_review_is_not_retried_right_away() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let reviews = AtomicUsize::new(0);
+    let review = |status: StatusCode| {
+      reviews.fetch_add(1, Ordering::SeqCst);
+      async move {
+        if status.is_success() {
+          Ok(ReviewedToken::new("sa".to_string(), Vec::new()))
+        } else {
+          Err(anyhow!("review failed").status_code(status))
+        }
+      }
+    };
+    let mut issuer = review_issuer("https://10.0.0.1:6443", "r");
+    issuer.id = "gate-window".to_string();
+
+    // Rejected tokens are the tokens': the cluster is asked again.
+    for _ in 0..2 {
+      let error =
+        gated_review(&issuer, || review(StatusCode::BAD_REQUEST))
+          .await
+          .unwrap_err();
+      assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(reviews.load(Ordering::SeqCst), 2);
+
+    // The cluster fails: asked once (its error answered), unavailable
+    // after.
+    for attempt in 0..3 {
+      let error = gated_review(&issuer, || {
+        review(StatusCode::SERVICE_UNAVAILABLE)
+      })
+      .await
+      .unwrap_err();
+      assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+      let expected = if attempt == 0 {
+        "review failed"
+      } else {
+        "Trusted issuer 'Test' is not available"
+      };
+      assert_eq!(format!("{:#}", error.error), expected);
+    }
+    assert_eq!(reviews.load(Ordering::SeqCst), 3);
+    // Even one which would work now.
+    assert!(
+      gated_review(&issuer, || review(StatusCode::OK))
+        .await
+        .is_err()
+    );
+    assert_eq!(reviews.load(Ordering::SeqCst), 3);
+
+    // Another credential (the operator fixed it) is tried right away.
+    issuer.keys = TrustedIssuerKeys::TokenReview(review_config(
+      "https://10.0.0.1:6443",
+      "fixed",
+    ));
+    gated_review(&issuer, || review(StatusCode::OK))
+      .await
+      .unwrap();
+    assert_eq!(reviews.load(Ordering::SeqCst), 4);
+
+    // So is an evicted issuer (updated over the api).
+    gated_review(&issuer, || review(StatusCode::BAD_GATEWAY))
+      .await
+      .unwrap_err();
+    evict_verification_keys(&issuer.id);
+    gated_review(&issuer, || review(StatusCode::OK))
+      .await
+      .unwrap();
+    assert_eq!(reviews.load(Ordering::SeqCst), 6);
+  }
+
+  /// At most [MAX_REVIEWS_IN_FLIGHT] reviews of an issuer run at once,
+  /// one more is unavailable right away, without a review.
+  #[tokio::test]
+  async fn test_reviews_in_flight_are_bounded() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut issuer = review_issuer("https://10.0.0.1:6443", "r");
+    issuer.id = "gate-in-flight".to_string();
+    let started = Arc::new(AtomicUsize::new(0));
+    let (release, released) = tokio::sync::watch::channel(false);
+    let held = (0..MAX_REVIEWS_IN_FLIGHT)
+      .map(|_| {
+        let (issuer, started, mut released) =
+          (issuer.clone(), started.clone(), released.clone());
+        tokio::spawn(async move {
+          gated_review(&issuer, || async move {
+            started.fetch_add(1, Ordering::SeqCst);
+            released.wait_for(|released| *released).await.unwrap();
+            Ok(ReviewedToken::new("sa".to_string(), Vec::new()))
+          })
+          .await
+        })
+      })
+      .collect::<Vec<_>>();
+    while started.load(Ordering::SeqCst) < MAX_REVIEWS_IN_FLIGHT {
+      tokio::task::yield_now().await;
+    }
+
+    let asked = AtomicUsize::new(0);
+    let error = tokio::time::timeout(
+      Duration::from_secs(5),
+      gated_review(&issuer, || {
+        asked.fetch_add(1, Ordering::SeqCst);
+        async { Ok(ReviewedToken::new("sa".to_string(), Vec::new())) }
+      }),
+    )
+    .await
+    .expect("refused right away, not queued")
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(asked.load(Ordering::SeqCst), 0);
+
+    release.send(true).unwrap();
+    for review in held {
+      review.await.unwrap().unwrap();
+    }
+    gated_review(&issuer, || async {
+      Ok(ReviewedToken::new("sa".to_string(), Vec::new()))
+    })
+    .await
+    .unwrap();
   }
 }

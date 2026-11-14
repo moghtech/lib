@@ -138,13 +138,33 @@ pub struct JwtProvider {
   /// Built from iss / aud / the algorithm of the header, used unless
   /// overridden with [Self::with_validation].
   default_validation: Validation,
-  encoding_key: EncodingKey,
-  decoding_key: DecodingKey,
-  /// Built with an empty secret: nothing is encoded or accepted.
-  secret_missing: bool,
+  /// `None` when built with an empty secret: nothing is encoded or
+  /// accepted.
+  keys: Option<Keys>,
   ttl_ms: u128,
   iss: String,
   aud: String,
+}
+
+/// The secret as jsonwebtoken takes it, to sign and to verify.
+struct Keys {
+  encoding: EncodingKey,
+  decoding: DecodingKey,
+}
+
+impl Keys {
+  /// `None` for an empty secret: anyone can sign with it.
+  /// jsonwebtoken makes no key of it either (since 12.0), and
+  /// refuses no other secret.
+  fn from_secret(secret: &[u8]) -> Option<Self> {
+    if secret.is_empty() {
+      return None;
+    }
+    Some(Self {
+      encoding: EncodingKey::from_secret(secret).ok()?,
+      decoding: DecodingKey::from_secret(secret).ok()?,
+    })
+  }
 }
 
 fn build_validation(
@@ -202,9 +222,7 @@ impl JwtProvider {
         DEFAULT_ISS_AUD,
         DEFAULT_HEADER.alg,
       ),
-      encoding_key: EncodingKey::from_secret(secret),
-      decoding_key: DecodingKey::from_secret(secret),
-      secret_missing: secret.is_empty(),
+      keys: Keys::from_secret(secret),
       ttl_ms,
       iss: DEFAULT_ISS_AUD.to_string(),
       aud: DEFAULT_ISS_AUD.to_string(),
@@ -346,9 +364,9 @@ impl JwtProvider {
     ttl_ms: u128,
     auth_time: Option<u64>,
   ) -> anyhow::Result<EncodedJwt> {
-    if self.secret_missing {
+    let Some(keys) = &self.keys else {
       return Err(anyhow!("No jwt secret is configured"));
-    }
+    };
     let iat = unix_timestamp_secs()?;
     let exp = iat.saturating_add(ttl_secs(ttl_ms.min(self.ttl_ms)));
     let jti = random_string(JTI_LENGTH);
@@ -361,7 +379,7 @@ impl JwtProvider {
       auth_time: auth_time.map(|auth_time| auth_time.min(iat)),
       jti: Some(&jti),
     };
-    let jwt = encode(self.header(), &claims, &self.encoding_key)
+    let jwt = encode(self.header(), &claims, &keys.encoding)
       .context("Failed at signing claim")?;
     Ok(EncodedJwt { jwt, exp })
   }
@@ -386,11 +404,11 @@ impl JwtProvider {
     jwt: &str,
   ) -> anyhow::Result<JwtClaims> {
     // Anyone can sign with an empty secret.
-    if self.secret_missing {
+    let Some(keys) = &self.keys else {
       return Err(anyhow!("Invalid user credentials"));
-    }
+    };
     let claims =
-      decode::<JwtClaims>(jwt, &self.decoding_key, self.validation())
+      decode::<JwtClaims>(jwt, &keys.decoding, self.validation())
         .map(|res| res.claims)
         .map_err(|e| {
           let refused = anyhow!("Invalid user credentials");
@@ -464,9 +482,53 @@ mod tests {
         auth_time: None,
         jti: None,
       },
-      &EncodingKey::from_secret(secret),
+      &EncodingKey::from_secret(secret).unwrap(),
     )
     .unwrap()
+  }
+
+  /// HMAC-SHA256 (RFC 2104), for a key of at most one block.
+  fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    let mut block = [0u8; 64];
+    block[..key.len()].copy_from_slice(key);
+    let padded = |pad: u8, rest: &[u8]| {
+      let mut bytes = block.map(|byte| byte ^ pad).to_vec();
+      bytes.extend_from_slice(rest);
+      bytes
+    };
+    let inner: [u8; 32] =
+      Sha256::digest(padded(0x36, message)).into();
+    Sha256::digest(padded(0x5c, &inner)).into()
+  }
+
+  /// [encode_claims] without jsonwebtoken, which makes no key of
+  /// the empty secret (since 12.0).
+  fn sign_by_hand(
+    secret: &[u8],
+    sub: &str,
+    iat: u64,
+    exp: u64,
+  ) -> String {
+    let segment =
+      |bytes: &[u8]| data_encoding::BASE64URL_NOPAD.encode(bytes);
+    let claims = serde_json::to_vec(&BorrowedJwtClaims {
+      sub,
+      iss: DEFAULT_ISS_AUD,
+      aud: DEFAULT_ISS_AUD,
+      iat,
+      exp,
+      auth_time: None,
+      jti: None,
+    })
+    .unwrap();
+    let message = format!(
+      "{}.{}",
+      segment(br#"{"typ":"JWT","alg":"HS256"}"#),
+      segment(&claims)
+    );
+    let signature = hmac_sha256(secret, message.as_bytes());
+    format!("{message}.{}", segment(&signature))
   }
 
   #[test]
@@ -482,7 +544,7 @@ mod tests {
     let claims = |jwt: &str| {
       decode::<JwtClaims>(
         jwt,
-        &provider.decoding_key,
+        &provider.keys.as_ref().unwrap().decoding,
         provider.validation(),
       )
       .unwrap()
@@ -503,7 +565,7 @@ mod tests {
     let encoded = provider.encode_sub("user-123").unwrap();
     let claims = decode::<JwtClaims>(
       &encoded.jwt,
-      &DecodingKey::from_secret(SECRET),
+      &DecodingKey::from_secret(SECRET).unwrap(),
       provider.validation(),
     )
     .unwrap()
@@ -629,7 +691,7 @@ mod tests {
         auth_time: None,
         jti: None,
       },
-      &EncodingKey::from_secret(SECRET),
+      &EncodingKey::from_secret(SECRET).unwrap(),
     )
     .unwrap();
     // Default validation only allows HS256.
@@ -685,7 +747,7 @@ mod tests {
         iat: now,
         exp: now + 60,
       },
-      &EncodingKey::from_secret(SECRET),
+      &EncodingKey::from_secret(SECRET).unwrap(),
     )
     .unwrap();
     assert!(provider.decode_sub(&jwt).is_err());
@@ -865,9 +927,19 @@ mod tests {
     // Eg. a secret missing from the config.
     let provider = JwtProvider::new(b"", 60_000);
     assert!(provider.encode_sub("user-123").is_err());
-    // Anyone can sign with the empty secret.
+    // Anyone can sign with the empty secret. Signed by hand, as
+    // jsonwebtoken makes no key of it: a token signed so with a
+    // real secret is authentic...
     let now = now();
-    let forged = encode_claims(b"", "admin", now, now + 60);
+    let authentic = sign_by_hand(SECRET, "user-123", now, now + 60);
+    assert_eq!(
+      JwtProvider::new(SECRET, 60_000)
+        .decode_sub(&authentic)
+        .unwrap(),
+      "user-123"
+    );
+    // ...and so is the one of the empty secret, which is refused.
+    let forged = sign_by_hand(b"", "admin", now, now + 60);
     let err = provider.decode_sub(&forged).unwrap_err();
     assert_eq!(err.to_string(), "Invalid user credentials");
   }

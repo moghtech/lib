@@ -14,17 +14,28 @@ use crate::{
   api::manage::ManageArgs,
   api_key::{ApiKeyParts, generate_api_key_parts},
   bcrypt_pool::spawn_api_key_bcrypt,
-  validations::normalize_cidr_whitelist,
+  validations::{normalize_cidr_whitelist, validate_key_expires},
 };
 
 //
 
+/// Creates an api key of the user `user_id`: the name, expiry and
+/// whitelist validated, the secret generated and hashed (on the
+/// bounded budget of api keys), then stored with
+/// [AuthImpl::create_api_key].
+///
+/// It doesn't check [AuthImpl::check_username_locked]: the management
+/// api's `CreateApiKey` does, for the keys a user makes of its own. An
+/// app making keys for another user (an admin for a service user)
+/// calls this directly, the lock being on what the user itself may
+/// change.
 pub async fn create_api_key<I: AuthImpl + ?Sized>(
   auth: &I,
   user_id: String,
   mut body: CreateApiKey,
 ) -> mogh_error::Result<CreateApiKeyResponse> {
   auth.validate_api_key_name(&body.name)?;
+  validate_key_expires(body.expires)?;
   body.cidr_whitelist =
     normalize_cidr_whitelist(auth, body.cidr_whitelist)?;
 
@@ -67,6 +78,11 @@ impl Resolve<ManageArgs> for CreateApiKey {
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
+    // A key is a credential which outlives the lock: on an account
+    // many people log in to (a demo), a visitor's key would keep
+    // working after the operator changed the password. Deleting keys
+    // stays open.
+    auth.check_username_locked(user.username())?;
     create_api_key(auth.as_ref(), user.id().to_string(), self).await
   }
 }
@@ -169,6 +185,9 @@ async fn check_public_key_unused<I: AuthImpl + ?Sized>(
 /// and the storage hook of an app without them isn't implemented.
 /// Deleting one ([delete_signing_key]) works either way, so keys
 /// stored while they were enabled can be removed.
+///
+/// It doesn't check [AuthImpl::check_username_locked], as
+/// [create_api_key]: the management api's `CreateSigningKey` does.
 pub async fn create_signing_key<I: AuthImpl + ?Sized>(
   auth: &I,
   user_id: String,
@@ -181,6 +200,7 @@ pub async fn create_signing_key<I: AuthImpl + ?Sized>(
     );
   }
   auth.validate_api_key_name(&body.name)?;
+  validate_key_expires(body.expires)?;
   let cidr_whitelist =
     normalize_cidr_whitelist(auth, body.cidr_whitelist)?;
 
@@ -231,6 +251,8 @@ impl Resolve<ManageArgs> for CreateSigningKey {
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
+    // As CreateApiKey.
+    auth.check_username_locked(user.username())?;
     create_signing_key(auth.as_ref(), user.id().to_string(), self)
       .await
   }
@@ -687,5 +709,175 @@ mod tests {
     assert!(
       res.key.starts_with("K_") && res.secret.starts_with("S_")
     );
+  }
+
+  /// An expiry which an app would store wrapped (above `i64::MAX`
+  /// ms) is refused for both kinds of key, before anything is made
+  /// or stored.
+  #[tokio::test]
+  async fn test_out_of_range_expiry_is_refused() {
+    let auth = KnownKeyAuth::knowing(String::new());
+    let err = create_api_key(
+      &auth,
+      "user".into(),
+      CreateApiKey {
+        name: "key".into(),
+        expires: u64::MAX,
+        cidr_whitelist: Vec::new(),
+      },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    let err = create_signing_key(
+      &auth,
+      "user".into(),
+      CreateSigningKey {
+        name: "key".into(),
+        expires: i64::MAX as u64 + 1,
+        cidr_whitelist: Vec::new(),
+        public_key: String::new(),
+      },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert!(format!("{:#}", err.error).contains("'expires'"));
+  }
+
+  /// Locks `demo`, stores every key it is given, and finds them all
+  /// owned by the user of the request.
+  #[derive(Default)]
+  struct LockedAuth {
+    stored: std::sync::Mutex<Vec<String>>,
+  }
+
+  impl AuthImpl for LockedAuth {
+    fn new() -> Self {
+      LockedAuth::default()
+    }
+    crate::test_support::stub_auth_impl!(
+      get_user,
+      handle_request_authentication,
+      jwt_provider
+    );
+    fn locked_usernames(&self) -> &'static [String] {
+      static LOCKED: std::sync::LazyLock<Vec<String>> =
+        std::sync::LazyLock::new(|| vec![String::from("demo")]);
+      &LOCKED
+    }
+    fn api_secret_bcrypt_cost(&self) -> u32 {
+      TEST_BCRYPT_COST
+    }
+    fn signing_keys_enabled(&self) -> bool {
+      true
+    }
+    fn create_api_key(
+      &self,
+      user_id: String,
+      _: CreateApiKey,
+      _: String,
+      _: String,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      self.stored.lock().unwrap().push(user_id);
+      Box::pin(async { Ok(()) })
+    }
+    fn create_signing_key(
+      &self,
+      user_id: String,
+      _: CreateApiKey,
+      _: String,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      self.stored.lock().unwrap().push(user_id);
+      Box::pin(async { Ok(()) })
+    }
+    fn get_api_key_owner_id(
+      &self,
+      key: String,
+    ) -> crate::DynFuture<mogh_error::Result<String>> {
+      Box::pin(async move { Ok(key) })
+    }
+    fn delete_api_key(
+      &self,
+      _: String,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      Box::pin(async { Ok(()) })
+    }
+    fn get_signing_key_owner_id(
+      &self,
+      public_key: String,
+    ) -> crate::DynFuture<mogh_error::Result<String>> {
+      Box::pin(async move { Ok(public_key) })
+    }
+    fn delete_signing_key(
+      &self,
+      _: String,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      Box::pin(async { Ok(()) })
+    }
+  }
+
+  /// A user whose id is its username.
+  struct NamedUser(&'static str);
+
+  impl crate::user::AuthUserImpl for NamedUser {
+    fn id(&self) -> &str {
+      self.0
+    }
+    fn username(&self) -> &str {
+      self.0
+    }
+  }
+
+  /// A locked user (eg. a shared demo account) mints neither api
+  /// keys nor signing keys through the management api, as it changes
+  /// no other credential: a key would outlive the lock. It still
+  /// deletes keys. Other users create keys.
+  #[tokio::test]
+  async fn test_locked_users_create_no_keys() {
+    let auth = std::sync::Arc::new(LockedAuth::default());
+    let args = |username: &'static str| ManageArgs {
+      auth: auth.clone(),
+      user: std::sync::Arc::new(Box::new(NamedUser(username))),
+      session: crate::test_support::session(),
+      jwt: None,
+    };
+    let api_key = || CreateApiKey {
+      name: "key".into(),
+      expires: 0,
+      cidr_whitelist: Vec::new(),
+    };
+    let signing_key = || CreateSigningKey {
+      name: "key".into(),
+      expires: 0,
+      cidr_whitelist: Vec::new(),
+      public_key: String::new(),
+    };
+
+    let demo = args("demo");
+    let err = api_key().resolve(&demo).await.unwrap_err();
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+      format!("{:#}", err.error),
+      "Login credentials are locked for this user"
+    );
+    let err = signing_key().resolve(&demo).await.unwrap_err();
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    assert!(auth.stored.lock().unwrap().is_empty());
+    DeleteApiKey { key: "demo".into() }
+      .resolve(&demo)
+      .await
+      .unwrap();
+    DeleteSigningKey {
+      public_key: "demo".into(),
+    }
+    .resolve(&demo)
+    .await
+    .unwrap();
+
+    let other = args("other");
+    api_key().resolve(&other).await.unwrap();
+    signing_key().resolve(&other).await.unwrap();
+    assert_eq!(*auth.stored.lock().unwrap(), ["other", "other"]);
   }
 }

@@ -23,7 +23,9 @@ use tracing::{debug, warn};
 
 use crate::{
   provider::{
-    CONNECT_TIMEOUT, REQUEST_TIMEOUT, named::sanitize_text,
+    REQUEST_TIMEOUT,
+    http::{client_builder, read_capped},
+    named::sanitize_text,
     token_exchange::TokenVerificationKeys,
   },
   validations::url_has_credentials,
@@ -56,11 +58,8 @@ pub type TokenResponse = StandardTokenResponse<
 >;
 
 /// A client for requests to OIDC providers (and Google), which
-/// gives up after `timeout` (see [REQUEST_TIMEOUT]).
-///
-/// Redirects are not followed: the token request carries the
-/// client credentials and the PKCE verifier, which a redirect
-/// would send on.
+/// gives up after `timeout` (see [REQUEST_TIMEOUT]), and follows no
+/// redirect ([client_builder]).
 ///
 /// It uses the crate's reqwest, not openidconnect's: a provider
 /// behind a private CA is trusted like every other TLS peer of the
@@ -70,11 +69,7 @@ pub(crate) fn http_client(
   app_user_agent: &str,
   timeout: Duration,
 ) -> reqwest::Result<ProviderHttpClient> {
-  reqwest::Client::builder()
-    .redirect(reqwest::redirect::Policy::none())
-    .timeout(timeout)
-    .connect_timeout(CONNECT_TIMEOUT.min(timeout))
-    .user_agent(app_user_agent)
+  client_builder(timeout, app_user_agent)
     .build()
     .map(ProviderHttpClient)
 }
@@ -106,7 +101,7 @@ impl<'c> AsyncHttpClient<'c> for ProviderHttpClient {
 
   fn call(&'c self, request: HttpRequest) -> Self::Future {
     Box::pin(async move {
-      let mut response = self
+      let response = self
         .0
         .execute(request.try_into().map_err(Box::new)?)
         .await
@@ -117,26 +112,9 @@ impl<'c> AsyncHttpClient<'c> for ProviderHttpClient {
       for (name, value) in response.headers() {
         builder = builder.header(name, value);
       }
-      let too_large = || {
-        HttpClientError::Other(format!(
-          "The response is larger than {MAX_RESPONSE_LENGTH} bytes"
-        ))
-      };
-      if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_LENGTH as u64)
-      {
-        return Err(too_large());
-      }
-      let mut body = Vec::new();
-      while let Some(chunk) =
-        response.chunk().await.map_err(Box::new)?
-      {
-        if body.len() + chunk.len() > MAX_RESPONSE_LENGTH {
-          return Err(too_large());
-        }
-        body.extend_from_slice(&chunk);
-      }
+      let body = read_capped(response, MAX_RESPONSE_LENGTH)
+        .await
+        .map_err(|e| HttpClientError::Other(format!("{e:#}")))?;
       builder.body(body).map_err(HttpClientError::Http)
     })
   }
@@ -196,15 +174,26 @@ where
   e.status_code(status)
 }
 
-/// The client shared by every OIDC provider.
+/// The client shared by every OIDC provider, built by the first load
+/// which needs it.
+///
+/// Building it can fail: without a CA in the system store (a minimal
+/// image without ca-certificates, `SSL_CERT_FILE` naming a missing
+/// file) the TLS verifier can't be built. That is an error of the
+/// provider's load, which reports the provider unavailable with the
+/// reason logged (and tried again after a while, see `load_cache`),
+/// never a panic in the login request. Nothing is kept then: the next
+/// load builds it again.
 fn shared_http_client(
   app_user_agent: &str,
-) -> &'static ProviderHttpClient {
+) -> anyhow::Result<ProviderHttpClient> {
   static REQWEST: OnceLock<ProviderHttpClient> = OnceLock::new();
-  REQWEST.get_or_init(|| {
-    http_client(app_user_agent, REQUEST_TIMEOUT)
-      .expect("Invalid OIDC reqwest client")
-  })
+  if let Some(client) = REQWEST.get() {
+    return Ok(client.clone());
+  }
+  let client = http_client(app_user_agent, REQUEST_TIMEOUT)
+    .context("Failed to build the OIDC http client")?;
+  Ok(REQWEST.get_or_init(|| client).clone())
 }
 
 pub type InnerOidcProvider = Client<
@@ -268,7 +257,7 @@ impl OidcProvider {
     // Use OpenID Connect Discovery to fetch the provider metadata.
     let provider_metadata = CoreProviderMetadata::discover_async(
       IssuerUrl::new(config.provider.clone())?,
-      shared_http_client(app_user_agent),
+      &shared_http_client(app_user_agent)?,
     )
     .await
     .context(
@@ -315,7 +304,7 @@ impl OidcProvider {
     );
 
     Ok(OidcProvider {
-      http: shared_http_client(app_user_agent).clone(),
+      http: shared_http_client(app_user_agent)?,
       client,
       use_full_email: config.use_full_email,
       additional_scopes,

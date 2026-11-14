@@ -1,8 +1,12 @@
-//! Verification of tokens presented for RFC 8693 token exchange.
+//! Verification of tokens presented for RFC 8693 token exchange: the
+//! tokens of users of login providers, and of workloads of trusted
+//! issuers.
 //!
-//! Only tokens signed by the provider (ID tokens / JWTs) are accepted.
-//! They are verified against the keys the provider publishes,
-//! so tokens signed with a shared secret (`HS256`) never verify here.
+//! Only signed tokens (ID tokens / JWTs) are accepted, verified
+//! against the keys the provider or issuer publishes, so tokens signed
+//! with a shared secret (`HS256`) never verify here. A TokenReview
+//! issuer publishes no keys: the cluster which issued a token verifies
+//! it, and `check_reviewed_payload` checks its claims.
 
 use std::str::FromStr as _;
 
@@ -288,9 +292,7 @@ pub(crate) fn check_reviewed_payload(
   }
 
   match timestamp_claim(&payload, "iat") {
-    Some(issued_at) => {
-      check_token_age(issued_at, now, max_age_secs)?
-    }
+    Some(issued_at) => check_token_age(issued_at, now, max_age_secs)?,
     None if max_age_secs > 0 => {
       return Err(anyhow!("Token has no issue time (iat)"));
     }
@@ -1050,19 +1052,13 @@ mod tests {
     assert!(old.to_string().contains("issued"), "{old:#}");
 
     let cases: Vec<(&str, serde_json::Value)> = vec![
-      (
-        "another audience",
-        payload(serde_json::json!("elsewhere")),
-      ),
+      ("another audience", payload(serde_json::json!("elsewhere"))),
       (
         "an audience outside the accepted ones",
         payload(serde_json::json!(["app", "elsewhere"])),
       ),
       ("no audience", payload(serde_json::Value::Null)),
-      (
-        "the empty audience",
-        payload(serde_json::json!([""])),
-      ),
+      ("the empty audience", payload(serde_json::json!([""]))),
       ("expired", {
         let mut p = payload(serde_json::json!("app"));
         p["exp"] = serde_json::json!(now - 300);
@@ -1086,12 +1082,8 @@ mod tests {
     ];
     for (what, payload) in cases {
       assert!(
-        check_reviewed_payload(
-          &reviewed_jwt(payload),
-          &audiences,
-          0
-        )
-        .is_err(),
+        check_reviewed_payload(&reviewed_jwt(payload), &audiences, 0)
+          .is_err(),
         "{what}"
       );
     }
@@ -1104,8 +1096,12 @@ mod tests {
     // No issue time: fine without an age bound, refused with one
     let mut ageless = payload(serde_json::json!("app"));
     ageless.as_object_mut().unwrap().remove("iat");
-    check_reviewed_payload(&reviewed_jwt(ageless.clone()), &audiences, 0)
-      .unwrap();
+    check_reviewed_payload(
+      &reviewed_jwt(ageless.clone()),
+      &audiences,
+      0,
+    )
+    .unwrap();
     assert!(
       check_reviewed_payload(&reviewed_jwt(ageless), &audiences, 60)
         .is_err()

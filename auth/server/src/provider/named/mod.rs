@@ -2,6 +2,8 @@ use anyhow::{Context as _, anyhow};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 
+use crate::provider::http::read_capped;
+
 pub mod github;
 pub mod google;
 
@@ -11,37 +13,10 @@ pub const STATE_LENGTH: usize = 32;
 /// How many characters of a provider's text go into an error.
 const MAX_ERROR_TEXT_LENGTH: usize = 512;
 
-/// Reads the body of a provider's response, at most
-/// [MAX_RESPONSE_LENGTH][crate::provider::oidc::MAX_RESPONSE_LENGTH]:
-/// a larger one is refused unread, also when it declares its length
-/// up front.
-async fn read_body(
-  mut res: reqwest::Response,
-) -> anyhow::Result<Vec<u8>> {
-  use crate::provider::oidc::MAX_RESPONSE_LENGTH;
-  let too_large = || {
-    anyhow!("The response is larger than {MAX_RESPONSE_LENGTH} bytes")
-  };
-  if res
-    .content_length()
-    .is_some_and(|length| length > MAX_RESPONSE_LENGTH as u64)
-  {
-    return Err(too_large());
-  }
-  let mut body = Vec::new();
-  while let Some(chunk) =
-    res.chunk().await.map_err(reqwest::Error::without_url)?
-  {
-    if body.len() + chunk.len() > MAX_RESPONSE_LENGTH {
-      return Err(too_large());
-    }
-    body.extend_from_slice(&chunk);
-  }
-  Ok(body)
-}
-
 /// Parses a `200 OK` response body, anything else is an
-/// error carrying (the start of) the response text.
+/// error carrying (the start of) the response text. At most
+/// [MAX_RESPONSE_LENGTH][crate::provider::oidc::MAX_RESPONSE_LENGTH]
+/// is read ([read_capped]).
 ///
 /// The body is read and parsed here rather than with `res.json()`:
 /// reqwest's own errors name the request url, and with it anything
@@ -51,9 +26,12 @@ async fn handle_response<T: DeserializeOwned>(
   res: reqwest::Response,
 ) -> anyhow::Result<T> {
   let status = res.status();
-  let body = read_body(res).await.with_context(|| {
-    format!("Status: {status} | Failed to get response body")
-  })?;
+  let body =
+    read_capped(res, crate::provider::oidc::MAX_RESPONSE_LENGTH)
+      .await
+      .with_context(|| {
+        format!("Status: {status} | Failed to get response body")
+      })?;
   if status == StatusCode::OK {
     // Serde's syntax errors only name the position, but its type
     // errors quote the value found (`invalid type: string "..."`),

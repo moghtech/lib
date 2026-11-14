@@ -10,7 +10,8 @@ use zeroize::Zeroizing;
 
 use crate::{
   provider::{
-    CONNECT_TIMEOUT, REQUEST_TIMEOUT,
+    REQUEST_TIMEOUT,
+    http::{USER_AGENT, client_builder},
     named::{STATE_LENGTH, handle_response, sanitize_text},
   },
   rand::random_string,
@@ -29,7 +30,6 @@ pub struct GithubProvider {
   client_secret: Zeroizing<String>,
   redirect_uri: String,
   scopes: String,
-  user_agent: String,
   /// [WEB_URL], replaced in tests.
   web_url: String,
   /// [API_URL], replaced in tests.
@@ -64,13 +64,6 @@ impl GithubProvider {
       client_id: client_id.clone(),
       client_secret: Zeroizing::new(client_secret.clone()),
       redirect_uri,
-      // The Github API rejects requests without a User-Agent header.
-      user_agent: concat!(
-        env!("CARGO_PKG_NAME"),
-        "/",
-        env!("CARGO_PKG_VERSION")
-      )
-      .to_string(),
       scopes: Default::default(),
       web_url: WEB_URL.to_string(),
       api_url: API_URL.to_string(),
@@ -139,7 +132,6 @@ impl GithubProvider {
       .http
       .post(format!("{}/login/oauth/access_token", self.web_url))
       .header("Accept", "application/json")
-      .header("User-Agent", &self.user_agent)
       .form(&[
         ("client_id", self.client_id.as_str()),
         ("client_secret", self.client_secret.as_str()),
@@ -180,7 +172,6 @@ impl GithubProvider {
       .http
       .get(url)
       .header("Accept", "application/json")
-      .header("User-Agent", &self.user_agent)
       .header("Authorization", format!("Bearer {bearer_token}"))
       .send()
       .await
@@ -190,18 +181,14 @@ impl GithubProvider {
   }
 }
 
-/// A client which gives up on requests after `timeout`.
-///
-/// Redirects are not followed: the token request carries the
-/// client secret in its body, which a redirect would send on.
+/// A client which gives up on requests after `timeout`, and follows
+/// no redirect: the token request carries the client secret in its
+/// body ([client_builder]). The Github API refuses requests without a
+/// user agent, the client sends the server's own.
 fn http_client(
   timeout: Duration,
 ) -> reqwest::Result<reqwest::Client> {
-  reqwest::Client::builder()
-    .redirect(reqwest::redirect::Policy::none())
-    .timeout(timeout)
-    .connect_timeout(CONNECT_TIMEOUT.min(timeout))
-    .build()
+  client_builder(timeout, USER_AGENT).build()
 }
 
 #[derive(Deserialize)]

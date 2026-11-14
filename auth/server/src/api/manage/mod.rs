@@ -345,13 +345,24 @@ impl Resolve<ManageArgs> for GetUserId {
 impl Resolve<ManageArgs> for UpdateExternalSkip2fa {
   async fn resolve(
     self,
-    ManageArgs { auth, user, .. }: &ManageArgs,
+    args: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
+    let ManageArgs { auth, user, .. } = args;
     auth.check_username_locked(user.username())?;
     auth
       .update_user_external_skip_2fa(
         user.id().to_string(),
         self.external_skip_2fa,
+      )
+      .await?;
+    // Reported either way, the app decides: turned off, it ends the
+    // sessions a provider login may have opened without the second
+    // factor.
+    args
+      .credentials_changed(
+        crate::CredentialChange::ExternalSkip2faChanged {
+          external_skip_2fa: self.external_skip_2fa,
+        },
       )
       .await?;
     Ok(NoData {})
@@ -702,6 +713,22 @@ mod tests {
     ) -> crate::DynFuture<mogh_error::Result<()>> {
       Box::pin(async { Ok(()) })
     }
+    /// Fails while [SKIP_2FA_STORE_FAILS].
+    fn update_user_external_skip_2fa(
+      &self,
+      _: String,
+      _: bool,
+    ) -> crate::DynFuture<mogh_error::Result<()>> {
+      let fails = SKIP_2FA_STORE_FAILS
+        .load(std::sync::atomic::Ordering::SeqCst);
+      Box::pin(async move {
+        if fails {
+          Err(anyhow::anyhow!("database is down").into())
+        } else {
+          Ok(())
+        }
+      })
+    }
     fn credentials_changed(
       &self,
       user_id: String,
@@ -712,6 +739,10 @@ mod tests {
       Box::pin(async { Ok(()) })
     }
   }
+
+  /// Makes [ChangesAuth] fail to store `external_skip_2fa`.
+  static SKIP_2FA_STORE_FAILS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
   /// Once a change of how the user logs in is stored, the app is told,
   /// with the session to keep. A refused change tells nothing.
@@ -762,6 +793,18 @@ mod tests {
       .await
       .is_err()
     );
+    SKIP_2FA_STORE_FAILS
+      .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+      UpdateExternalSkip2fa {
+        external_skip_2fa: false
+      }
+      .resolve(&args)
+      .await
+      .is_err()
+    );
+    SKIP_2FA_STORE_FAILS
+      .store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(reported(), []);
 
     UpdatePassword {
@@ -790,6 +833,13 @@ mod tests {
     .resolve(&args)
     .await
     .unwrap();
+    // Both ways: the app decides what each one ends.
+    for external_skip_2fa in [true, false] {
+      UpdateExternalSkip2fa { external_skip_2fa }
+        .resolve(&args)
+        .await
+        .unwrap();
+    }
     assert_eq!(
       reported(),
       [
@@ -800,6 +850,12 @@ mod tests {
         CredentialChange::LocalLoginUnlinked,
         CredentialChange::ExternalLoginUnlinked {
           provider_id: "github".into()
+        },
+        CredentialChange::ExternalSkip2faChanged {
+          external_skip_2fa: true
+        },
+        CredentialChange::ExternalSkip2faChanged {
+          external_skip_2fa: false
         },
       ]
     );

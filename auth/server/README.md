@@ -168,6 +168,10 @@ impl mogh_auth_server::AuthImpl for AppAuthImpl {
     Box::pin(async { no_users_exist().await.map_err(Into::into) })
   }
 
+  /// A locked user (eg. a shared demo account, `__ALL__` for every user)
+  /// changes none of its credentials through the management api and
+  /// creates no api keys or signing keys (they would outlive the lock).
+  /// It can still delete its keys.
   fn locked_usernames(&self) -> &'static [String] {
     &core_config().lock_login_credentials_for
   }
@@ -390,10 +394,10 @@ impl mogh_auth_server::AuthImpl for AppAuthImpl {
 
   // create_api_key, delete_api_key
 
-  /// The server verifies the secret against the hash (a key which doesn't
-  /// exist costing as much, so the timing doesn't tell), refuses expired keys
-  /// after it (`get_api_key`), and finds the owner of a key to delete it
-  /// (`get_api_key_owner_id`) with this. Find expired keys too.
+  /// The server refuses unknown, disabled and expired keys without a bcrypt,
+  /// then verifies the secret against the hash (`get_api_key`), and finds
+  /// the owner of a key to delete it
+  /// (`get_api_key_owner_id`) with this. Find disabled and expired keys too.
   fn find_api_key(
     &self,
     key: String,
@@ -402,6 +406,8 @@ impl mogh_auth_server::AuthImpl for AppAuthImpl {
       let api_key = find_api_key(&key).await?.map(|key| StoredApiKey {
         user_id: key.user_id,
         hashed_secret: key.hashed_secret,
+        // `true` for an app whose keys can't be disabled
+        enabled: key.enabled,
         // unix milliseconds, 0 for never
         expires: key.expires,
         cidr_whitelist: key.cidr_whitelist,
@@ -412,8 +418,8 @@ impl mogh_auth_server::AuthImpl for AppAuthImpl {
 
   // signing keys: signing_keys_enabled (and extra_hosts, for more hosts
   // than `host`), create_signing_key (public keys unique across all
-  // users), find_signing_key (expired keys too, as find_api_key),
-  // delete_signing_key
+  // users), find_signing_key (disabled and expired keys too, as
+  // find_api_key), delete_signing_key
 }
 ```
 
@@ -425,18 +431,27 @@ at most `validations::MAX_CIDR_WHITELIST_ENTRIES` = 64, else `400`, then
 `validations::normalize_cidr_whitelist(&auth, whitelist)`: normalize the
 whitelists the app sets itself (a user's, a device's) with it too, so they
 follow the same rules.
-The defaults of `get_api_key` and `get_signing_key` refuse an expired key with
-`401 Invalid client credentials` (an api key after its secret verified, so the
-timing doesn't tell), and `get_api_key_owner_id` still finds it for
-`DeleteApiKey`. A key which doesn't exist gets the same `401` right away,
+The defaults of `get_api_key` and `get_signing_key` refuse a disabled
+(`StoredApiKey::enabled` / `StoredSigningKey::enabled` false) or expired key
+with `401 Invalid client credentials`, uncounted by the rate limiter, and a
+script still polling with the key doesn't lock out its ip. A signing key is
+refused after the request's signature verified (no guess). An api key is
+refused before its secret is verified, whatever the secret: the key opens
+nothing, so a guess at its secret gains nothing, and the refusal costs no
+bcrypt (a leaked key its owner disabled, or which expired, can't be replayed to
+spend the bcrypt budget of the live keys). `get_api_key_owner_id` /
+`get_signing_key_owner_id` still find such a key for `DeleteApiKey` /
+`DeleteSigningKey`. A key which doesn't exist gets the same `401` right away,
 without a bcrypt: key ids are random, listed by the UIs and logged at creation,
-so whether one exists is no secret, and only a request naming a real key costs
-the server a bcrypt (made up keys can't spend the budget of the real ones). An app with checks of its own (eg. keys which can be disabled)
-overrides `get_api_key` / `get_signing_key`: it finds the key, authenticates it
-with `middleware::verify_api_key` / `middleware::verify_signing_key` (which
-verify the secret and refuse expired keys), then refuses what it refuses with
-the same `401`. ⚠️ An override which doesn't use them checks the secret and the
-expiry itself, the server checks them nowhere else.
+so whether one exists (or can be used) is no secret, and only a request naming a
+usable key costs the server a bcrypt (made up keys can't spend the budget of the
+real ones). It counts, like a wrong secret.
+An app with checks of its own overrides `get_api_key` / `get_signing_key`: it
+finds the key, authenticates it with `middleware::verify_api_key` /
+`middleware::verify_signing_key` (which refuse disabled and expired keys, and
+verify the secret), then refuses what it refuses with the same `401`. ⚠️ An
+override which doesn't use them checks the secret, `enabled` and the expiry
+itself, the server checks them nowhere else.
 
 An app which mints api keys outside the management api (eg. a CLI writing one
 to the app's database directly) makes them with
@@ -503,9 +518,11 @@ fn general_rate_limiter(&self) -> &RateLimiter {
   The count is kept in process memory, so each instance of a replicated app
   allows this many, and a restart starts over.
 - Requests without any credentials are never counted, nor are refusals which
-  are not guesses: an authentic token which only expired, an `Authorization`
-  header of another scheme than `Bearer` (eg. a proxy's basic auth, refused
-  `401 Unsupported authorization scheme`), and server errors. An app marks its
+  are not guesses: an authentic token which only expired, an api key which is
+  disabled or expired (whatever the secret sent with it), a signing key which is
+  (its signature verified), an `Authorization` header of another scheme than
+  `Bearer` alone (eg. a proxy's basic auth, refused `401 Unsupported
+  authorization scheme`), and server errors. An app marks its
   own such refusals in `handle_request_authentication` /
   `get_user_id_from_request_authentication` with `mogh_error::Error::uncounted`
   (a session it ended, a workload user out of sync with its rule): every tab or
@@ -618,6 +635,13 @@ minimum and never the secret: a provider built lazily would only fail at the
 first request needing it. With an empty secret no token is issued or accepted.
 Generating a random secret when none is configured also works, users are then
 logged out on restart.
+
+The `Header` and `Validation` of `JwtProvider::with_header` / `with_validation`
+are those of the `jsonwebtoken` crate, which is re-exported as
+`mogh_auth_server::jsonwebtoken`. Use the re-export to name them, and to sign
+tokens in the tests of an app (eg. a session of any age): the app then needs no
+`jsonwebtoken` dependency of its own, which would have to stay at the same
+version.
 
 ### Reauthentication
 
@@ -849,10 +873,11 @@ reported: the server rate limits and logs them.
 A user who changes the password (or enrolls a second factor) because a token
 of theirs leaked expects that token to stop working. Once `UpdatePassword`,
 `ConfirmTotpEnrollment`, `UnenrollTotp`, `ConfirmPasskeyEnrollment`,
-`UnenrollPasskey`, `UnlinkLocalLogin` or `UnlinkExternalLogin` stored its
-change, the server calls `credentials_changed(user_id, change, kept_jwt)`:
-end the user's other sessions there, keeping `kept_jwt` (the session which
-made the change). Eg. store a cutoff with the user and refuse older tokens in
+`UnenrollPasskey`, `UnlinkLocalLogin`, `UnlinkExternalLogin` or
+`UpdateExternalSkip2fa` stored its change, the server calls
+`credentials_changed(user_id, change, kept_jwt)`: end the user's other sessions
+there, keeping `kept_jwt` (the session which made the change). Eg. store a
+cutoff with the user and refuse older tokens in
 `get_user_id_from_request_authentication`, uncounted:
 
 ```rust
@@ -875,6 +900,14 @@ fn credentials_changed(
 // and the keys as the default does it:
 //   auth => middleware::get_key_user_id(self, auth, ip)
 ```
+
+`UpdateExternalSkip2fa` is reported whichever way it was set
+(`CredentialChange::ExternalSkip2faChanged { external_skip_2fa }`). End the
+user's other sessions when it is turned off (`external_skip_2fa: false`): the
+user turns it off so that a provider login alone (a leaked provider account or
+ID token) no longer gets in, and a session such a login opened before would
+otherwise keep working until its token expires. Turned on, the logins get
+weaker and no session has to end for it.
 
 The default does nothing (sessions end when their tokens expire). An error of
 the hook fails the request after the change was stored, except for
@@ -939,6 +972,15 @@ signature with a public key alone, the one the request names, which the app
 then looks up among the stored ones (`get_signing_key`): the server holds no
 key of its own for this, and nothing it holds could sign a request for a
 client.
+
+A request authenticates with one credential, looked at in this order: a jwt
+(`Authorization: Bearer <jwt>`, or the jwt without a scheme), the api key, the
+signature. An `Authorization` of another scheme is no credential of the server
+and is passed over: behind a reverse proxy doing basic auth which passes its
+`Authorization: Basic ...` on (nginx `auth_basic`, Traefik `basicauth`), api
+key and signed requests still authenticate. Sent alone, it is refused with
+`401 Unsupported authorization scheme` (uncounted). `extract_request_jwt`, for
+a caller which takes a jwt only, refuses it the same way.
 
 Signing keys are off by default, enable them with
 `AuthImpl::signing_keys_enabled` (which needs `AuthImpl::host`):
@@ -1102,6 +1144,37 @@ sign the path the server receives: `signed_request_headers` takes the host
   hands the signature to the hook and attaches `UserExtractor` /
   `AuthenticatedAt` for the handlers.
 
+  An app running one instance uses the store of the `replay` module,
+  `SeenSignatures`: it keeps a digest of each signature in memory for the
+  tolerance plus the body timeout (plus a second), both read from the app's
+  own `AuthImpl` on every check so they can't drift apart, refuses a
+  signature it has seen (`401 Invalid client credentials`) and one which only
+  gets there past that window (`401` `SIGNED_AT_ANOTHER_TIME`: the client
+  signs anew). A replay reaching another instance, or arriving right after a
+  restart, isn't refused: TLS stays the primary protection. Its size follows
+  the signed requests accepted per window, so `check_timestamp_tolerance`
+  refuses a tolerance over a minute (`MAX_TIMESTAMP_TOLERANCE_MS`) when the
+  app starts. The default hook stays "accept": the app opts in.
+
+  ```rust
+  use mogh_auth_server::replay::SeenSignatures;
+
+  fn accept_signed_request(
+    &self,
+    accepted: AcceptedSignature,
+  ) -> DynFuture<mogh_error::Result<()>> {
+    static SEEN: SeenSignatures = SeenSignatures::new();
+    let res = SEEN.accept_once(self, &accepted);
+    Box::pin(async move { res })
+  }
+
+  // At startup:
+  mogh_auth_server::replay::check_timestamp_tolerance(&MyAuthImpl)
+    .context("Invalid 'signed_request_timestamp_tolerance_ms' config")?;
+  ```
+
+  Several instances keep the signatures in a store they share instead:
+
   ```rust
   fn accept_signed_request(
     &self,
@@ -1138,13 +1211,20 @@ sign the path the server receives: `signed_request_headers` takes the host
   (`openssl genpkey -algorithm ed25519`). ⚠️ Public keys are not secret: store
   them unique across all users (eg. a unique index), which also covers two
   requests racing.
-- The default `get_signing_key` refuses an expired signing key
-  (`401 Invalid client credentials`), the one `find_signing_key` finds, and the
-  default `get_signing_key_owner_id` still finds it (`404` for none), so it can
-  be deleted. An override of the owner lookup must not go through
-  `get_signing_key` (expired keys could never be deleted), and only its `404`
-  counts as "not stored" for `CreateSigningKey`.
+- The default `get_signing_key` refuses a disabled or expired signing key
+  (`401 Invalid client credentials`, uncounted: the signature verified), the
+  one `find_signing_key` finds, and the default `get_signing_key_owner_id`
+  still finds it (`404` for none), so it can be deleted. An override of the
+  owner lookup must not go through `get_signing_key` (disabled and expired keys
+  could never be deleted), and only its `404` counts as "not stored" for
+  `CreateSigningKey`.
 - Invalid signatures count against the general rate limiter.
+
+Since 9.0 the first line of the signed message is `MOGH1-ED25519` (the format
+and the signature primitive; it was `mogh-signed-request-v1`): a hard switch,
+the signatures of 8.x clients (`mogh_auth_client` rust and TypeScript) no
+longer verify, they are refused with `401` (counted, like any invalid
+signature) until the client upgrades. The keys stay as they are.
 
 Since 7.0 the signature is an Ed25519 signature: a hard switch. Before, it was
 one message of a Noise handshake with a key of the server, which whoever held
@@ -1182,6 +1262,22 @@ upgrade. 5.0 also renamed "api keys v2" to signing keys: the requests are
 `create_signing_key`, `get_signing_key`, `get_signing_key_owner_id`,
 `delete_signing_key` and `signing_key_timestamp_tolerance_ms` (were
 `*_api_key_v2*`).
+
+### Plain http urls
+
+The urls the server sends requests to may be plain `http://` (loopback setups and
+tests rely on it), but then everything crosses the network unencrypted. The server
+logs a warning naming the provider or issuer and the url (without userinfo, the
+query masked) when an admin stores an enabled one, and once per process when it
+lists one (from the app configuration, or stored before):
+
+- An OIDC provider's `provider` url: anyone on the path can read the client secret,
+  the login codes and the tokens they are redeemed for, and replace the keys ID
+  tokens are verified with.
+- A trusted issuer's `JwksUri`, or its `issuer` url with `Discovery`: anyone on the
+  path can replace the key set, and sign workload tokens any rule accepts.
+- A [token review](#token-review) `url`: anyone on the path can read the reviewer
+  credential and every presented token, and answer the reviews.
 
 ### Token exchange (RFC 8693)
 
@@ -1311,7 +1407,8 @@ account exchanges the short lived token its platform issues it for a short
 lived app token, so it doesn't need an api key stored as a secret.
 
 Instead of a login provider this uses a `TrustedIssuer`, which only needs
-the keys the platform signs with, and rules deciding which tokens are accepted:
+the keys the platform signs with (or a cluster reviewing its own tokens, see
+[Token review](#token-review)), and rules deciding which tokens are accepted:
 
 ```rust
 fn static_trusted_issuers(&self) -> Vec<TrustedIssuer> {
@@ -1321,7 +1418,8 @@ fn static_trusted_issuers(&self) -> Vec<TrustedIssuer> {
     enabled: true,
     issuer: String::from("https://token.actions.githubusercontent.com"),
     // Or `JwksUri(url)`, or `Static(jwks_json)` for issuers the server can't
-    // reach, like most clusters: `kubectl get --raw /openid/v1/jwks`
+    // reach, like most clusters: `kubectl get --raw /openid/v1/jwks`, or
+    // `TokenReview(..)` for a cluster to verify its own tokens.
     keys: TrustedIssuerKeys::Discovery {},
     // ⚠️ An audience specific to this app, which the workload requests its
     // token for. The platform default is shared with every other service.
@@ -1358,8 +1456,14 @@ are loaded the same way, as they are loaded on demand by unauthenticated request
   login or workload.
 
 Issuers can also be stored by the app and managed by admins over the API
-(`ListTrustedIssuers`, `CreateTrustedIssuer`, ...), with the same storage
-methods as for login providers (`list_trusted_issuers`, `create_trusted_issuer`, ...).
+(`ListTrustedIssuers`, `CreateTrustedIssuer`, ...), with storage methods like
+those of login providers (`list_trusted_issuers`, `create_trusted_issuer`, ...).
+Nothing of an issuer is secret, except the reviewer credential of a
+[token review](#token-review) issuer: encrypt it at rest.
+Several issuers may share an issuer url (every Kubernetes cluster has the same
+default one), and each verifies a token of that url with its own keys, except a
+[token review](#token-review) issuer: it has to be the only enabled issuer of
+its url (see there).
 The names of login providers, issuers and rules are trimmed, at most 100
 characters, and refused (`400`) with a control character (Unicode Cc: a tab,
 a line break, an escape sequence) inside: they are listed, shown on the login
@@ -1512,6 +1616,71 @@ from that ip). If workloads come from shared ips, keep the failure limit
 generous or separate, make jobs retry an exchange with a delay rather than in a
 tight loop, or use self hosted runners with their own ips. Successful exchanges
 are never rate limited.
+
+#### Token review
+
+A `TrustedIssuerKeys::TokenReview` issuer has no keys: the Kubernetes cluster
+which issued a token verifies it, through its TokenReview API (the signature with
+the cluster's current keys, the expiry, the token's binding to its pod, and one of
+the issuer's audiences). No keys are exported, a key rotation needs no update, and
+a token bound to a deleted pod is refused at once. The cluster is asked through one
+of three sources:
+
+- `url` (with `token`, and optionally `ca`): the cluster's api server, asked with
+  the reviewer credential `token`, the bearer token of a service account bound to
+  the `system:auth-delegator` cluster role
+  (`kubectl create clusterrolebinding <name> --clusterrole=system:auth-delegator --serviceaccount=<namespace>:<name>`).
+  `ca` is the PEM bundle the api server's certificate is verified against, and only
+  it: the system roots are not trusted then. Empty, the system roots.
+- `in_cluster`: the cluster the app itself runs in. The api server
+  (`KUBERNETES_SERVICE_HOST` / `KUBERNETES_SERVICE_PORT`), the credential and the CA
+  come from the pod and its mounted service account, which needs the
+  `system:auth-delegator` cluster role. Nothing is stored, and the kubelet keeps the
+  credential fresh. Refused (`400`) when the app doesn't run in a cluster or the
+  service account isn't mounted. `AuthImpl::in_cluster_env` resolves the pod's
+  environment: override it when the service account is mounted elsewhere.
+- `device`: an agent of the app running in the cluster reviews with its own
+  service account, so the server needs no reach to the cluster and stores no
+  credential. Only for apps which implement it: `AuthImpl::reviews_through_devices`
+  returns `true`, and their `AuthImpl::review_workload_token` override reviews
+  these issuers' tokens, delegating the others to
+  `provider::workload::default_review_workload_token`. Other apps refuse an issuer
+  naming a device (`400`).
+
+⚠️ The reviewer credential is a secret, like a login provider's client secret: the
+app encrypts it at rest (`create_trusted_issuer` / `update_trusted_issuer`), and
+a static issuer reads it from a secret file. The management api never shows it
+(redacted on every read), an update carrying it empty or redacted keeps the stored
+one, and a changed `url` needs it entered again.
+
+A token the cluster doesn't authenticate is the token's (`400` `invalid_grant`). A
+cluster which can't be asked (unreachable, an error status, the reviewer credential
+refused, an answer which isn't a review) makes the issuer unavailable (`503`
+`temporarily_unavailable`), logged with the detail while the answer only names the
+issuer. An override of `review_workload_token` answers the same way: a client error
+is the token's rejection, anything else the issuer being unavailable.
+
+The exchange is unauthenticated, so it spares the cluster: a token failing the
+checks which need no key (expiry, not before, audiences, `max_token_age_secs`) is
+refused without a review; after a review failed for the cluster (not the token),
+the issuer is unavailable for 30 seconds without asking it again; and at most 16
+reviews of an issuer run at once, one more is unavailable right away. The same
+holds for an app's override.
+
+**One issuer per issuer url.** The exchange tries every enabled issuer of a
+token's `iss`, and a token review posts the whole token to the issuer's
+cluster. A TokenReview issuer sharing its url with another issuer (two clusters
+on the default `https://kubernetes.default.svc.cluster.local`) would hand that
+cluster the other's live tokens. So an enabled TokenReview issuer may share its
+issuer url (compared regardless of a trailing slash) with no other enabled
+issuer, of any kind: `CreateTrustedIssuer` / `UpdateTrustedIssuer` refuse such
+an issuer with `409` (created, moved to the url, switched to TokenReview, or
+enabled), naming the other. Give each cluster its own issuer url
+(`kube-apiserver --service-account-issuer`), or verify them with keys. Issuers
+verifying with keys may share a url among themselves. Static issuers, and rows
+stored before the check, are refused at the exchange instead: such a
+TokenReview issuer is never asked, it is unavailable (`503`), with an error in
+the log.
 
 #### Verifying a workload token without an exchange
 

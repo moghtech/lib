@@ -1,8 +1,12 @@
 use std::time::Duration;
 
 pub mod external;
+pub(crate) mod http;
 pub mod jwt;
-pub mod load_cache;
+// The server's own keyed cache of provider clients and key sets.
+// Crate private: the cache apps are pointed to is
+// `mogh_cache::LoadCache`, another contract under the same name.
+pub(crate) mod load_cache;
 pub mod named;
 pub mod oidc;
 pub mod passkey;
@@ -18,7 +22,8 @@ pub mod workload;
 /// waiting on the load wait with it.
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long connecting to a login provider may take.
+/// How long connecting to a login provider, an issuer or a cluster
+/// may take ([http::client_builder]).
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The url of a server which accepts connections and

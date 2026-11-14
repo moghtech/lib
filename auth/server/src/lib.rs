@@ -22,6 +22,7 @@ pub mod middleware;
 pub mod passkey;
 pub mod provider;
 pub mod rand;
+pub mod replay;
 pub mod user;
 pub mod validations;
 
@@ -29,6 +30,10 @@ mod bcrypt_pool;
 mod session;
 #[cfg(test)]
 mod test_support;
+
+// Dev dependencies of the test binaries under `tests/` only.
+#[cfg(test)]
+use {axum_server as _, rustls as _};
 
 use crate::{
   api_key::BoxAuthApiKey,
@@ -58,6 +63,13 @@ use crate::{
 pub mod request_ip {
   pub use mogh_request_ip::*;
 }
+
+/// The JWT library of [JwtProvider]: the `Header` and `Validation`
+/// of [JwtProvider::with_header] / [JwtProvider::with_validation]
+/// are this version's. Apps use the re-export to name them, and to
+/// sign tokens in their tests, so they need no dependency of their
+/// own which has to stay at the same version.
+pub use jsonwebtoken;
 
 pub use bcrypt_pool::hash_password;
 pub use context::{
@@ -247,6 +259,14 @@ pub enum CredentialChange {
   LocalLoginUnlinked,
   /// `UnlinkExternalLogin`: the link to the login provider removed.
   ExternalLoginUnlinked { provider_id: String },
+  /// `UpdateExternalSkip2fa`: whether a login through a login
+  /// provider skips the user's second factor, as stored (reported
+  /// whichever way it was set). Turned off, a provider login alone no
+  /// longer logs the user in: end their other sessions, one of which
+  /// may come from a provider login without the second factor (a
+  /// leaked provider account or ID token). Turned on, the logins get
+  /// weaker and no session has to end for it.
+  ExternalSkip2faChanged { external_skip_2fa: bool },
 }
 
 /// The second factor a login was completed with.
@@ -362,7 +382,11 @@ pub trait AuthImpl: Send + Sync + 'static {
   }
 
   /// Provide usernames to lock credential updates for,
-  /// such as demo users.
+  /// such as demo users. A locked user changes nothing of how it logs
+  /// in through the management api (password, username, second
+  /// factors, linked logins, `external_skip_2fa`) and creates no api
+  /// keys or signing keys, which would outlive the lock. It still
+  /// deletes its keys.
   fn locked_usernames(&self) -> &'static [String] {
     &[]
   }
@@ -432,7 +456,10 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// credentials are authentic then, and every tab or device of the
   /// user still sending them (often behind one ip) would otherwise
   /// lock that ip out. An authentic token which only expired is
-  /// refused uncounted already ([middleware::get_jwt_user_id]).
+  /// refused uncounted already ([middleware::get_jwt_user_id]), and
+  /// so is a disabled or expired api key (before its secret is
+  /// verified, [middleware::verify_api_key]) or signing key (its
+  /// signature verified, [middleware::verify_signing_key]).
   ///
   /// [middleware::authenticate_request] attaches
   /// [middleware::AuthenticatedAt] to the request this returns (when
@@ -538,8 +565,11 @@ pub trait AuthImpl: Send + Sync + 'static {
   ///
   /// Requests without any credentials are not counted, nor are
   /// refusals which are not guesses: an authentic token which only
-  /// expired, an `Authorization` header of another scheme than
-  /// `Bearer`, server errors, and what the app marks
+  /// expired, an api key which is disabled or expired (whatever its
+  /// secret), a signing key which is (its signature verified), an
+  /// `Authorization` header of another scheme than `Bearer` sent
+  /// without an api key or a signature (beside them it is passed
+  /// over), server errors, and what the app marks
   /// [uncounted][mogh_error::Error::uncounted] (see
   /// [Self::handle_request_authentication]). Clients are
   /// counted by ip, IPv6 clients per /64 by default (see
@@ -733,10 +763,13 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// A user changed how they log in through the auth management api
   /// ([CredentialChange] says how), and the change is stored. Called
   /// once `UpdatePassword`, `ConfirmTotpEnrollment`, `UnenrollTotp`,
-  /// `ConfirmPasskeyEnrollment`, `UnenrollPasskey`, `UnlinkLocalLogin`
-  /// or `UnlinkExternalLogin` succeeded. Not by the logins, which
-  /// store credentials too (a passkey login stores the passkey's new
-  /// signature counter, [Self::update_user_passkey_counter]).
+  /// `ConfirmPasskeyEnrollment`, `UnenrollPasskey`, `UnlinkLocalLogin`,
+  /// `UnlinkExternalLogin` or `UpdateExternalSkip2fa` succeeded (the
+  /// last one turned either way: end the sessions when it is turned
+  /// off, see [CredentialChange::ExternalSkip2faChanged]). Not by the
+  /// logins, which store credentials too (a passkey login stores the
+  /// passkey's new signature counter,
+  /// [Self::update_user_passkey_counter]).
   ///
   /// This is where an app ends the user's other sessions. A user who
   /// changes the password, or enrolls a second factor, because a token
@@ -1125,12 +1158,26 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// users with [Self::sync_workload_users], and removes the users of
   /// issuers which are no longer configured with
   /// [Self::remove_workload_users_except].
+  ///
+  /// ⚠️ A TokenReview issuer with a `url` carries its reviewer
+  /// credential (`TokenReviewConfig::token`): a secret, best read
+  /// from a secret file rather than written in the configuration.
   fn static_trusted_issuers(&self) -> Vec<TrustedIssuer> {
     Vec::new()
   }
 
   /// List the trusted issuers stored by the app (eg. in the database).
   /// These are managed over the API by admins ([AuthUserImpl::is_admin][crate::user::AuthUserImpl::is_admin]).
+  ///
+  /// ⚠️ A [TokenReview](mogh_auth_client::config::TrustedIssuerKeys::TokenReview)
+  /// issuer reviewing at a `url` includes the reviewer credential
+  /// (`TokenReviewConfig::token`): a long lived bearer credential of
+  /// a service account bound to the `system:auth-delegator` cluster
+  /// role, which should be encrypted at rest like a login provider's
+  /// client secret. The management api never shows it (redacted on
+  /// every read), and an update carrying it empty or redacted keeps
+  /// the stored one (unless the url changed). Everything else of an
+  /// issuer is not secret.
   ///
   /// Note. This is called on every token exchange (`POST /token`),
   /// which is unauthenticated, so apps should serve
@@ -1152,6 +1199,20 @@ pub trait AuthImpl: Send + Sync + 'static {
     InClusterEnv::detect()
   }
 
+  /// Whether the app reviews the tokens of
+  /// [TokenReview](mogh_auth_client::config::TrustedIssuerKeys::TokenReview)
+  /// issuers through review devices of its own (an agent running in
+  /// the cluster, named by the issuer's `device`), in its
+  /// [Self::review_workload_token] override.
+  ///
+  /// `false` (the default): the management api refuses (`400`) an
+  /// issuer naming a `device`, which [default_review_workload_token]
+  /// could only refuse at every exchange. An app returning `true`
+  /// handles the issuers naming a `device` in its override.
+  fn reviews_through_devices(&self) -> bool {
+    false
+  }
+
   /// Reviews the token of a
   /// [TokenReview](mogh_auth_client::config::TrustedIssuerKeys::TokenReview)
   /// issuer:
@@ -1160,12 +1221,24 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// (4xx) as the token's rejection, and anything else as the issuer
   /// being unavailable (503).
   ///
+  /// The exchange is unauthenticated, so it spares the cluster: a
+  /// token failing the claim checks which need no key (expiry, not
+  /// before, audiences, `max_token_age_secs`) is refused without a
+  /// review, and they are checked again after it. After a review
+  /// failed with anything but a client error, the issuer is
+  /// unavailable for 30 seconds without calling this again, and at
+  /// most 16 reviews of an issuer run at once (one more is
+  /// unavailable right away). An override is covered the same way, and
+  /// logs its own failures: the requests refused meanwhile log nothing.
+  ///
   /// The default ([default_review_workload_token]) posts a
   /// TokenReview to the source's `url` with the stored reviewer
   /// credential, or to the cluster [AuthImpl::in_cluster_env]
   /// resolves, and refuses an issuer naming a `device`: reviewing
-  /// through a channel of the app's own is the app's to implement.
-  /// An override handles its devices and delegates the rest back to
+  /// through a channel of the app's own is the app's to implement,
+  /// and the management api only stores such an issuer for an app
+  /// which [Self::reviews_through_devices]. An override handles its
+  /// devices and delegates the rest back to
   /// [default_review_workload_token].
   fn review_workload_token(
     &self,
@@ -1178,6 +1251,11 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// Store a new trusted issuer. The ids of the issuer and its
   /// rules are generated by the auth server, and must be stored as is.
   /// They are new, so its rules have no users yet.
+  ///
+  /// ⚠️ A TokenReview issuer's reviewer credential
+  /// (`TokenReviewConfig::token`) is a secret: encrypt it at rest, see
+  /// [Self::list_trusted_issuers]. The issuer was checked: no other
+  /// enabled issuer shares the url of an enabled TokenReview issuer.
   fn create_trusted_issuer(
     &self,
     _issuer: TrustedIssuer,
@@ -1191,6 +1269,12 @@ pub trait AuthImpl: Send + Sync + 'static {
   }
 
   /// Replace the stored trusted issuer with the same id.
+  ///
+  /// ⚠️ It carries the reviewer credential to store for a TokenReview
+  /// issuer reviewing at a `url` (the one entered, or the stored one
+  /// when the update left it empty or redacted), and none for the
+  /// other sources: encrypt it at rest, see
+  /// [Self::list_trusted_issuers].
   ///
   /// Once it is stored, the server calls [Self::sync_workload_users]
   /// with its rules, which applies them to their users (and removes
@@ -1588,9 +1672,11 @@ pub trait AuthImpl: Send + Sync + 'static {
   }
 
   /// Find the api key `key` (a request's X-API-KEY) in storage, `None`
-  /// when no key has it. Find expired keys too: the server refuses
-  /// them to requests ([Self::get_api_key]), and their owner deletes
-  /// them ([Self::get_api_key_owner_id]).
+  /// when no key has it. Find disabled and expired keys too, with
+  /// [StoredApiKey::enabled][api_key::StoredApiKey::enabled] and
+  /// [expires][api_key::StoredApiKey::expires] as stored: the server
+  /// refuses them to requests ([Self::get_api_key]), and their owner
+  /// deletes them ([Self::get_api_key_owner_id]).
   ///
   /// This is the storage of api keys the defaults of
   /// [Self::get_api_key] and [Self::get_api_key_owner_id] use: the
@@ -1616,24 +1702,28 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// `401 Invalid client credentials` otherwise.
   ///
   /// The default finds the key with [Self::find_api_key] and
-  /// authenticates it with [middleware::verify_api_key]: the secret
-  /// is verified against the stored bcrypt hash, then an expired key
-  /// is refused. A key which doesn't exist is refused right away,
-  /// without a bcrypt: key ids are random, listed by UIs and logged at
-  /// creation, so the timing telling that a key doesn't exist hides
-  /// nothing, and a made up key costs a lookup, not a hash. bcrypt
-  /// takes tens of milliseconds, for every request naming a real key:
-  /// it runs on the blocking thread pool, at most one per available
-  /// core at a time, on a budget of its own, so a flood of guesses at
-  /// a key's secret stalls neither the async runtime nor password
-  /// logins.
+  /// authenticates it with [middleware::verify_api_key]: a key which
+  /// doesn't exist, then a disabled or expired key, is refused right
+  /// away, without a bcrypt, and only then is the secret verified
+  /// against the stored bcrypt hash. Key ids are random, listed by
+  /// UIs and logged at creation, so the timing telling that a key
+  /// doesn't exist, or can't be used, hides nothing, and such a key
+  /// costs a lookup, not a hash. The refusal of a disabled or expired
+  /// key is uncounted by the rate limiter, whatever the secret (the
+  /// key opens nothing, so a guess at its secret gains nothing),
+  /// those of a wrong secret and of an unknown key count. bcrypt
+  /// takes tens of milliseconds, for every request naming a usable
+  /// key: it runs on the blocking thread pool, at most one per
+  /// available core at a time, on a budget of its own, so a flood of
+  /// guesses at a key's secret stalls neither the async runtime nor
+  /// password logins.
   ///
-  /// Override it for checks of the app's own (eg. a key which can be
-  /// disabled): find the key, authenticate it with
-  /// [middleware::verify_api_key], then refuse what the app refuses
-  /// with the same `401`. ⚠️ An override which doesn't use
-  /// [middleware::verify_api_key] has to verify the secret and refuse
-  /// expired keys itself: the server checks them nowhere else.
+  /// Override it for checks of the app's own: find the key,
+  /// authenticate it with [middleware::verify_api_key], then refuse
+  /// what the app refuses with the same `401`. ⚠️ An override which
+  /// doesn't use [middleware::verify_api_key] has to verify the
+  /// secret and refuse disabled and expired keys itself: the server
+  /// checks them nowhere else.
   ///
   /// The returned [cidr_whitelist][api_key::AuthApiKeyImpl::cidr_whitelist]
   /// is enforced by [Self::get_user_id_from_request_authentication].
@@ -1652,8 +1742,8 @@ pub trait AuthImpl: Send + Sync + 'static {
 
   /// Get the user id which owns the api key, without secret
   /// verification. Used to check ownership before deletion, so it
-  /// finds keys [Self::get_api_key] refuses (expired ones):
-  /// `404 Not Found` when there is none.
+  /// finds keys [Self::get_api_key] refuses (disabled and expired
+  /// ones): `404 Not Found` when there is none.
   ///
   /// The default finds the key with [Self::find_api_key].
   fn get_api_key_owner_id(
@@ -1725,7 +1815,10 @@ pub trait AuthImpl: Send + Sync + 'static {
   ///
   /// The server doesn't remember the requests it has seen. An app
   /// which wants to refuse a replay can, in
-  /// [Self::accept_signed_request].
+  /// [Self::accept_signed_request]. One which does with
+  /// [replay::SeenSignatures] keeps every signature for this plus
+  /// [Self::signed_request_body_timeout], and checks this is at most
+  /// a minute when it starts ([replay::check_timestamp_tolerance]).
   fn signing_key_timestamp_tolerance_ms(&self) -> u64 {
     1_000
   }
@@ -1757,6 +1850,22 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// instances and of the store differ. Check and remember in one
   /// step (two copies arriving together), in a store all instances
   /// of the app share.
+  ///
+  /// [replay::SeenSignatures] is such a store for an app running one
+  /// instance (in its memory: a replay reaching another instance, or
+  /// arriving right after a restart, isn't refused). It reads the
+  /// window from this impl's own tolerance and body timeout:
+  ///
+  /// ```ignore
+  /// fn accept_signed_request(
+  ///   &self,
+  ///   accepted: AcceptedSignature,
+  /// ) -> DynFuture<mogh_error::Result<()>> {
+  ///   static SEEN: SeenSignatures = SeenSignatures::new();
+  ///   let res = SEEN.accept_once(self, &accepted);
+  ///   Box::pin(async move { res })
+  /// }
+  /// ```
   fn accept_signed_request(
     &self,
     _accepted: AcceptedSignature,
@@ -1776,7 +1885,7 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// after it was signed: its headers sent in time, its body held
   /// back. Raise it along with the limit for larger bodies, and mind
   /// that it adds to how long an app has to remember the signatures
-  /// it has seen.
+  /// it has seen ([replay::SeenSignatures] reads it from here).
   fn signed_request_body_timeout(&self) -> Duration {
     Duration::from_secs(30)
   }
@@ -1834,9 +1943,12 @@ pub trait AuthImpl: Send + Sync + 'static {
 
   /// Find the signing key with `public_key` (a request's
   /// X-API-PUBLIC-KEY, base64 spki der, the form it is stored in) in
-  /// storage, `None` when no key has it. Find expired keys too: the
+  /// storage, `None` when no key has it. Find disabled and expired
+  /// keys too, with
+  /// [StoredSigningKey::enabled][api_key::StoredSigningKey::enabled]
+  /// and [expires][api_key::StoredSigningKey::expires] as stored: the
   /// server refuses them to requests ([Self::get_signing_key]), and
-  /// their owner deletes them.
+  /// their owner deletes them ([Self::get_signing_key_owner_id]).
   ///
   /// This is the storage of signing keys the default of
   /// [Self::get_signing_key] uses.
@@ -1858,11 +1970,13 @@ pub trait AuthImpl: Send + Sync + 'static {
   /// Get the signing key ([AuthApiKeyImpl][api_key::AuthApiKeyImpl],
   /// as for an api key) of a request whose signature verified with
   /// its public key, returning `401 Invalid client credentials` if
-  /// there is none, or it expired.
+  /// there is none, or it is disabled or expired.
   ///
   /// The default finds the key with [Self::find_signing_key] and
-  /// authenticates it with [middleware::verify_signing_key]. ⚠️ An
-  /// override which doesn't use it has to refuse expired keys itself:
+  /// authenticates it with [middleware::verify_signing_key], which
+  /// refuses a disabled or expired key uncounted by the rate limiter
+  /// (the signature verified: no guess). ⚠️ An override which
+  /// doesn't use it has to refuse disabled and expired keys itself:
   /// the server checks them nowhere else.
   ///
   /// The returned [cidr_whitelist][api_key::AuthApiKeyImpl::cidr_whitelist]
@@ -1878,16 +1992,16 @@ pub trait AuthImpl: Send + Sync + 'static {
   }
 
   /// Get the user id which owns the signing key, without it having to
-  /// be usable: find expired keys too, they must stay deletable.
-  /// `404 Not Found` when no key has the public key, which is what
-  /// `CreateSigningKey` checks for before storing one (any other error
-  /// fails the create). Used to check ownership before deletion, and
-  /// that a public key isn't stored already.
+  /// be usable: find disabled and expired keys too, they must stay
+  /// deletable. `404 Not Found` when no key has the public key, which
+  /// is what `CreateSigningKey` checks for before storing one (any
+  /// other error fails the create). Used to check ownership before
+  /// deletion, and that a public key isn't stored already.
   ///
   /// The default finds the key with [Self::find_signing_key]. ⚠️ An
   /// override must not go through [Self::get_signing_key], which
-  /// refuses expired keys (`401`): those could never be deleted, and a
-  /// client takes the 401 for its own session ending.
+  /// refuses disabled and expired keys (`401`): those could never be
+  /// deleted, and a client takes the 401 for its own session ending.
   fn get_signing_key_owner_id(
     &self,
     public_key: String,
@@ -2344,40 +2458,56 @@ mod tests {
 
   fn stored_keys_auth() -> StoredKeysAuth {
     let hashed_secret = bcrypt::hash("S_def_S", 4).unwrap();
-    let api_key =
-      |user_id: &str, expires: u64| api_key::StoredApiKey {
+    let api_key = |user_id: &str, enabled: bool, expires: u64| {
+      api_key::StoredApiKey {
         user_id: user_id.to_string(),
         hashed_secret: hashed_secret.clone(),
+        enabled,
         expires,
         cidr_whitelist: vec![String::from("10.0.0.0/8")],
-      };
-    let signing_key =
-      |user_id: &str, expires: u64| api_key::StoredSigningKey {
+      }
+    };
+    let signing_key = |user_id: &str, enabled: bool, expires: u64| {
+      api_key::StoredSigningKey {
         user_id: user_id.to_string(),
+        enabled,
         expires,
         cidr_whitelist: vec![String::from("10.0.0.0/8")],
-      };
+      }
+    };
     let later = now_ms() + 60_000;
     let earlier = now_ms() - 1;
     StoredKeysAuth {
       jwt_provider: JwtProvider::new(b"secret", 60_000),
       api_keys: vec![
-        (String::from("K_never_K"), api_key("never", 0)),
-        (String::from("K_later_K"), api_key("later", later)),
-        (String::from("K_expired_K"), api_key("expired", earlier)),
+        (String::from("K_never_K"), api_key("never", true, 0)),
+        (String::from("K_later_K"), api_key("later", true, later)),
+        (
+          String::from("K_expired_K"),
+          api_key("expired", true, earlier),
+        ),
+        (String::from("K_disabled_K"), api_key("disabled", false, 0)),
       ],
       signing_keys: vec![
-        (String::from("never"), signing_key("never", 0)),
-        (String::from("later"), signing_key("later", later)),
-        (String::from("expired"), signing_key("expired", earlier)),
+        (String::from("never"), signing_key("never", true, 0)),
+        (String::from("later"), signing_key("later", true, later)),
+        (
+          String::from("expired"),
+          signing_key("expired", true, earlier),
+        ),
+        (String::from("disabled"), signing_key("disabled", false, 0)),
       ],
     }
   }
 
   /// The default [AuthImpl::get_api_key]: the secret is verified with
-  /// the stored hash, an expired key is refused even with the right
-  /// secret, every refusal is the same 401, and a storage error is
-  /// passed on.
+  /// the stored hash, a disabled or expired key is refused even with
+  /// the right secret, every refusal is the same 401, and a storage
+  /// error is passed on. The refusals of a disabled or expired key
+  /// are uncounted by the rate limiter whatever the secret (refused
+  /// before it is verified: the key opens nothing), those which may
+  /// be guesses (a wrong secret of a usable key, an unknown key)
+  /// count.
   #[tokio::test]
   async fn test_default_get_api_key() {
     let auth = stored_keys_auth();
@@ -2394,10 +2524,14 @@ mod tests {
       let user_id = get(key, "S_def_S").await.unwrap();
       assert_eq!(format!("K_{user_id}_K"), key);
     }
-    for (key, secret) in [
-      ("K_never_K", "S_wrong_S"),
-      ("K_expired_K", "S_def_S"),
-      ("K_unknown_K", "S_def_S"),
+    for (key, secret, counted) in [
+      ("K_never_K", "S_wrong_S", true),
+      ("K_later_K", "S_wrong_S", true),
+      ("K_unknown_K", "S_def_S", true),
+      ("K_expired_K", "S_wrong_S", false),
+      ("K_disabled_K", "S_wrong_S", false),
+      ("K_expired_K", "S_def_S", false),
+      ("K_disabled_K", "S_def_S", false),
     ] {
       let err = get(key, secret).await.unwrap_err();
       assert_eq!(err.status, StatusCode::UNAUTHORIZED, "{key}");
@@ -2406,6 +2540,7 @@ mod tests {
         "Invalid client credentials",
         "{key}"
       );
+      assert_eq!(err.is_uncounted(), !counted, "{key} {secret}");
     }
     let err = get("K_broken_K", "S_def_S").await.unwrap_err();
     assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -2423,12 +2558,12 @@ mod tests {
     assert_eq!(err.status, StatusCode::FORBIDDEN);
   }
 
-  /// The owner of a key is found for an expired key too (it can be
-  /// deleted), 404 for an unknown one.
+  /// The owner of a key is found for a disabled or expired key too
+  /// (it can be deleted), 404 for an unknown one.
   #[tokio::test]
   async fn test_default_get_api_key_owner_id() {
     let auth = stored_keys_auth();
-    for key in ["K_never_K", "K_expired_K"] {
+    for key in ["K_never_K", "K_expired_K", "K_disabled_K"] {
       let owner =
         auth.get_api_key_owner_id(key.into()).await.unwrap();
       assert_eq!(format!("K_{owner}_K"), key);
@@ -2441,12 +2576,12 @@ mod tests {
   }
 
   /// The default [AuthImpl::get_signing_key_owner_id] finds the owner
-  /// of an expired key too (it can be deleted), 404 for an unknown
-  /// one: never the 401 of [AuthImpl::get_signing_key].
+  /// of a disabled or expired key too (it can be deleted), 404 for an
+  /// unknown one: never the 401 of [AuthImpl::get_signing_key].
   #[tokio::test]
   async fn test_default_get_signing_key_owner_id() {
     let auth = stored_keys_auth();
-    for public_key in ["never", "expired"] {
+    for public_key in ["never", "expired", "disabled"] {
       let owner = auth
         .get_signing_key_owner_id(public_key.into())
         .await
@@ -2460,8 +2595,11 @@ mod tests {
     assert_eq!(err.status, StatusCode::NOT_FOUND);
   }
 
-  /// The default [AuthImpl::get_signing_key]: an unknown or expired
-  /// key is refused with 401.
+  /// The default [AuthImpl::get_signing_key]: an unknown, disabled or
+  /// expired key is refused with 401. The request's signature
+  /// verified before, so a disabled or expired key is uncounted by
+  /// the rate limiter, while an unknown one counts (anybody can sign
+  /// with a key pair of their own).
   #[tokio::test]
   async fn test_default_get_signing_key() {
     let auth = stored_keys_auth();
@@ -2474,7 +2612,9 @@ mod tests {
     for public_key in ["never", "later"] {
       assert_eq!(get(public_key).await.unwrap(), public_key);
     }
-    for public_key in ["expired", "unknown"] {
+    for (public_key, counted) in
+      [("unknown", true), ("expired", false), ("disabled", false)]
+    {
       let err = get(public_key).await.unwrap_err();
       assert_eq!(
         err.status,
@@ -2485,6 +2625,7 @@ mod tests {
         format!("{:#}", err.error),
         "Invalid client credentials"
       );
+      assert_eq!(err.is_uncounted(), !counted, "{public_key}");
     }
   }
 

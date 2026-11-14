@@ -62,6 +62,9 @@ impl Session {
   pub const MAX_COMPLETED_LOGIN_AGE: Duration =
     Duration::from_secs(2 * 60);
 
+  /// For the tests of the id cycling: the server itself never reads
+  /// the id.
+  #[cfg(test)]
   pub fn id(&self) -> Option<tower_sessions::session::Id> {
     self.0.id()
   }
@@ -558,7 +561,9 @@ impl Session {
 
   /// Takes the TOTP enrollment in flight, which only `user_id`
   /// can complete. It is taken either way, so a refused one has to
-  /// be started again.
+  /// be started again, and once: a second request taking the same
+  /// enrollment off the session is refused with CONFLICT
+  /// ([take_totp_enrollment_once]).
   pub async fn retrieve_totp_enrollment(
     &self,
     user_id: &str,
@@ -572,6 +577,15 @@ impl Session {
         "TOTP enrollment has not been initiated for this session",
       )
       .status_code(StatusCode::UNAUTHORIZED)?;
+    // A session never saved (no id) is no other request's.
+    if let Some(id) = self.0.id()
+      && !take_totp_enrollment_once(id, &totp)
+    {
+      return Err(
+        anyhow::anyhow!("This TOTP enrollment was confirmed already")
+          .status_code(StatusCode::CONFLICT),
+      );
+    }
     check_enrollment_user("TOTP", &began_by, user_id)?;
     Ok(totp)
   }
@@ -814,6 +828,51 @@ fn check_enrollment_user(
     )
     .status_code(StatusCode::UNAUTHORIZED),
   )
+}
+
+/// The TOTP enrollment each session's last confirmation took off it:
+/// the digest of its secret, and when.
+type TakenTotpEnrollments = std::collections::HashMap<
+  tower_sessions::session::Id,
+  ([u8; 32], std::time::Instant),
+>;
+
+/// Whether this is the first request taking the TOTP enrollment
+/// `totp` off the session `id`, noting it if so.
+///
+/// Every request works on its own copy of the session: tower-sessions
+/// loads the record for each, and saves it once the response is made.
+/// So two confirmations sent at once (a double click on Confirm) both
+/// find the enrollment on their copy, and both would store it, each
+/// with recovery codes of its own: the user could keep the set the
+/// other one overwrote. Taking it here is one step for all requests
+/// of this server, which is where the requests of a session go with
+/// the in-memory session store.
+///
+/// Noted for [Session::MAX_ENROLLMENT_AGE], longer than any copy of
+/// the session which still holds the enrollment lives, and one per
+/// session (a session's next enrollment replaces it): what is kept
+/// follows the sessions confirming an enrollment in that time, and a
+/// digest is all it holds of the secret.
+fn take_totp_enrollment_once(
+  id: tower_sessions::session::Id,
+  totp: &totp_rs::Totp,
+) -> bool {
+  use sha2::Digest as _;
+  static TAKEN: std::sync::LazyLock<
+    std::sync::Mutex<TakenTotpEnrollments>,
+  > = std::sync::LazyLock::new(Default::default);
+  let digest: [u8; 32] = sha2::Sha256::digest(totp.secret()).into();
+  let now = std::time::Instant::now();
+  let mut taken = TAKEN.lock().unwrap_or_else(|e| e.into_inner());
+  taken.retain(|_, (_, at)| {
+    now.duration_since(*at) < Session::MAX_ENROLLMENT_AGE
+  });
+  if taken.get(&id).is_some_and(|(taken, _)| *taken == digest) {
+    return false;
+  }
+  taken.insert(id, (digest, now));
+  true
 }
 
 #[cfg(test)]
@@ -1186,6 +1245,70 @@ mod tests {
       .with_account_name("user-1")
       .build()
       .unwrap()
+  }
+
+  /// A TOTP of a new enrollment, its secret random as one begun is.
+  fn random_totp() -> totp_rs::Totp {
+    totp_rs::Builder::new()
+      .with_secret(crate::rand::random_bytes(20))
+      .with_account_name("user-1")
+      .build()
+      .unwrap()
+  }
+
+  /// Two requests with the cookie (a double click on Confirm) each
+  /// load their own copy of the session, before either saved what it
+  /// changed: both find the enrollment, the second is refused
+  /// (CONFLICT) rather than store one more set of recovery codes.
+  /// Once the first saved its copy the enrollment is gone, and the
+  /// session's next enrollment is taken again.
+  #[tokio::test]
+  async fn test_totp_enrollment_is_taken_once() {
+    let store = Arc::new(MemoryStore::default());
+    let (session, id) = saved_session(&store).await;
+    let enrolled = random_totp();
+    session
+      .insert_totp_enrollment("user-1", &enrolled)
+      .await
+      .unwrap();
+    session.0.save().await.unwrap();
+    let request = || {
+      Session(tower_sessions::Session::new(
+        Some(id),
+        store.clone(),
+        None,
+      ))
+    };
+
+    let (first, second) = (request(), request());
+    assert_eq!(
+      first.retrieve_totp_enrollment("user-1").await.unwrap(),
+      enrolled
+    );
+    let err =
+      second.retrieve_totp_enrollment("user-1").await.unwrap_err();
+    assert_eq!(err.status, StatusCode::CONFLICT);
+    assert!(
+      format!("{:#}", err.error).contains("confirmed already"),
+      "{:#}",
+      err.error
+    );
+
+    first.0.save().await.unwrap();
+    let err = request()
+      .retrieve_totp_enrollment("user-1")
+      .await
+      .unwrap_err();
+    assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+
+    let next = random_totp();
+    let begun = request();
+    begun.insert_totp_enrollment("user-1", &next).await.unwrap();
+    begun.0.save().await.unwrap();
+    assert_eq!(
+      request().retrieve_totp_enrollment("user-1").await.unwrap(),
+      next
+    );
   }
 
   /// An enrollment is confirmed by the user who began it only: the
