@@ -2,8 +2,12 @@
 //!
 //! The OAuth 2.0 token endpoint, implementing
 //! [RFC 8693 Token Exchange](https://www.rfc-editor.org/rfc/rfc8693):
-//! a token issued by a configured external login provider
-//! is exchanged for an app token, without any user interaction.
+//! a token is exchanged for an app token, without any user
+//! interaction. Either a user's token of an external login provider
+//! with token exchange enabled (the user must already exist and be
+//! linked to it), or a workload's token of a trusted issuer (verified
+//! with the issuer's keys, or by the cluster which issued it; the
+//! user of the rule it matches is created on the first exchange).
 //!
 //! Unlike the rest of the API, the request is
 //! `application/x-www-form-urlencoded` and errors use the
@@ -34,7 +38,7 @@ pub const TOKEN_TYPE_ACCESS_TOKEN: &str =
   post,
   path = "/token",
   security(()),
-  description = "RFC 8693 Token Exchange. Exchange a signed token (ID token / JWT) issued by an external login provider with token exchange enabled for an app token. The user the token belongs to must already exist.",
+  description = "RFC 8693 Token Exchange. Exchange a signed token (ID token / JWT) for an app token: a user's token of an external login provider with token exchange enabled (the user must already exist and be linked to the provider), or a workload's token of a trusted issuer (verified with the issuer's keys, or by the cluster which issued it; the user of the rule the token matches is created on the first exchange).",
   request_body(content = TokenExchangeRequest, content_type = "application/x-www-form-urlencoded"),
   responses(
     (status = 200, description = "The app token", body = TokenExchangeResponse),
@@ -54,7 +58,8 @@ fn token_exchange() {}
 pub struct TokenExchangeRequest {
   /// Must be [GRANT_TYPE_TOKEN_EXCHANGE].
   pub grant_type: String,
-  /// The token issued by the external login provider.
+  /// The token to exchange: a user's token of an external login
+  /// provider, or a workload's token of a trusted issuer.
   pub subject_token: String,
   /// [TOKEN_TYPE_ID_TOKEN] or [TOKEN_TYPE_JWT].
   pub subject_token_type: String,

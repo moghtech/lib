@@ -331,8 +331,10 @@ impl std::fmt::Debug for BeginTotpEnrollmentResponse {
   request_body(content = ConfirmTotpEnrollment),
   responses(
     (status = 200, description = "Enrolled in Totp 2FA", body = ConfirmTotpEnrollmentResponse),
+    (status = 400, description = "The code is not valid: begin the enrollment again", body = mogh_error::Serror),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
     (status = 403, description = ACCOUNT_REQUEST_FORBIDDEN, body = mogh_error::Serror),
+    (status = 409, description = "The enrollment was confirmed already, by a request sent at the same time", body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]

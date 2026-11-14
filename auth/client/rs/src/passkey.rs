@@ -4,7 +4,7 @@
 //!
 //! The passkey a server stores for a user is not here: it is
 //! `mogh_auth_server::passkey::Passkey`. Reading one takes
-//! `webauthn-rs`, and with it OpenSSL, which a client has no use for.
+//! `webauthn-rs`, which a client has no use for.
 
 use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
