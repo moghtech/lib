@@ -21,5 +21,5 @@ mogh_validations::StringValidator::default()
   starting with a digit.
 
 2.0.0 removed `HttpUrl`: urls are validated where they are used, eg.
-`mogh_auth_server::validations::validate_public_http_url`, which also
+`mogh_auth_server::validations::validate_http_url_without_userinfo`, which also
 refuses credentials in the url.
