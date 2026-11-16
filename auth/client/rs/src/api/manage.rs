@@ -13,7 +13,8 @@ use crate::{
   api::NoData,
   config::{
     ExternalLoginProvider, ExternalLoginProviderConfig,
-    TokenExchangeConfig, TrustedIssuer, empty_or_redacted,
+    TokenExchangeConfig, TrustedIssuer, TrustedIssuerKeys,
+    WorkloadRule, empty_or_redacted,
   },
   passkey::{CreationChallengeResponse, RegisterPublicKeyCredential},
 };
@@ -807,8 +808,63 @@ fn create_trusted_issuer() {}
 #[response(CreateTrustedIssuerResponse)]
 #[error(mogh_error::Error)]
 pub struct CreateTrustedIssuer {
-  /// The issuer to create. `id` and the rule ids are ignored.
-  pub issuer: TrustedIssuer,
+  /// The display name.
+  pub name: String,
+  /// Whether tokens of this issuer are accepted.
+  #[serde(default)]
+  pub enabled: bool,
+  /// The issuer (`iss`) of the tokens, eg.
+  /// `https://token.actions.githubusercontent.com`
+  /// or the issuer url of a Kubernetes cluster.
+  pub issuer: String,
+  /// Where the keys to verify tokens come from.
+  #[serde(default)]
+  pub keys: TrustedIssuerKeys,
+  /// The audiences (`aud`) accepted on tokens. At least one is
+  /// required, see [TrustedIssuer::audiences].
+  #[serde(default)]
+  pub audiences: Vec<String>,
+  /// Only accept tokens issued (`iat`) at most this many seconds ago.
+  /// `0` (default) accepts tokens until they expire.
+  #[serde(default)]
+  pub max_token_age_secs: U64,
+  /// Which tokens of the issuer are accepted, and who they act as.
+  /// The first enabled rule matching a token decides.
+  /// The ids of the rules are ignored.
+  #[serde(default)]
+  pub rules: Vec<WorkloadRule>,
+}
+
+/// The issuer the request creates, without an id.
+impl From<CreateTrustedIssuer> for TrustedIssuer {
+  fn from(request: CreateTrustedIssuer) -> Self {
+    TrustedIssuer {
+      id: String::new(),
+      name: request.name,
+      enabled: request.enabled,
+      issuer: request.issuer,
+      keys: request.keys,
+      audiences: request.audiences,
+      max_token_age_secs: request.max_token_age_secs,
+      rules: request.rules,
+    }
+  }
+}
+
+/// The request creating another issuer like this one.
+/// Its `id` is left out.
+impl From<TrustedIssuer> for CreateTrustedIssuer {
+  fn from(issuer: TrustedIssuer) -> Self {
+    CreateTrustedIssuer {
+      name: issuer.name,
+      enabled: issuer.enabled,
+      issuer: issuer.issuer,
+      keys: issuer.keys,
+      audiences: issuer.audiences,
+      max_token_age_secs: issuer.max_token_age_secs,
+      rules: issuer.rules,
+    }
+  }
 }
 
 #[typeshare]
@@ -832,7 +888,7 @@ pub type CreateTrustedIssuerResponse = TrustedIssuerListItem;
 )]
 fn update_trusted_issuer() {}
 
-/// Replace the trusted issuer with the same `id`. Admin only.
+/// Replace the trusted issuer with this `id`. Admin only.
 /// Response: [TrustedIssuerListItem].
 ///
 /// Rules keep their user as long as they keep their id.
@@ -845,7 +901,65 @@ fn update_trusted_issuer() {}
 #[response(UpdateTrustedIssuerResponse)]
 #[error(mogh_error::Error)]
 pub struct UpdateTrustedIssuer {
-  pub issuer: TrustedIssuer,
+  /// The id of the issuer to update.
+  pub id: String,
+  /// The display name.
+  pub name: String,
+  /// Whether tokens of this issuer are accepted.
+  #[serde(default)]
+  pub enabled: bool,
+  /// The issuer (`iss`) of the tokens, eg.
+  /// `https://token.actions.githubusercontent.com`
+  /// or the issuer url of a Kubernetes cluster.
+  pub issuer: String,
+  /// Where the keys to verify tokens come from.
+  #[serde(default)]
+  pub keys: TrustedIssuerKeys,
+  /// The audiences (`aud`) accepted on tokens. At least one is
+  /// required, see [TrustedIssuer::audiences].
+  #[serde(default)]
+  pub audiences: Vec<String>,
+  /// Only accept tokens issued (`iat`) at most this many seconds ago.
+  /// `0` (default) accepts tokens until they expire.
+  #[serde(default)]
+  pub max_token_age_secs: U64,
+  /// Which tokens of the issuer are accepted, and who they act as.
+  /// The first enabled rule matching a token decides.
+  #[serde(default)]
+  pub rules: Vec<WorkloadRule>,
+}
+
+/// The issuer as the request replaces it.
+impl From<UpdateTrustedIssuer> for TrustedIssuer {
+  fn from(request: UpdateTrustedIssuer) -> Self {
+    TrustedIssuer {
+      id: request.id,
+      name: request.name,
+      enabled: request.enabled,
+      issuer: request.issuer,
+      keys: request.keys,
+      audiences: request.audiences,
+      max_token_age_secs: request.max_token_age_secs,
+      rules: request.rules,
+    }
+  }
+}
+
+/// The request replacing the stored issuer of the same `id` with
+/// this one, eg. a listed issuer after a change.
+impl From<TrustedIssuer> for UpdateTrustedIssuer {
+  fn from(issuer: TrustedIssuer) -> Self {
+    UpdateTrustedIssuer {
+      id: issuer.id,
+      name: issuer.name,
+      enabled: issuer.enabled,
+      issuer: issuer.issuer,
+      keys: issuer.keys,
+      audiences: issuer.audiences,
+      max_token_age_secs: issuer.max_token_age_secs,
+      rules: issuer.rules,
+    }
+  }
 }
 
 #[typeshare]
@@ -1285,6 +1399,96 @@ mod tests {
     }))
     .unwrap();
     assert_eq!(req.cidr_whitelist, ["10.0.0.0/8", "::1"]);
+  }
+
+  #[test]
+  fn test_trusted_issuer_requests_take_the_issuer_fields() {
+    // The body is the issuer itself, not an `issuer` object holding
+    // it: create without an id (the server generates it), and only
+    // the name and the issuer url required.
+    let body = json!({
+      "name": "GitHub Actions",
+      "issuer": "https://token.actions.githubusercontent.com",
+    });
+    let req: CreateTrustedIssuer =
+      serde_json::from_value(body.clone()).unwrap();
+    assert_eq!(req.name, "GitHub Actions");
+    assert!(!req.enabled);
+    assert_eq!(req.keys, TrustedIssuerKeys::Discovery {});
+    assert!(req.audiences.is_empty());
+    assert_eq!(req.max_token_age_secs, 0);
+    assert!(req.rules.is_empty());
+    let issuer = TrustedIssuer::from(req);
+    assert_eq!(issuer.id, "");
+    assert_eq!(
+      issuer.issuer,
+      "https://token.actions.githubusercontent.com"
+    );
+
+    // An update names the issuer by its id, next to the same fields.
+    assert!(
+      serde_json::from_value::<UpdateTrustedIssuer>(body.clone())
+        .is_err()
+    );
+    let mut with_id = body.clone();
+    with_id["id"] = json!("issuer-id");
+    let req: UpdateTrustedIssuer =
+      serde_json::from_value(with_id).unwrap();
+    let issuer = TrustedIssuer::from(req);
+    assert_eq!(issuer.id, "issuer-id");
+    assert_eq!(issuer.name, "GitHub Actions");
+
+    // The nested body of before v11 is refused, by both.
+    let mut nested_issuer = body;
+    nested_issuer["id"] = json!("issuer-id");
+    let nested = json!({ "issuer": nested_issuer });
+    assert!(
+      serde_json::from_value::<CreateTrustedIssuer>(nested.clone())
+        .is_err()
+    );
+    assert!(
+      serde_json::from_value::<UpdateTrustedIssuer>(nested).is_err()
+    );
+  }
+
+  #[test]
+  fn test_trusted_issuer_requests_from_an_issuer() {
+    let issuer = TrustedIssuer {
+      id: "issuer-id".into(),
+      name: "Cluster".into(),
+      enabled: true,
+      issuer: "https://kubernetes.default.svc.cluster.local".into(),
+      keys: TrustedIssuerKeys::JwksUri(
+        "https://keys.example.com/jwks".into(),
+      ),
+      audiences: vec!["https://app.example.com".into()],
+      max_token_age_secs: 300,
+      rules: vec![WorkloadRule {
+        id: "rule-id".into(),
+        name: "deployer".into(),
+        enabled: true,
+        ..Default::default()
+      }],
+    };
+    let listed = serde_json::to_value(&issuer).unwrap();
+
+    // An update of a listed issuer is the issuer as listed.
+    let update = UpdateTrustedIssuer::from(issuer.clone());
+    assert_eq!(serde_json::to_value(&update).unwrap(), listed);
+    assert_eq!(TrustedIssuer::from(update), issuer);
+
+    // Creating another like it leaves only the issuer's id out.
+    let create = CreateTrustedIssuer::from(issuer.clone());
+    let mut without_id = listed;
+    without_id.as_object_mut().unwrap().remove("id");
+    assert_eq!(serde_json::to_value(&create).unwrap(), without_id);
+    assert_eq!(
+      TrustedIssuer::from(create),
+      TrustedIssuer {
+        id: String::new(),
+        ..issuer
+      }
+    );
   }
 
   #[test]

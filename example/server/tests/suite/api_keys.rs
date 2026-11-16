@@ -12,9 +12,7 @@ use example_client::{
       CreateApiKey, CreateSigningKey, CreateTrustedIssuer,
       DeleteApiKey, DeleteSigningKey, ListTrustedIssuers,
     },
-    config::{
-      TrustedIssuer, TrustedIssuerKeys, WorkloadClaim, WorkloadRule,
-    },
+    config::{TrustedIssuerKeys, WorkloadClaim, WorkloadRule},
     signature::{
       SIGNED_AT_ANOTHER_TIME, SIGNED_FOR_ANOTHER_HOST, random_nonce,
     },
@@ -926,8 +924,6 @@ async fn signature_headers_cannot_carry_another_body() {
   let created = serde_json::to_vec(&json!({
     "type": "CreateTrustedIssuer",
     "params": CreateTrustedIssuer {
-      issuer: TrustedIssuer {
-        id: String::new(),
         name: "Admin CI".into(),
         enabled: true,
         issuer: app.idp.issuer.clone(),
@@ -945,9 +941,7 @@ async fn signature_headers_cannot_carry_another_body() {
           groups: Vec::new(),
           admin: true,
           token_ttl_secs: 900,
-        }],
-      },
-    },
+        }],},
   }))
   .unwrap();
   assert_eq!(

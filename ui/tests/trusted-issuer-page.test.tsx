@@ -100,7 +100,7 @@ async function confirmSave(
   fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
   await waitFor(() => expect(requests).toHaveLength(1));
   expect(requests[0].url).toBe("http://auth.test/manage/UpdateTrustedIssuer");
-  return (requests[0].body as { issuer: MoghAuth.Types.TrustedIssuer }).issuer;
+  return requests[0].body as MoghAuth.Types.UpdateTrustedIssuer;
 }
 
 /** The text of the confirm dialog's line of `field`, if it lists it. */

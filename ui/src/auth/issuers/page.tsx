@@ -199,12 +199,12 @@ export function TrustedIssuerPage({
               item.read_only
                 ? undefined
                 : (name) =>
-                    update({
-                      issuer: trustedIssuer(item.issuer.id, {
+                    update(
+                      trustedIssuer(item.issuer.id, {
                         ...issuerFormValues(item.issuer),
                         name,
                       }),
-                    })
+                    )
             }
             renamePending={updatePending}
             action={
@@ -294,7 +294,7 @@ export function TrustedIssuerPage({
             ruleAdmin={ruleAdmin}
             tokenReview={tokenReview}
             onSave={async (values) => {
-              await update({ issuer: trustedIssuer(item.issuer.id, values) });
+              await update(trustedIssuer(item.issuer.id, values));
             }}
           />
 

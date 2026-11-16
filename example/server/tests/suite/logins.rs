@@ -19,9 +19,7 @@ use example_client::{
       },
       token::{TOKEN_TYPE_ID_TOKEN, TOKEN_TYPE_JWT},
     },
-    config::{
-      TrustedIssuer, TrustedIssuerKeys, WorkloadClaim, WorkloadRule,
-    },
+    config::{TrustedIssuerKeys, WorkloadClaim, WorkloadRule},
   },
 };
 use example_mock_idp::MintToken;
@@ -123,27 +121,24 @@ async fn every_login_is_recorded_once() {
   // The workload issuer, while the sign up's login is recent.
   admin
     .manage(CreateTrustedIssuer {
-      issuer: TrustedIssuer {
+      name: "Mock CI".into(),
+      enabled: true,
+      issuer: app.idp.issuer.clone(),
+      keys: TrustedIssuerKeys::Discovery {},
+      audiences: vec![AUDIENCE.into()],
+      max_token_age_secs: 300,
+      rules: vec![WorkloadRule {
         id: String::new(),
-        name: "Mock CI".into(),
+        name: "Deploy".into(),
         enabled: true,
-        issuer: app.idp.issuer.clone(),
-        keys: TrustedIssuerKeys::Discovery {},
-        audiences: vec![AUDIENCE.into()],
-        max_token_age_secs: 300,
-        rules: vec![WorkloadRule {
-          id: String::new(),
-          name: "Deploy".into(),
-          enabled: true,
-          claims: vec![WorkloadClaim {
-            claim: "repository_id".into(),
-            pattern: "12345".into(),
-          }],
-          groups: Vec::new(),
-          admin: false,
-          token_ttl_secs: 900,
+        claims: vec![WorkloadClaim {
+          claim: "repository_id".into(),
+          pattern: "12345".into(),
         }],
-      },
+        groups: Vec::new(),
+        admin: false,
+        token_ttl_secs: 900,
+      }],
     })
     .await
     .unwrap();

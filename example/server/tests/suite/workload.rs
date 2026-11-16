@@ -94,9 +94,10 @@ async fn workload_gets_a_short_lived_token_for_its_rule() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
   let created = admin
-    .manage(CreateTrustedIssuer {
-      issuer: issuer(&app, vec![deploy_rule()]),
-    })
+    .manage(CreateTrustedIssuer::from(issuer(
+      &app,
+      vec![deploy_rule()],
+    )))
     .await
     .unwrap();
   assert!(!created.read_only);
@@ -174,9 +175,10 @@ async fn tokens_have_to_match_a_rule() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
   admin
-    .manage(CreateTrustedIssuer {
-      issuer: issuer(&app, vec![deploy_rule()]),
-    })
+    .manage(CreateTrustedIssuer::from(issuer(
+      &app,
+      vec![deploy_rule()],
+    )))
     .await
     .unwrap();
 
@@ -287,22 +289,17 @@ async fn keys_from_a_url_or_a_fixed_key_set() {
     ),
   ] {
     admin
-      .manage(CreateTrustedIssuer {
-        issuer: TrustedIssuer {
+      .manage(CreateTrustedIssuer::from(TrustedIssuer {
+        name: name.into(),
+        issuer: issuer_url.clone(),
+        keys,
+        rules: vec![WorkloadRule {
           name: name.into(),
-          issuer: issuer_url.clone(),
-          keys,
-          rules: vec![WorkloadRule {
-            name: name.into(),
-            claims: vec![claim(
-              "sub",
-              "system:serviceaccount:prod:*",
-            )],
-            ..deploy_rule()
-          }],
-          ..issuer(&app, Vec::new())
-        },
-      })
+          claims: vec![claim("sub", "system:serviceaccount:prod:*")],
+          ..deploy_rule()
+        }],
+        ..issuer(&app, Vec::new())
+      }))
       .await
       .unwrap();
     let workload = workload_client(
@@ -319,12 +316,10 @@ async fn keys_from_a_url_or_a_fixed_key_set() {
 
   // Invalid key sets are refused when saving, not at the first exchange.
   let res = admin
-    .manage(CreateTrustedIssuer {
-      issuer: TrustedIssuer {
-        keys: TrustedIssuerKeys::Static("not a key set".into()),
-        ..issuer(&app, vec![deploy_rule()])
-      },
-    })
+    .manage(CreateTrustedIssuer::from(TrustedIssuer {
+      keys: TrustedIssuerKeys::Static("not a key set".into()),
+      ..issuer(&app, vec![deploy_rule()])
+    }))
     .await;
   assert_eq!(status_of(res), StatusCode::BAD_REQUEST);
 }
@@ -392,7 +387,7 @@ async fn unsafe_issuers_and_rules_are_refused() {
     ),
   ];
   for (why, issuer) in invalid {
-    let res = admin.manage(CreateTrustedIssuer { issuer }).await;
+    let res = admin.manage(CreateTrustedIssuer::from(issuer)).await;
     assert_eq!(status_of(res), StatusCode::BAD_REQUEST, "{why}");
   }
   assert!(
@@ -406,9 +401,10 @@ async fn unsafe_issuers_and_rules_are_refused() {
   // Admin only
   let user = app.sign_up("user").await;
   let res = user
-    .manage(CreateTrustedIssuer {
-      issuer: issuer(&app, vec![deploy_rule()]),
-    })
+    .manage(CreateTrustedIssuer::from(issuer(
+      &app,
+      vec![deploy_rule()],
+    )))
     .await;
   assert_eq!(status_of(res), StatusCode::FORBIDDEN);
   let res = user.manage(ListTrustedIssuers {}).await;
@@ -420,28 +416,26 @@ async fn admin_rules_and_the_first_matching_rule() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
   admin
-    .manage(CreateTrustedIssuer {
-      issuer: issuer(
-        &app,
-        vec![
-          WorkloadRule {
-            name: "Disabled".into(),
-            enabled: false,
-            claims: vec![claim("repository_id", "7*")],
-            admin: true,
-            ..deploy_rule()
-          },
-          WorkloadRule {
-            name: "Infra".into(),
-            claims: vec![claim("repository_id", "777")],
-            groups: Vec::new(),
-            admin: true,
-            ..deploy_rule()
-          },
-          deploy_rule(),
-        ],
-      ),
-    })
+    .manage(CreateTrustedIssuer::from(issuer(
+      &app,
+      vec![
+        WorkloadRule {
+          name: "Disabled".into(),
+          enabled: false,
+          claims: vec![claim("repository_id", "7*")],
+          admin: true,
+          ..deploy_rule()
+        },
+        WorkloadRule {
+          name: "Infra".into(),
+          claims: vec![claim("repository_id", "777")],
+          groups: Vec::new(),
+          admin: true,
+          ..deploy_rule()
+        },
+        deploy_rule(),
+      ],
+    )))
     .await
     .unwrap();
 
@@ -503,21 +497,19 @@ async fn changing_a_rule_reaches_the_tokens_it_issued() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
   let created = admin
-    .manage(CreateTrustedIssuer {
-      issuer: issuer(
-        &app,
-        vec![
-          WorkloadRule {
-            name: "Infra".into(),
-            claims: vec![claim("repository_id", "777")],
-            groups: Vec::new(),
-            admin: true,
-            ..deploy_rule()
-          },
-          deploy_rule(),
-        ],
-      ),
-    })
+    .manage(CreateTrustedIssuer::from(issuer(
+      &app,
+      vec![
+        WorkloadRule {
+          name: "Infra".into(),
+          claims: vec![claim("repository_id", "777")],
+          groups: Vec::new(),
+          admin: true,
+          ..deploy_rule()
+        },
+        deploy_rule(),
+      ],
+    )))
     .await
     .unwrap()
     .issuer;
@@ -533,7 +525,7 @@ async fn changing_a_rule_reaches_the_tokens_it_issued() {
   let update = |change: fn(&mut TrustedIssuer)| {
     let mut issuer = created.clone();
     change(&mut issuer);
-    admin.manage(UpdateTrustedIssuer { issuer })
+    admin.manage(UpdateTrustedIssuer::from(issuer))
   };
 
   // Demoted: the token issued before is no admin anymore.
@@ -691,19 +683,17 @@ async fn removing_a_rule_or_issuer_revokes_its_workloads() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
   let created = admin
-    .manage(CreateTrustedIssuer {
-      issuer: issuer(
-        &app,
-        vec![
-          deploy_rule(),
-          WorkloadRule {
-            name: "Docs".into(),
-            claims: vec![claim("repository_id", "555")],
-            ..deploy_rule()
-          },
-        ],
-      ),
-    })
+    .manage(CreateTrustedIssuer::from(issuer(
+      &app,
+      vec![
+        deploy_rule(),
+        WorkloadRule {
+          name: "Docs".into(),
+          claims: vec![claim("repository_id", "555")],
+          ..deploy_rule()
+        },
+      ],
+    )))
     .await
     .unwrap()
     .issuer;
@@ -718,12 +708,10 @@ async fn removing_a_rule_or_issuer_revokes_its_workloads() {
 
   // Drop the docs rule, keeping the deploy rule (by its id).
   let updated = admin
-    .manage(UpdateTrustedIssuer {
-      issuer: TrustedIssuer {
-        rules: vec![created.rules[0].clone()],
-        ..created.clone()
-      },
-    })
+    .manage(UpdateTrustedIssuer::from(TrustedIssuer {
+      rules: vec![created.rules[0].clone()],
+      ..created.clone()
+    }))
     .await
     .unwrap()
     .issuer;
@@ -745,12 +733,10 @@ async fn removing_a_rule_or_issuer_revokes_its_workloads() {
 
   // Disabling the issuer stops new tokens.
   admin
-    .manage(UpdateTrustedIssuer {
-      issuer: TrustedIssuer {
-        enabled: false,
-        ..updated.clone()
-      },
-    })
+    .manage(UpdateTrustedIssuer::from(TrustedIssuer {
+      enabled: false,
+      ..updated.clone()
+    }))
     .await
     .unwrap();
   let (status, _) = app
@@ -843,9 +829,10 @@ async fn fetched_keys_are_cached() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
   admin
-    .manage(CreateTrustedIssuer {
-      issuer: issuer(&app, vec![deploy_rule()]),
-    })
+    .manage(CreateTrustedIssuer::from(issuer(
+      &app,
+      vec![deploy_rule()],
+    )))
     .await
     .unwrap();
   // Eg. a CI matrix starting many jobs at once.
@@ -873,9 +860,10 @@ async fn concurrent_first_exchanges_share_one_user() {
   // Takes the username the workload user would get.
   app.sign_up("workload-deploy").await;
   admin
-    .manage(CreateTrustedIssuer {
-      issuer: issuer(&app, vec![deploy_rule()]),
-    })
+    .manage(CreateTrustedIssuer::from(issuer(
+      &app,
+      vec![deploy_rule()],
+    )))
     .await
     .unwrap();
   // Load the keys first (a token matching no rule), so the
@@ -1044,9 +1032,10 @@ async fn token_review_issuer_reviews_through_the_cluster() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
   let created = admin
-    .manage(CreateTrustedIssuer {
-      issuer: review_issuer(&app.idp.issuer, DEFAULT_REVIEWER_TOKEN),
-    })
+    .manage(CreateTrustedIssuer::from(review_issuer(
+      &app.idp.issuer,
+      DEFAULT_REVIEWER_TOKEN,
+    )))
     .await
     .unwrap();
   assert_eq!(created.issuer.keys.review_token(), Some(REDACTED));
@@ -1160,9 +1149,10 @@ async fn token_review_credential_is_kept_until_the_url_changes() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
   let created = admin
-    .manage(CreateTrustedIssuer {
-      issuer: review_issuer(&app.idp.issuer, DEFAULT_REVIEWER_TOKEN),
-    })
+    .manage(CreateTrustedIssuer::from(review_issuer(
+      &app.idp.issuer,
+      DEFAULT_REVIEWER_TOKEN,
+    )))
     .await
     .unwrap()
     .issuer;
@@ -1176,9 +1166,11 @@ async fn token_review_credential_is_kept_until_the_url_changes() {
 
   for kept in ["", REDACTED] {
     let updated = admin
-      .manage(UpdateTrustedIssuer {
-        issuer: reviewed_at(&created, &app.idp.issuer, kept),
-      })
+      .manage(UpdateTrustedIssuer::from(reviewed_at(
+        &created,
+        &app.idp.issuer,
+        kept,
+      )))
       .await
       .unwrap();
     assert_eq!(updated.issuer.keys.review_token(), Some(REDACTED));
@@ -1192,9 +1184,9 @@ async fn token_review_credential_is_kept_until_the_url_changes() {
   // The same api server under another url (a trailing slash).
   let moved = format!("{}/", app.idp.issuer);
   let res = admin
-    .manage(UpdateTrustedIssuer {
-      issuer: reviewed_at(&created, &moved, ""),
-    })
+    .manage(UpdateTrustedIssuer::from(reviewed_at(
+      &created, &moved, "",
+    )))
     .await;
   let Err(e) = res else {
     panic!("A new url was saved without the credential");
@@ -1214,9 +1206,11 @@ async fn token_review_credential_is_kept_until_the_url_changes() {
   };
   assert_eq!(stored.url, app.idp.issuer);
   admin
-    .manage(UpdateTrustedIssuer {
-      issuer: reviewed_at(&created, &moved, DEFAULT_REVIEWER_TOKEN),
-    })
+    .manage(UpdateTrustedIssuer::from(reviewed_at(
+      &created,
+      &moved,
+      DEFAULT_REVIEWER_TOKEN,
+    )))
     .await
     .unwrap();
   assert_eq!(exchange().await, StatusCode::OK);
@@ -1232,9 +1226,11 @@ async fn token_review_credential_is_kept_until_the_url_changes() {
   assert_eq!(app.idp.token_reviews(), reviews + 1);
   // Saved with the new one, it is tried at once.
   admin
-    .manage(UpdateTrustedIssuer {
-      issuer: reviewed_at(&created, &moved, "rotated-reviewer-token"),
-    })
+    .manage(UpdateTrustedIssuer::from(reviewed_at(
+      &created,
+      &moved,
+      "rotated-reviewer-token",
+    )))
     .await
     .unwrap();
   assert_eq!(exchange().await, StatusCode::OK);
@@ -1251,9 +1247,10 @@ async fn token_review_issuer_url_is_its_own() {
   let app = TestApp::spawn().await;
   let admin = app.sign_up("admin").await;
   admin
-    .manage(CreateTrustedIssuer {
-      issuer: review_issuer(&app.idp.issuer, DEFAULT_REVIEWER_TOKEN),
-    })
+    .manage(CreateTrustedIssuer::from(review_issuer(
+      &app.idp.issuer,
+      DEFAULT_REVIEWER_TOKEN,
+    )))
     .await
     .unwrap();
   let keys_issuer = |issuer: &str| TrustedIssuer {
@@ -1277,16 +1274,14 @@ async fn token_review_issuer_url_is_its_own() {
       keys_issuer(&format!("{CLUSTER_ISSUER}/")),
     ),
   ] {
-    let res = admin.manage(CreateTrustedIssuer { issuer }).await;
+    let res = admin.manage(CreateTrustedIssuer::from(issuer)).await;
     assert_eq!(status_of(res), StatusCode::CONFLICT, "{case}");
   }
 
   // The other way around: a keys issuer first.
   let other_cluster = "https://other-cluster.example.test";
   admin
-    .manage(CreateTrustedIssuer {
-      issuer: keys_issuer(other_cluster),
-    })
+    .manage(CreateTrustedIssuer::from(keys_issuer(other_cluster)))
     .await
     .unwrap();
   let reviewed_other = TrustedIssuer {
@@ -1295,30 +1290,24 @@ async fn token_review_issuer_url_is_its_own() {
     ..review_issuer(&app.idp.issuer, DEFAULT_REVIEWER_TOKEN)
   };
   let res = admin
-    .manage(CreateTrustedIssuer {
-      issuer: reviewed_other.clone(),
-    })
+    .manage(CreateTrustedIssuer::from(reviewed_other.clone()))
     .await;
   assert_eq!(status_of(res), StatusCode::CONFLICT);
 
   // Disabled, it is stored; enabled, refused.
   let disabled = admin
-    .manage(CreateTrustedIssuer {
-      issuer: TrustedIssuer {
-        enabled: false,
-        ..reviewed_other
-      },
-    })
+    .manage(CreateTrustedIssuer::from(TrustedIssuer {
+      enabled: false,
+      ..reviewed_other
+    }))
     .await
     .unwrap()
     .issuer;
   let res = admin
-    .manage(UpdateTrustedIssuer {
-      issuer: TrustedIssuer {
-        enabled: true,
-        ..reviewed_at(&disabled, &app.idp.issuer, "")
-      },
-    })
+    .manage(UpdateTrustedIssuer::from(TrustedIssuer {
+      enabled: true,
+      ..reviewed_at(&disabled, &app.idp.issuer, "")
+    }))
     .await;
   assert_eq!(status_of(res), StatusCode::CONFLICT);
   assert_eq!(

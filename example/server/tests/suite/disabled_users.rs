@@ -13,8 +13,8 @@ use example_client::{
       ListTrustedIssuers,
     },
     config::{
-      ExternalLoginProviderConfig, OidcConfig, TrustedIssuer,
-      TrustedIssuerKeys, WorkloadClaim, WorkloadRule,
+      ExternalLoginProviderConfig, OidcConfig, TrustedIssuerKeys,
+      WorkloadClaim, WorkloadRule,
     },
   },
 };
@@ -26,27 +26,24 @@ use crate::common::*;
 /// A trusted issuer whose tokens are exchanged for an admin.
 fn admin_issuer(app: &TestApp) -> CreateTrustedIssuer {
   CreateTrustedIssuer {
-    issuer: TrustedIssuer {
+    name: "Admin CI".into(),
+    enabled: true,
+    issuer: app.idp.issuer.clone(),
+    keys: TrustedIssuerKeys::Discovery {},
+    audiences: vec!["https://example-app.test".into()],
+    max_token_age_secs: 300,
+    rules: vec![WorkloadRule {
       id: String::new(),
-      name: "Admin CI".into(),
+      name: "Admin".into(),
       enabled: true,
-      issuer: app.idp.issuer.clone(),
-      keys: TrustedIssuerKeys::Discovery {},
-      audiences: vec!["https://example-app.test".into()],
-      max_token_age_secs: 300,
-      rules: vec![WorkloadRule {
-        id: String::new(),
-        name: "Admin".into(),
-        enabled: true,
-        claims: vec![WorkloadClaim {
-          claim: "repository_id".into(),
-          pattern: "12345".into(),
-        }],
-        groups: Vec::new(),
-        admin: true,
-        token_ttl_secs: 900,
+      claims: vec![WorkloadClaim {
+        claim: "repository_id".into(),
+        pattern: "12345".into(),
       }],
-    },
+      groups: Vec::new(),
+      admin: true,
+      token_ttl_secs: 900,
+    }],
   }
 }
 

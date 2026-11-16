@@ -11,9 +11,7 @@ use example_client::{
       manage::{CreateApiKey, CreateSigningKey, CreateTrustedIssuer},
       token::TOKEN_TYPE_JWT,
     },
-    config::{
-      TrustedIssuer, TrustedIssuerKeys, WorkloadClaim, WorkloadRule,
-    },
+    config::{TrustedIssuerKeys, WorkloadClaim, WorkloadRule},
   },
   supporter::{
     MAX_ICON_BYTES, SignedSupporterKey, SupporterBranding, Tier,
@@ -890,27 +888,24 @@ const AUDIENCE: &str = "https://example-app.test";
 /// `12345` admins of the app.
 fn admin_issuer(app: &TestApp) -> CreateTrustedIssuer {
   CreateTrustedIssuer {
-    issuer: TrustedIssuer {
+    name: "Infra CI".into(),
+    enabled: true,
+    issuer: app.idp.issuer.clone(),
+    keys: TrustedIssuerKeys::Discovery {},
+    audiences: vec![AUDIENCE.into()],
+    max_token_age_secs: 300,
+    rules: vec![WorkloadRule {
       id: String::new(),
-      name: "Infra CI".into(),
+      name: "Infra".into(),
       enabled: true,
-      issuer: app.idp.issuer.clone(),
-      keys: TrustedIssuerKeys::Discovery {},
-      audiences: vec![AUDIENCE.into()],
-      max_token_age_secs: 300,
-      rules: vec![WorkloadRule {
-        id: String::new(),
-        name: "Infra".into(),
-        enabled: true,
-        claims: vec![WorkloadClaim {
-          claim: "repository_id".into(),
-          pattern: "12345".into(),
-        }],
-        groups: Vec::new(),
-        admin: true,
-        token_ttl_secs: 900,
+      claims: vec![WorkloadClaim {
+        claim: "repository_id".into(),
+        pattern: "12345".into(),
       }],
-    },
+      groups: Vec::new(),
+      admin: true,
+      token_ttl_secs: 900,
+    }],
   }
 }
 

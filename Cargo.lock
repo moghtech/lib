@@ -1456,7 +1456,7 @@ name = "example_client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "mogh_auth_client 10.0.0",
+ "mogh_auth_client 11.0.0",
  "mogh_error",
  "mogh_resolver",
  "mogh_supporter",
@@ -1492,7 +1492,7 @@ dependencies = [
  "envy",
  "example_client",
  "example_mock_idp",
- "mogh_auth_client 10.0.0",
+ "mogh_auth_client 11.0.0",
  "mogh_auth_server",
  "mogh_cache",
  "mogh_config",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_client"
-version = "10.0.0"
+version = "11.0.0"
 dependencies = [
  "anyhow",
  "mogh_error",
@@ -2601,7 +2601,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_server"
-version = "10.0.0"
+version = "11.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2611,7 +2611,7 @@ dependencies = [
  "data-encoding",
  "http-body-util",
  "jsonwebtoken",
- "mogh_auth_client 10.0.0",
+ "mogh_auth_client 11.0.0",
  "mogh_error",
  "mogh_logger",
  "mogh_pki",
@@ -2838,7 +2838,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_supporter"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",

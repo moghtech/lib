@@ -108,19 +108,16 @@ export function TrustedIssuersTable({
           }}
           onConfirm={() =>
             create({
-              issuer: {
-                id: "",
-                name: newIssuer.name.trim(),
-                // Disabled until it has rules
-                enabled: false,
-                issuer: newIssuer.issuer.trim(),
-                keys: { source: "Discovery", params: {} },
-                audiences: newIssuer.audience.trim()
-                  ? [newIssuer.audience.trim()]
-                  : [],
-                max_token_age_secs: 300,
-                rules: [],
-              },
+              name: newIssuer.name.trim(),
+              // Disabled until it has rules
+              enabled: false,
+              issuer: newIssuer.issuer.trim(),
+              keys: { source: "Discovery", params: {} },
+              audiences: newIssuer.audience.trim()
+                ? [newIssuer.audience.trim()]
+                : [],
+              max_token_age_secs: 300,
+              rules: [],
             })
               .then(async (item) => {
                 await invalidate();

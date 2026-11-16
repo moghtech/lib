@@ -263,7 +263,7 @@ impl Resolve<ManageArgs> for CreateTrustedIssuer {
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
-    create_issuer(auth.as_ref(), user.as_ref().as_ref(), self.issuer)
+    create_issuer(auth.as_ref(), user.as_ref().as_ref(), self.into())
       .await
   }
 }
@@ -431,14 +431,14 @@ impl Resolve<ManageArgs> for UpdateTrustedIssuer {
     fields(
       user_id = user.id(),
       username = user.username(),
-      issuer_id = self.issuer.id
+      issuer_id = self.id
     )
   )]
   async fn resolve(
     self,
     ManageArgs { auth, user, .. }: &ManageArgs,
   ) -> Result<Self::Response, Self::Error> {
-    update_issuer(auth.clone(), user.as_ref().as_ref(), self.issuer)
+    update_issuer(auth.clone(), user.as_ref().as_ref(), self.into())
       .await
   }
 }
