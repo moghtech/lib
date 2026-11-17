@@ -74,7 +74,7 @@ chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
 aes-gcm = { version = "0.11.1", features = ["zeroize"] }
 data-encoding = "2.11.1"
 rand = "0.10.4"
-zeroize = { version = "1.9.1", features = ["derive"] }
+zeroize = { version = "1.9.2", features = ["derive"] }
 sha2 = "0.11.1"
 subtle = "2.6.1"
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
