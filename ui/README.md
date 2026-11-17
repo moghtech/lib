@@ -54,7 +54,13 @@ import { ThemeProvider } from "mogh_ui";
   another account's username / avatar (`useAccountInfo`, eg. its
   `GetUsername`) and its cleanup for signed out users (`onSignOut`, eg.
   drafts kept in `localStorage`); the page reloads when this tab's user
-  signed out. Under it: `useAccounts`, `useCurrentUserId`, and
+  signed out, and on a switch. An app with a `beforeunload` guard (an
+  unsaved edit) passes `confirmAccountChange`: the menu asks it before
+  it changes anything, `false` keeps the tab as it is (no token change,
+  no reload), `true` goes on. Its answer is the confirmation of the
+  reload, so the app disarms its guard before it answers `true` (the
+  browser would otherwise ask again). Signing out another account than
+  the tab's is not asked. Under it: `useAccounts`, `useCurrentUserId`, and
   `useResetOnUserChange` (call it once at the top of the app: it drops
   the cached queries and mutation variables when the tab's user
   changes).

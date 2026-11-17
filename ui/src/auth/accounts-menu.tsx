@@ -18,10 +18,11 @@ import {
   User,
 } from "lucide-react";
 import * as MoghAuth from "mogh_auth_client";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { hexColorByIntention } from "../color";
 import { addAccountPath, currentUserId, useAccounts } from "./accounts";
+import { reloadPage } from "./reload";
 
 /** How the menu shows an account. */
 export interface AccountInfo {
@@ -29,6 +30,17 @@ export interface AccountInfo {
   /** An image url. Without it, a user icon. */
   avatar?: string;
 }
+
+/**
+ * An action of `AccountsMenu` which changes this tab's account, and
+ * so reloads the page: switching to another account (`userId`),
+ * signing this tab's account out (`userId`), or signing every account
+ * out.
+ */
+export type AccountChange =
+  | { action: "switch"; userId: string }
+  | { action: "sign-out"; userId: string }
+  | { action: "sign-out-all" };
 
 export interface AccountsMenuProps {
   /**
@@ -51,6 +63,29 @@ export interface AccountsMenuProps {
    * user and leads to the login page.
    */
   onSignOut?: (userIds: string[]) => void;
+  /**
+   * Asked before an action of the menu changes this tab's account
+   * (`AccountChange`: a switch, signing this tab's account out, "Log
+   * Out All"), each of which reloads the page and so drops what the
+   * page holds only in memory, eg. an unsaved edit. Nothing has
+   * changed yet when it is asked.
+   *
+   * - `false` (or a promise of it, or an error): the tab stays as it
+   *   is. The token store is untouched and the page doesn't reload.
+   * - `true`: the change is made, then the page reloads.
+   *
+   * The answer is the confirmation of that reload: an app with a
+   * `beforeunload` guard asks the user here (eg. `window.confirm`,
+   * only while it holds an unsaved edit), and before it answers `true`
+   * it disarms its guard, so the browser doesn't ask a second time.
+   * The page is going away then, the guard needn't be armed again.
+   *
+   * Without it, the menu changes the account at once, as before. Not
+   * asked: signing out another account than this tab's (this tab
+   * stays, and doesn't reload), and a session ending that the user
+   * didn't start here (another tab's sign out, a refused token).
+   */
+  confirmAccountChange?: (change: AccountChange) => boolean | Promise<boolean>;
   /** Where the Profile button leads. Default `/profile`. */
   profilePath?: string;
 }
@@ -61,14 +96,17 @@ export interface AccountsMenuProps {
  * "Add Account" (`addAccountPath`: the login page, without its auto
  * redirect, back here after), the profile, and "Log Out All".
  *
- * Switching accounts reloads the page with the other user. The tokens
- * are shared by the tabs (`MoghAuth.LOGIN_TOKENS`), and the list
- * follows sign ins / outs in other tabs.
+ * Switching accounts reloads the page with the other user, and so does
+ * signing this tab's user out: `confirmAccountChange` lets the app keep
+ * the tab as it is first (eg. an unsaved edit). The tokens are shared
+ * by the tabs (`MoghAuth.LOGIN_TOKENS`), and the list follows sign ins
+ * / outs in other tabs.
  */
 export function AccountsMenu({
   user,
   useAccountInfo,
   onSignOut,
+  confirmAccountChange,
   profilePath = "/profile",
 }: AccountsMenuProps) {
   const [viewLogout, setViewLogout] = useState(false);
@@ -82,15 +120,61 @@ export function AccountsMenu({
   // Kept up to date with sign ins / outs in any tab.
   const accounts = useAccounts();
   const nav = useNavigate();
-  /** Signs `userIds` out (in every tab) with `remove`. */
-  const signOut = (userIds: string[], remove: () => void) => {
-    // This tab's user as the store knows it, also before the app's
-    // session query loaded it.
+  // A change waiting for the app's answer: another click asks nothing
+  // more until it came.
+  const asking = useRef(false);
+  /**
+   * Runs `apply`, which changes this tab's account and reloads the
+   * page, once the app confirmed `change` (`confirmAccountChange`).
+   * Refused, nothing happens.
+   */
+  const changeAccount = async (change: AccountChange, apply: () => void) => {
+    if (!confirmAccountChange) {
+      apply();
+      return;
+    }
+    if (asking.current) return;
+    asking.current = true;
+    let confirmed = false;
+    try {
+      confirmed = await confirmAccountChange(change);
+    } catch (e) {
+      // Nothing is lost by staying.
+      console.error("confirmAccountChange failed, staying:", e);
+    } finally {
+      asking.current = false;
+    }
+    if (confirmed === true) apply();
+  };
+  /**
+   * Signs the users `userIds` gives (read when it happens) out, in
+   * every tab, with `remove`. When this tab's user is among them the
+   * page reloads, once the app confirmed `change`.
+   */
+  const signOut = (
+    change: AccountChange,
+    userIds: () => string[],
+    remove: () => void,
+  ) => {
+    const apply = (reload: boolean) => {
+      const signedOut = userIds();
+      // This tab's user as the store knows it, also before the app's
+      // session query loaded it.
+      const current = currentUserId();
+      remove();
+      onSignOut?.(signedOut);
+      if (reload || (current !== undefined && signedOut.includes(current))) {
+        reloadPage();
+      }
+    };
     const current = currentUserId();
-    remove();
-    onSignOut?.(userIds);
-    if (current !== undefined && userIds.includes(current)) {
-      location.reload();
+    if (current !== undefined && userIds().includes(current)) {
+      // Once confirmed the page reloads whatever another tab changed
+      // meanwhile: the app disarmed its guard for that reload.
+      void changeAccount(change, () => apply(true));
+    } else {
+      // Another account than this tab's: the tab stays.
+      apply(false);
     }
   };
   return (
@@ -134,7 +218,19 @@ export function AccountsMenu({
               selected={login.user_id === user?.id}
               useAccountInfo={useAccountInfo}
               close={() => setOpen(false)}
-              signOut={signOut}
+              switchTo={(userId) =>
+                void changeAccount({ action: "switch", userId }, () => {
+                  MoghAuth.LOGIN_TOKENS.change(userId);
+                  reloadPage();
+                })
+              }
+              signOut={(userId) =>
+                signOut(
+                  { action: "sign-out", userId },
+                  () => [userId],
+                  () => MoghAuth.LOGIN_TOKENS.remove(userId),
+                )
+              }
               viewLogout={viewLogout}
             />
           ))}
@@ -178,11 +274,13 @@ export function AccountsMenu({
               fullWidth
               onClick={() =>
                 signOut(
-                  // Read now: also the accounts signed in by another tab
-                  // since this rendered.
-                  MoghAuth.LOGIN_TOKENS.accounts().map(
-                    (account) => account.user_id,
-                  ),
+                  { action: "sign-out-all" },
+                  // Read when it happens: also the accounts signed in
+                  // by another tab since this rendered.
+                  () =>
+                    MoghAuth.LOGIN_TOKENS.accounts().map(
+                      (account) => account.user_id,
+                    ),
                   MoghAuth.LOGIN_TOKENS.remove_all,
                 )
               }
@@ -201,6 +299,7 @@ function Account({
   selected,
   useAccountInfo,
   close,
+  switchTo,
   signOut,
   viewLogout,
 }: {
@@ -208,7 +307,10 @@ function Account({
   selected: boolean;
   useAccountInfo: (userId: string) => AccountInfo | undefined;
   close: () => void;
-  signOut: (userIds: string[], remove: () => void) => void;
+  /** Makes `userId` this tab's account, see `confirmAccountChange`. */
+  switchTo: (userId: string) => void;
+  /** Signs `userId` out in every tab, see `confirmAccountChange`. */
+  signOut: (userId: string) => void;
   viewLogout: boolean;
 }) {
   const info = useAccountInfo(userId);
@@ -233,8 +335,7 @@ function Account({
             close();
             return;
           }
-          MoghAuth.LOGIN_TOKENS.change(userId);
-          location.reload();
+          switchTo(userId);
         }}
       >
         <Avatar
@@ -251,9 +352,7 @@ function Account({
           aria-label={`Log out ${info.username}`}
           // Signs the user out in every tab. Another account than this
           // tab's leaves the list on its own (`useAccounts`).
-          onClick={() =>
-            signOut([userId], () => MoghAuth.LOGIN_TOKENS.remove(userId))
-          }
+          onClick={() => signOut(userId)}
         >
           <LogOut size="1rem" />
         </ActionIcon>

@@ -6,7 +6,9 @@ use anyhow::Context as _;
 use mogh_auth_client::{
   api::{login::MoghAuthLoginRequest, manage::MoghAuthManageRequest},
   request::{SignedPost, json_response, signed_post},
-  signature::{signed_request_headers_for_url, signing_keys},
+  signature::{
+    authorization_jwt, signed_request_headers_for_url, signing_keys,
+  },
 };
 
 pub use mogh_auth_client::signature::{SignedRequest, sign_request};
@@ -209,14 +211,25 @@ impl ExampleClient {
       ClientAuth::PrivateKey { private_key } => {
         let (client, request) = request.build_split();
         let mut request = request.context("Invalid request")?;
-        // The server takes these over a signature. reqwest makes an
-        // Authorization header of credentials in the url
-        // (`user:password@`), which the url doesn't show anymore.
-        if request.headers().contains_key("authorization")
+        // The server takes these over a signature: an api key, and an
+        // Authorization holding a jwt (the Bearer scheme, or none).
+        // Another scheme it passes over, eg. the `Basic` reqwest made
+        // of a `user:password@` in the url (for a proxy doing basic
+        // auth), which the url doesn't show anymore.
+        let jwt =
+          request.headers().get_all("authorization").iter().any(
+            |value| {
+              value.to_str().map_or(true, |value| {
+                authorization_jwt(value).is_some()
+              })
+            },
+          );
+        if jwt
           || request.headers().contains_key("x-api-key")
+          || request.headers().contains_key("x-api-secret")
         {
           anyhow::bail!(
-            "The request carries other credentials (an Authorization header, also of a `user:password@` in the address, or an api key), which the server takes over the signature"
+            "The request carries other credentials (an Authorization header holding a jwt: the Bearer scheme, or no scheme; or an api key), which the server takes over the signature"
           );
         }
         // Signed for where it goes: the host the request is sent to

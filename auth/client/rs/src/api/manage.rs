@@ -791,8 +791,10 @@ pub type ListTrustedIssuersResponse = Vec<TrustedIssuerListItem>;
   request_body(content = CreateTrustedIssuer),
   responses(
     (status = 200, description = "The created issuer", body = CreateTrustedIssuerResponse),
+    (status = 400, description = "The issuer is not valid: a field of it, its key set, a token review setting the app cannot use (`in_cluster` outside a cluster, a review device the app does not have)", body = mogh_error::Serror),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
     (status = 403, description = RESOURCE_REQUEST_FORBIDDEN, body = mogh_error::Serror),
+    (status = 409, description = "An enabled token review issuer would share its issuer url with another enabled issuer", body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -881,8 +883,11 @@ pub type CreateTrustedIssuerResponse = TrustedIssuerListItem;
   request_body(content = UpdateTrustedIssuer),
   responses(
     (status = 200, description = "The updated issuer", body = UpdateTrustedIssuerResponse),
+    (status = 400, description = "The issuer is not valid (as for the create), it comes from the app configuration and is read only, or its reviewer credential must be entered again because the cluster api server url changed", body = mogh_error::Serror),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
     (status = 403, description = RESOURCE_REQUEST_FORBIDDEN, body = mogh_error::Serror),
+    (status = 404, description = "No trusted issuer with this id", body = mogh_error::Serror),
+    (status = 409, description = "An enabled token review issuer would share its issuer url with another enabled issuer", body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]
@@ -976,8 +981,10 @@ pub type UpdateTrustedIssuerResponse = TrustedIssuerListItem;
   request_body(content = DeleteTrustedIssuer),
   responses(
     (status = 200, description = "Issuer deleted", body = DeleteTrustedIssuerResponse),
+    (status = 400, description = "The issuer comes from the app configuration and is read only", body = mogh_error::Serror),
     (status = 401, description = "Unauthorized", body = mogh_error::Serror),
     (status = 403, description = RESOURCE_REQUEST_FORBIDDEN, body = mogh_error::Serror),
+    (status = 404, description = "No trusted issuer with this id", body = mogh_error::Serror),
     (status = 500, description = "Request failed", body = mogh_error::Serror)
   ),
 )]

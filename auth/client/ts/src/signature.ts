@@ -198,8 +198,10 @@ export async function generateSigningKey(): Promise<{
  * same way, from the origins it is configured with.
  *
  * A url with credentials (`https://user:password@example.com`) is an
- * error, which doesn't repeat them: a client sends those as
- * `Authorization`, which a server takes over the signature.
+ * error, which doesn't repeat them: `fetch` does not send such a url
+ * (and its own error would repeat them). The credentials of a proxy in
+ * front of the server go as an `Authorization: Basic ...` header, which
+ * the server passes over next to a signature (`fetchSignedResponse`).
  */
 export function urlHost(url: string | URL): string {
   return urlOriginHost(parseUrl(url));
@@ -222,7 +224,7 @@ function urlOriginHost(url: URL): string {
   }
   if (url.username || url.password) {
     throw new Error(
-      "The url carries credentials (user:password@), expected eg. https://example.com",
+      "The url carries credentials (user:password@), which fetch does not send: pass them as an `Authorization: Basic ...` header instead, expected eg. https://example.com",
     );
   }
   if (!url.hostname) {

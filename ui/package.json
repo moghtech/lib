@@ -1,6 +1,6 @@
 {
   "name": "mogh_ui",
-  "version": "6.0.0",
+  "version": "6.1.0",
   "description": "Common UI components and styling used across Mogh apps.",
   "license": "MPL-2.0",
   "type": "module",

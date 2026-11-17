@@ -191,11 +191,15 @@ export async function responseJson<Res>(response: Response): Promise<Res> {
  * server, or the new address of a server which moved, would get the
  * api key. And whatever the header, a `307` / `308` sends the body
  * again, which carries secret values in the apps' apis.
+ *
+ * A url with credentials (`user:password@`) is refused before `fetch`
+ * (`refuseUrlCredentials`), with an error which doesn't repeat them.
  */
 export async function fetchResponse(
   input: string | URL,
   init?: RequestInit,
 ): Promise<Response> {
+  refuseUrlCredentials(input);
   let response: Response;
   try {
     // Inside the `try`: invalid headers throw a TypeError
@@ -261,12 +265,72 @@ export async function fetchJson<Res>(
 }
 
 /**
- * The error of a signed request which carries other credentials. The
- * server would take those over the signature, and count what it makes
- * of them against the client: it is not sent.
+ * The error of a signed request which carries other credentials: an api
+ * key, or an `Authorization` header holding a jwt (`authorizationHoldsJwt`).
+ * The server would take those over the signature, and count what it
+ * makes of them against the client: it is not sent.
  */
 export const OTHER_CREDENTIALS =
-  "The request carries other credentials (a `user:password@` in the url, an Authorization header or an api key), which the server takes over the signature";
+  "The request carries other credentials (an Authorization header holding a jwt: the Bearer scheme, or no scheme; or an api key), which the server takes over the signature";
+
+/**
+ * The error of a request to a url with credentials (`user:password@`),
+ * on every request path of the package (`refuseUrlCredentials`).
+ * `fetch` refuses such a url, and its own error repeats the url,
+ * password included, into the `RequestError` UIs show and scripts log.
+ * The credentials of a proxy in front of the server go as an
+ * `Authorization: Basic ...` header, which the server passes over next
+ * to an api key or a signature.
+ */
+export const URL_CREDENTIALS =
+  "The url carries credentials (user:password@), which fetch does not send: leave them out of the url, and pass a proxy's credentials as an `Authorization: Basic ...` header instead, which the server passes over next to an api key or a signature";
+
+/**
+ * Throws a `RequestError` (`status: 1`, `URL_CREDENTIALS`) for a url
+ * with credentials, before `fetch` would throw its own error repeating
+ * them. The url is read as `fetch` resolves it: against the page in a
+ * browser (a protocol relative `//user:password@host` included).
+ */
+export function refuseUrlCredentials(url: string | URL): void {
+  if (urlHasCredentials(url)) {
+    throw requestFailed(new Error(URL_CREDENTIALS));
+  }
+}
+
+/**
+ * Whether an `Authorization` header value holds a jwt as the server
+ * reads it (the Rust client's `signature::authorization_jwt`, which is
+ * the server's own reading): the `Bearer` scheme in any case, or a
+ * value without a scheme (no whitespace, an empty one included).
+ * Another scheme (eg. the `Basic` credentials of a proxy in front of
+ * the server) the server passes over next to a signature. A value with
+ * a character other than a tab or visible ASCII the server refuses
+ * before it looks at the signature, so it counts as one here.
+ */
+function authorizationHoldsJwt(value: string): boolean {
+  if (/[^\t\x20-\x7e]/.test(value)) return true;
+  const trimmed = value.trim();
+  const space = trimmed.search(/[\t\n\f\r ]/);
+  if (space < 0) return true;
+  return trimmed.slice(0, space).toLowerCase() === "bearer";
+}
+
+/**
+ * Whether `headers` carry a credential the server takes over a
+ * signature: an api key (`X-API-KEY`, or its `X-API-SECRET`), or an
+ * `Authorization` holding a jwt (`authorizationHoldsJwt`). Names are
+ * matched in any case, each header on its own.
+ */
+function carriesOtherCredentials(headers: Record<string, string>): boolean {
+  return Object.entries(headers).some(([name, value]) => {
+    const lower = name.toLowerCase();
+    return (
+      lower === "x-api-key" ||
+      lower === "x-api-secret" ||
+      (lower === "authorization" && authorizationHoldsJwt(value))
+    );
+  });
+}
 
 /**
  * Send a request signed with a signing key (`sign`, see
@@ -285,15 +349,21 @@ export const OTHER_CREDENTIALS =
  * which it finds out before anything else and counts against nobody.
  * Then the request goes out once more, signed anew, over a connection
  * opened before it is signed: an unsigned `HEAD` to the url opens it,
- * which carries no credentials, and `init.signal` stops like the
- * request. Only once: any other answer, a second refusal included, is
- * the result.
+ * which carries no credential of the server (at most the `Basic`
+ * header of a proxy, below), and `init.signal` stops like the request.
+ * Only once: any other answer, a second refusal included, is the
+ * result.
  *
  * A signed request follows no redirect (`redirect: "error"`) and
  * carries no cookies (`credentials: "omit"`), unless `init` sets
- * either. Other credentials in it (an `Authorization` header, an api
- * key, a `user:password@` in the url) are refused
- * (`OTHER_CREDENTIALS`): the server takes them over the signature.
+ * either. The credentials the server takes over the signature are
+ * refused (`OTHER_CREDENTIALS`): an api key, and an `Authorization`
+ * holding a jwt (the `Bearer` scheme, or no scheme), in `init` or among
+ * the headers of the signer. An `Authorization` of another scheme is
+ * sent along: behind a proxy doing basic auth, pass its credentials as
+ * `Authorization: Basic ...`, which the server passes over next to the
+ * signature. A url with credentials (`user:password@`) is refused,
+ * naming that header: `fetch` does not send one.
  */
 export async function fetchSignedResponse(
   input: string | URL,
@@ -322,12 +392,8 @@ export async function fetchSignedResponse(
   } catch (error) {
     throw requestFailed(error);
   }
-  if (
-    urlHasCredentials(url) ||
-    "authorization" in headers ||
-    "x-api-key" in headers ||
-    "x-api-secret" in headers
-  ) {
+  refuseUrlCredentials(url);
+  if (carriesOtherCredentials(headers)) {
     throw requestFailed(new Error(OTHER_CREDENTIALS));
   }
   const attempt = async (): Promise<Response> => {
@@ -336,6 +402,11 @@ export async function fetchSignedResponse(
       signed = await sign({ method, url, body });
     } catch (error) {
       throw requestFailed(error);
+    }
+    // The signer's own headers (`requestSigner`'s `headers`) are sent
+    // too.
+    if (carriesOtherCredentials(signed)) {
+      throw requestFailed(new Error(OTHER_CREDENTIALS));
     }
     try {
       return await fetch(url, {
@@ -359,6 +430,12 @@ export async function fetchSignedResponse(
     try {
       const warm = await fetch(url, {
         method: "HEAD",
+        // A proxy doing basic auth lets it through to open the
+        // connection the request takes.
+        headers:
+          headers.authorization !== undefined
+            ? { authorization: headers.authorization }
+            : undefined,
         redirect: "error",
         credentials: init.credentials ?? "omit",
         signal: init.signal,
@@ -496,14 +573,24 @@ function sentMethod(method: string | undefined): string {
     : given;
 }
 
-/** Whether the url carries credentials (`user:password@`). */
-function urlHasCredentials(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return Boolean(parsed.username || parsed.password);
-  } catch {
-    return false;
+/**
+ * Whether the url carries credentials (`user:password@`), read as
+ * `fetch` resolves it: against the page in a browser, so a protocol
+ * relative `//user:password@host` counts too; outside one against any
+ * origin, for the same reason.
+ */
+export function urlHasCredentials(url: string | URL): boolean {
+  const page =
+    typeof location !== "undefined" ? String(location.href ?? "") : "";
+  for (const base of [undefined, page, "http://localhost/"]) {
+    try {
+      const parsed = new URL(url, base || undefined);
+      return Boolean(parsed.username || parsed.password);
+    } catch {
+      // Relative, or the base isn't a url: the next one.
+    }
   }
+  return false;
 }
 
 /**

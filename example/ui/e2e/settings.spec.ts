@@ -1,9 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
+  clickSwitch,
   expectLoggedInAs,
   logIn,
   logOut,
   notification,
+  setSwitch,
   signUp,
   uniqueName,
 } from "./helpers";
@@ -34,13 +36,13 @@ test("admin enables and disables users", async ({ page, browser }) => {
   // The switch reflects the server state, which changes after the write.
   const enabled = row.getByRole("switch", { name: `${username} enabled` });
   await expect(enabled).toBeChecked();
-  await enabled.click({ force: true });
+  await clickSwitch(enabled);
   await expect(enabled).not.toBeChecked();
 
   await userPage.reload();
   await expect(userPage.getByText("User not enabled")).toBeVisible();
 
-  await enabled.click({ force: true });
+  await clickSwitch(enabled);
   await expect(enabled).toBeChecked();
   await userPage.reload();
   await expectLoggedInAs(userPage, username);
@@ -82,9 +84,10 @@ test("admin adds a login provider, which users can use to log in", async ({
   await page
     .getByRole("textbox", { name: "Client Secret" })
     .fill("example-client-secret");
-  await page
-    .getByRole("switch", { name: "Enabled", exact: true })
-    .check({ force: true });
+  await setSwitch(
+    page.getByRole("switch", { name: "Enabled", exact: true }),
+    true,
+  );
   await saveConfig(page);
   await expect(notification(page, "Saved login provider.")).toBeVisible();
 
@@ -138,9 +141,10 @@ test("admin adds a workload identity issuer, a job exchanges its token", async (
   await expect(page).toHaveURL(/\/trusted-issuers\/[^/]+$/);
   const issuerUrl = page.url();
 
-  await page
-    .getByRole("switch", { name: "Enabled", exact: true })
-    .check({ force: true });
+  await setSwitch(
+    page.getByRole("switch", { name: "Enabled", exact: true }),
+    true,
+  );
   await page.getByRole("button", { name: "Add rule" }).click();
   await page.getByRole("textbox", { name: "Rule Name" }).fill("Deploy");
   await page.getByRole("textbox", { name: "Claim", exact: true }).fill("repository_id");

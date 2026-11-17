@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 import * as OTPAuth from "otpauth";
 
 export const PASSWORD = "correct-horse-battery";
@@ -32,6 +32,39 @@ export async function logOut(page: Page) {
 
 export async function expectLoggedInAs(page: Page, username: string) {
   await expect(page.getByTestId("current-user")).toHaveText(username);
+}
+
+/**
+ * Sets a Mantine switch. The input of a switch is invisible (its
+ * track is drawn over it), so the click is forced, and a forced click
+ * does not check what lies at its point: when the input sits under
+ * the fixed header, the header is clicked and the switch stays as it
+ * was. The app keeps its scroll position across a route change, so
+ * where a switch sits depends on how long the pages before have grown
+ * in this run (the settings page gets a row for each provider the
+ * tests add). So the switch is first brought to the middle of the
+ * viewport, at once: the page scrolls smoothly by default, and the
+ * click would not wait for that.
+ */
+export async function setSwitch(toggle: Locator, checked: boolean) {
+  await toMiddle(toggle);
+  await toggle.setChecked(checked, { force: true });
+}
+
+/**
+ * Clicks a switch which shows the state of the server: it changes
+ * when the write is answered, so the caller waits for the new state
+ * (see [setSwitch] for the scroll).
+ */
+export async function clickSwitch(toggle: Locator) {
+  await toMiddle(toggle);
+  await toggle.click({ force: true });
+}
+
+async function toMiddle(toggle: Locator) {
+  await toggle.evaluate((input) =>
+    input.scrollIntoView({ block: "center", behavior: "instant" }),
+  );
 }
 
 /** The error notification mogh_ui / the app show for failed requests. */

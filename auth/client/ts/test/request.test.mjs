@@ -583,3 +583,94 @@ describe("redirects", () => {
     assert.equal(request.body, '{"password":"p"}');
   });
 });
+
+describe("a url with credentials", () => {
+  // `fetch` refuses such a url, and its TypeError repeats it, password
+  // included (node: "Request cannot be constructed from a URL that
+  // includes credentials: https://user:pw@..."), into the error UIs
+  // show and scripts log. Every path refuses it first, repeating
+  // neither the password nor the user name.
+  const secret = ["alice-proxy", "hunter2"];
+  const urls = [
+    "https://alice-proxy:hunter2@app.example/read/ListNotes",
+    "https://alice-proxy@app.example/read/ListNotes",
+    "https://:hunter2@app.example/read/ListNotes",
+    // Protocol relative, resolved like fetch does.
+    "//alice-proxy:hunter2@app.example/read/ListNotes",
+  ];
+  const init = {
+    method: "POST",
+    body: "{}",
+    headers: { "content-type": "application/json" },
+  };
+  const sign = requestSigner(signingKeys("x".repeat(32)));
+
+  /** The request functions of the package, sending to `url`. */
+  const paths = (url) => [
+    ["fetchJson", () => fetchJson(url, init)],
+    ["fetchResponse", () => fetchResponse(new URL(url, "https://x/"), init)],
+    [
+      "fetchJsonWithCredential, jwt",
+      () => fetchJsonWithCredential(url, init, "jwt"),
+    ],
+    [
+      "fetchJsonWithCredential, api key",
+      () => fetchJsonWithCredential(url, init, { key: "K", secret: "S" }),
+    ],
+    [
+      "fetchResponseWithCredential, none",
+      () => fetchResponseWithCredential(url, init, undefined),
+    ],
+    [
+      "fetchJsonWithCredential, signing key",
+      () => fetchJsonWithCredential(url, init, { sign }),
+    ],
+    [
+      "MoghAuthClient login",
+      () =>
+        MoghAuthClient(url.replace("/read/ListNotes", "/auth")).login(
+          "GetLoginOptions",
+          {},
+        ),
+    ],
+    [
+      "MoghAuthClient manage",
+      () =>
+        MoghAuthClient(url.replace("/read/ListNotes", "/auth"), "jwt").manage(
+          "GetUserId",
+          {},
+        ),
+    ],
+    [
+      "tokenExchange",
+      () =>
+        MoghAuthClient(
+          url.replace("/read/ListNotes", "/auth"),
+        ).tokenExchange("subject-token"),
+    ],
+  ];
+
+  it("is refused before anything is sent, on every path", async () => {
+    mockFetch(() => Response.json({}));
+    for (const url of urls) {
+      for (const [name, send] of paths(url)) {
+        const e = await rejection(send());
+        assert.equal(e.status, 1, `${name} ${url}`);
+        const shown = JSON.stringify(e.result) + String(e.error?.message);
+        assert.match(shown, /carries credentials/, `${name} ${url}`);
+        assert.match(shown, /Authorization: Basic/, `${name} ${url}`);
+        for (const part of secret) {
+          assert.ok(!shown.includes(part), `${name} ${url}: ${shown}`);
+        }
+      }
+    }
+    assert.equal(sent.length, 0);
+  });
+
+  it("why: fetch's own error repeats the password", async () => {
+    globalThis.fetch = realFetch;
+    const e = await rejection(fetch(urls[0], init));
+    assert.ok(e instanceof TypeError);
+    assert.ok(String(e.message).includes("hunter2"), e.message);
+  });
+});

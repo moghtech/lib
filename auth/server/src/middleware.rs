@@ -24,7 +24,7 @@ use mogh_auth_client::{
     API_HOST_HEADER, API_NONCE_HEADER, API_PUBLIC_KEY_HEADER,
     API_SIGNATURE_HEADER, API_TIMESTAMP_HEADER,
     SIGNED_AT_ANOTHER_TIME, SIGNED_FOR_ANOTHER_HOST, SignedRequest,
-    url_host, valid_host, valid_nonce,
+    authorization_jwt, url_host, valid_host, valid_nonce,
   },
 };
 use mogh_error::{AddStatusCode, AddStatusCodeError as _};
@@ -518,28 +518,24 @@ enum Authorization {
 }
 
 /// Reads the AUTHORIZATION header, UNAUTHORIZED when it is not UTF-8.
+/// The jwt in it is what mogh_auth_client's [authorization_jwt]
+/// reads, the function the clients refuse to sign a request next to
+/// such a header with: what the server passes over next to a
+/// signature, they send.
 fn read_authorization(
   headers: &HeaderMap,
 ) -> mogh_error::Result<Authorization> {
   let Some(authorization) = headers.get(AUTHORIZATION) else {
     return Ok(Authorization::None);
   };
-  let maybe_bearer = authorization
+  let authorization = authorization
     .to_str()
     .context("AUTHORIZATION is not valid UTF-8")
-    .status_code(StatusCode::UNAUTHORIZED)?
-    .trim();
-  let jwt = match maybe_bearer
-    .split_once(|c: char| c.is_ascii_whitespace())
-  {
-    Some((scheme, jwt)) if scheme.eq_ignore_ascii_case("bearer") => {
-      jwt.trim_start()
-    }
-    // A jwt has no whitespace: this is another scheme.
-    Some(_) => return Ok(Authorization::OtherScheme),
-    None => maybe_bearer,
-  };
-  Ok(Authorization::Jwt(jwt.to_string()))
+    .status_code(StatusCode::UNAUTHORIZED)?;
+  Ok(match authorization_jwt(authorization) {
+    Some(jwt) => Authorization::Jwt(jwt.to_string()),
+    None => Authorization::OtherScheme,
+  })
 }
 
 /// The refusal of an AUTHORIZATION of another scheme than `Bearer`,
@@ -992,7 +988,26 @@ fn signed_request_origins<I: AuthImpl>(
         .iter()
         .map(|origin| ("extra_hosts", origin.as_str())),
     )
-    .map(|(config, origin)| (config, origin, url_host(origin)))
+    .map(|(config, origin)| (config, origin, origin_host(origin)))
+}
+
+/// The host a client signs for to reach `origin` ([url_host]). The
+/// address of a client may carry credentials for a proxy in front of
+/// the server (`url_host` leaves them out), an origin the app is
+/// configured with does not: one with `user:password@` is a
+/// misconfiguration, refused as before.
+fn origin_host(origin: &str) -> anyhow::Result<String> {
+  let host = url_host(origin)?;
+  let credentials =
+    reqwest::Url::parse(origin.trim()).is_ok_and(|url| {
+      !url.username().is_empty() || url.password().is_some()
+    });
+  if credentials {
+    return Err(anyhow!(
+      "The url carries credentials (user:password@), expected eg. https://example.com"
+    ));
+  }
+  Ok(host)
 }
 
 /// The X-API-TIMESTAMP of a signed request, once it is within

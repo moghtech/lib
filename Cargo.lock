@@ -2550,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_client"
-version = "11.0.0"
+version = "11.1.0"
 dependencies = [
  "anyhow",
  "mogh_error",
@@ -2571,7 +2571,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_server"
-version = "11.0.0"
+version = "11.1.0"
 dependencies = [
  "anyhow",
  "axum",

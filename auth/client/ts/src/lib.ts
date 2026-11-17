@@ -1,5 +1,6 @@
 import { credentialToJSON } from "./passkey.js";
 import {
+  URL_CREDENTIALS,
   bodySnippet,
   describeError,
   errorBody,
@@ -7,6 +8,7 @@ import {
   readBody,
   statusMessage,
   traceList,
+  urlHasCredentials,
   type ClientCredential,
 } from "./request.js";
 import type { LoginResponses, ManageResponses } from "./responses.js";
@@ -301,6 +303,8 @@ export function MoghAuthClient(url: string, credential?: ClientCredential) {
    * is reduced to its string lines, as `RequestError.result` declares.
    * A redirect isn't followed (it would send the subject token on to
    * wherever it points): it rejects with `status: 1`, `server_error`.
+   * So does a client url with credentials (`user:password@`), before
+   * anything is sent, without repeating them.
    *
    * @param subjectToken The token issued by the provider.
    * @param subjectTokenType `TOKEN_EXCHANGE.ID_TOKEN` (default) or `TOKEN_EXCHANGE.JWT`.
@@ -311,6 +315,21 @@ export function MoghAuthClient(url: string, credential?: ClientCredential) {
       | typeof TOKEN_EXCHANGE.ID_TOKEN
       | typeof TOKEN_EXCHANGE.JWT = TOKEN_EXCHANGE.ID_TOKEN
   ): Promise<TokenExchangeResponse> => {
+    // Before `fetch`, whose error would repeat the url's credentials.
+    if (urlHasCredentials(`${url}/token`)) {
+      const error = new Error(URL_CREDENTIALS);
+      throw {
+        status: 1,
+        result: {
+          error: "server_error",
+          error_description: [
+            "Request failed with error",
+            ...describeError(error),
+          ].join(" | "),
+        } satisfies TokenExchangeError,
+        error,
+      };
+    }
     let response: Response;
     try {
       // The RFC requires a form, not json.

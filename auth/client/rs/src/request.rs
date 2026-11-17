@@ -268,9 +268,11 @@ where
 /// nobody. Then the request goes out once more, signed anew (a new
 /// timestamp and nonce, the same body), over a connection opened
 /// before it is signed: an unsigned `HEAD` to the url opens it, which
-/// carries no credentials, so the server refuses (or answers) it
-/// without counting it against the client. Only once: any other
-/// answer, a second refusal included, is the result.
+/// carries no credential of the server (at most the `Basic` one of a
+/// `user:password@` in the url, which the server passes over), so the
+/// server refuses (or answers) it without counting it against the
+/// client. Only once: any other answer, a second refusal included, is
+/// the result.
 #[cfg(feature = "pki")]
 pub async fn signed_post<T: DeserializeOwned>(
   reqwest: &reqwest::Client,
@@ -325,6 +327,14 @@ async fn send_signed(
 ///   server strips a prefix of the path: the path the server
 ///   receives.
 ///
+/// Behind a proxy doing basic auth, put its credentials in the url
+/// (`https://user:password@example.com`, reqwest sends them as
+/// `Authorization: Basic`) or in [headers][Self::headers]: the server
+/// passes an `Authorization` of another scheme than `Bearer` over
+/// next to a signature
+/// ([authorization_jwt][crate::signature::authorization_jwt]). They
+/// are no part of what is signed.
+///
 /// It has no Debug: the body may hold secrets.
 #[cfg(feature = "pki")]
 pub struct SignedPost<'a> {
@@ -343,8 +353,9 @@ pub struct SignedPost<'a> {
   pub keys: &'a mogh_pki::EncodedKeyPair,
   /// The JSON body, sent and signed exactly as it is.
   pub body: Vec<u8>,
-  /// Headers sent along, unsigned (eg. a trace context). Credentials
-  /// are refused: the server takes them over the signature.
+  /// Headers sent along, unsigned (eg. a trace context, or a proxy's
+  /// `Authorization: Basic`). The credentials the server takes over
+  /// the signature are refused (`carries_other_credentials`).
   pub headers: reqwest::header::HeaderMap,
 }
 
@@ -352,13 +363,38 @@ pub struct SignedPost<'a> {
 /// The server would take those over the signature, and count what
 /// it makes of them against the client: it is not sent.
 #[cfg(feature = "pki")]
-const OTHER_CREDENTIALS: &str = "The request carries other credentials (a `user:password@` in the url, an Authorization header or an api key), which the server takes over the signature";
+const OTHER_CREDENTIALS: &str = "The request carries other credentials (an Authorization header holding a jwt: the Bearer scheme, or no scheme; or an api key), which the server takes over the signature";
+
+/// Whether `headers` carry a credential the server takes over a
+/// signature: an api key (`X-API-KEY`, or its `X-API-SECRET`), or an
+/// `Authorization` holding a jwt as the server reads it
+/// ([authorization_jwt][crate::signature::authorization_jwt]). An
+/// `Authorization` of another scheme (eg. `Basic`, for a proxy in
+/// front of the server) is passed over by the server, and here. One
+/// which isn't visible ASCII the server refuses before the
+/// signature, so it is refused here too.
+#[cfg(feature = "pki")]
+fn carries_other_credentials(
+  headers: &reqwest::header::HeaderMap,
+) -> bool {
+  headers.contains_key("x-api-key")
+    || headers.contains_key("x-api-secret")
+    || headers.get_all(reqwest::header::AUTHORIZATION).iter().any(
+      |value| {
+        value.to_str().map_or(true, |value| {
+          crate::signature::authorization_jwt(value).is_some()
+        })
+      },
+    )
+}
 
 #[cfg(feature = "pki")]
 impl<'a> SignedPost<'a> {
   /// `body` as JSON, to `url`, signed with `keys` for the host, path
-  /// and query of the url. A url which carries credentials
-  /// (`user:password@`) is an error, which doesn't repeat them.
+  /// and query of the url. Credentials in the url (`user:password@`)
+  /// are no part of what is signed: reqwest sends them as an
+  /// `Authorization: Basic`, which the server passes over. No error
+  /// repeats them.
   pub fn new(
     url: &str,
     keys: &'a mogh_pki::EncodedKeyPair,
@@ -366,9 +402,6 @@ impl<'a> SignedPost<'a> {
   ) -> anyhow::Result<Self> {
     let url = reqwest::Url::parse(url.trim())
       .context("Invalid url, expected eg. https://example.com")?;
-    if has_credentials(&url) {
-      anyhow::bail!(OTHER_CREDENTIALS);
-    }
     Ok(SignedPost {
       host: crate::signature::url_origin_host(&url)?,
       path_and_query: crate::signature::url_path_and_query(&url),
@@ -385,14 +418,8 @@ impl<'a> SignedPost<'a> {
   fn attempt_headers(
     &self,
   ) -> anyhow::Result<reqwest::header::HeaderMap> {
-    use reqwest::header::{
-      AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue,
-    };
-    if has_credentials(&self.url)
-      || self.headers.contains_key(AUTHORIZATION)
-      || self.headers.contains_key("x-api-key")
-      || self.headers.contains_key("x-api-secret")
-    {
+    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+    if carries_other_credentials(&self.headers) {
       anyhow::bail!(OTHER_CREDENTIALS);
     }
     let mut headers = HeaderMap::new();
@@ -417,13 +444,6 @@ impl<'a> SignedPost<'a> {
     }
     Ok(headers)
   }
-}
-
-/// Whether the url carries credentials (`user:password@`), which
-/// reqwest sends as Authorization.
-#[cfg(feature = "pki")]
-fn has_credentials(url: &reqwest::Url) -> bool {
-  !url.username().is_empty() || url.password().is_some()
 }
 
 /// The request functions for a [reqwest::blocking::Client],
@@ -1388,20 +1408,86 @@ mod tests {
       &body,
     );
 
-    // Other credentials: nothing is sent.
+    // Behind a proxy doing basic auth, its credentials go along: from
+    // the url (reqwest sends them as `Authorization: Basic`) or as a
+    // header. The server passes them over next to the signature, which
+    // covers neither them nor the url's `user:password@`.
     let (address, received) = signing_server(0);
+    let host = address.strip_prefix("http://").unwrap();
+    let basic = "Basic dXNlcjpodW50ZXIy";
     let with_user = address.replacen("://", "://user:hunter2@", 1);
-    let Err(err) = SignedPost::new(&with_user, &keys, &body) else {
-      panic!("A url with credentials was taken");
-    };
-    let msg = format!("{err:#}");
-    assert!(msg.contains("carries other credentials"), "{msg}");
-    assert!(!msg.contains("hunter2"), "{msg}");
-    for header in ["authorization", "x-api-key", "x-api-secret"] {
+    let in_url =
+      SignedPost::new(&format!("{with_user}/read"), &keys, &body)
+        .unwrap();
+    assert_eq!(in_url.host, host);
+    assert_eq!(in_url.path_and_query, "/read");
+    let mut in_header =
+      SignedPost::new(&format!("{address}/read"), &keys, &body)
+        .unwrap();
+    in_header
+      .headers
+      .insert("authorization", HeaderValue::from_static(basic));
+    for post in [in_url, in_header] {
+      let res: GetUserIdResponse =
+        signed_post(&client, &post, MAX_SUCCESS_BODY_BYTES)
+          .await
+          .unwrap();
+      assert_eq!(res.id, "user-id");
+    }
+    let received = received.lock().unwrap().clone();
+    for request in &received {
+      assert_eq!(request.header("authorization"), Some(basic));
+    }
+    assert_signed(
+      &received,
+      &["POST", "POST"],
+      &keys,
+      host,
+      "/read",
+      &body,
+    );
+
+    // Other credentials, which the server takes over the signature:
+    // nothing is sent. A jwt is an Authorization of the Bearer scheme
+    // (in any case) or of none at all, as the server reads it, and
+    // one which isn't visible ASCII the server refuses first.
+    let (address, received) = signing_server(0);
+    let with_header = |name: &'static str, value: HeaderValue| {
       let mut post = SignedPost::new(&address, &keys, &body).unwrap();
+      post.headers.insert(name, value);
       post
-        .headers
-        .insert(header, HeaderValue::from_static("S_s3cr3t_S"));
+    };
+    let mut refused = vec![
+      with_header(
+        "x-api-key",
+        HeaderValue::from_static("K_s3cr3t_K"),
+      ),
+      with_header(
+        "x-api-secret",
+        HeaderValue::from_static("S_s3cr3t_S"),
+      ),
+      with_header(
+        "authorization",
+        HeaderValue::from_bytes(b"Basic s3cr3t\xff").unwrap(),
+      ),
+    ];
+    for jwt in
+      ["Bearer s3cr3t", "bearer s3cr3t", "s3cr3t", "Basic", ""]
+    {
+      refused.push(with_header(
+        "authorization",
+        HeaderValue::from_static(jwt),
+      ));
+    }
+    // Next to a proxy's Basic header too.
+    let mut both =
+      with_header("authorization", HeaderValue::from_static(basic));
+    both.headers.append(
+      "authorization",
+      HeaderValue::from_static("Bearer s3cr3t"),
+    );
+    refused.push(both);
+    for post in refused {
       let err = signed_post::<GetUserIdResponse>(
         &client,
         &post,

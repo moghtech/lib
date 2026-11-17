@@ -293,20 +293,71 @@ async fn signing_key_signs_requests() {
     .await;
   assert_eq!(status_of(res), StatusCode::UNAUTHORIZED);
 
+  // Behind a proxy doing basic auth which passes its Authorization on,
+  // the signature authenticates: the client sends the proxy's
+  // credentials along (a `user:password@` in the address, which
+  // reqwest sends as `Authorization: Basic`, or the header itself)
+  // and the server passes them over. The server sees here what such a
+  // proxy forwards. Through the client's own requests, and one built
+  // by hand (`authenticate`).
+  let mut in_address = signing_key_client(&admin, &private_key);
+  in_address.address =
+    app.address.replacen("://", "://user:hunter2@", 1);
+  let mut in_header = signing_key_client(&admin, &private_key);
+  in_header.headers.insert(
+    "authorization",
+    "Basic dXNlcjpodW50ZXIy".parse().unwrap(),
+  );
+  for client in [&in_address, &in_header] {
+    let info = client.read(GetRequestInfo {}).await.unwrap();
+    assert_eq!(info.auth_method, AuthMethod::PublicKey);
+    assert_eq!(info.user_id, get_user(&admin).await.id);
+    client
+      .manage(example_client::auth::api::manage::GetUserId {})
+      .await
+      .unwrap();
+    let res = client
+      .authenticate(
+        client
+          .reqwest
+          .post(format!("{}/read/GetRequestInfo", client.address))
+          .json(&json!({})),
+      )
+      .unwrap()
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+  }
+
   // A request which carries other credentials is not signed: the
   // server would take those over the signature, and count what it
-  // makes of them against the client. An address with a
-  // `user:password@` is such a request (reqwest sends that as
-  // Authorization), and so is one with an api key in its headers.
-  let mut with_credentials = signing_key_client(&admin, &private_key);
-  with_credentials.address =
-    app.address.replacen("://", "://user:hunter2@", 1);
-  let mut with_api_key = signing_key_client(&admin, &private_key);
-  with_api_key
-    .headers
-    .insert("x-api-key", "K_some_key_K".parse().unwrap());
-  for client in [with_credentials, with_api_key] {
+  // makes of them against the client. That is an api key in its
+  // headers, and an Authorization holding a jwt as the server reads
+  // it: the Bearer scheme, or no scheme at all.
+  let with_header = |name: &'static str, value: &str| {
+    let mut client = signing_key_client(&admin, &private_key);
+    client.headers.insert(name, value.parse().unwrap());
+    client
+  };
+  for client in [
+    with_header("x-api-key", "K_some_key_K"),
+    with_header("authorization", "Bearer hunter2"),
+    with_header("authorization", "hunter2"),
+  ] {
     let err = client.read(GetRequestInfo {}).await.unwrap_err();
+    let err = format!("{err:#}");
+    assert!(err.contains("carries other credentials"), "{err}");
+    assert!(!err.contains("hunter2"), "{err}");
+    let err = client
+      .authenticate(
+        client
+          .reqwest
+          .post(format!("{}/read/GetRequestInfo", client.address))
+          .json(&json!({})),
+      )
+      .err()
+      .unwrap();
     let err = format!("{err:#}");
     assert!(err.contains("carries other credentials"), "{err}");
     assert!(!err.contains("hunter2"), "{err}");

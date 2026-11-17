@@ -61,8 +61,8 @@ RS and NEL (Python's `str.splitlines`, which django-environ reads with), U+2028 
 dotenv). Raw inside a value, the rest of the value would be an entry of its own to them (`x<U+2028>DATABASE_URL=...`):
 `serialize_env_file` writes a value holding one double quoted, the character as its `\uXXXX`
 escape (`\u2028`), so every parser reads the value on its line, and this parser reads it back
-unchanged (another parser reads the escape by its own grammar: python-dotenv decodes it, Node's
-dotenv keeps the six characters). Descriptions turn them into line breaks of their comment lines
+unchanged (another parser reads the escape by its own grammar: python-dotenv and Node's dotenv
+keep the six characters). Descriptions turn them into line breaks of their comment lines
 (`normalize_env_description`).
 
 ```rust

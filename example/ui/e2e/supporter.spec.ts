@@ -5,6 +5,7 @@ import {
   expectLoggedInAs,
   logIn,
   notification,
+  setSwitch,
   signUp,
   uniqueName,
 } from "./helpers";
@@ -234,7 +235,7 @@ test("an icon which includes the name shows alone", async ({ page }) => {
 
   await expect(hide).not.toBeChecked();
   await expect(preview).toHaveText("Acme Corp");
-  await hide.check({ force: true });
+  await setSwitch(hide, true);
   await expect(preview).toHaveText("");
   await saveBranding(page);
   if (covered) {
@@ -268,7 +269,7 @@ test("an icon which includes the name shows alone", async ({ page }) => {
   // As it was, for the next tests: the icon with the name.
   await icon.fill("/mogh-512x512.png");
   await expect(hide).toBeEnabled();
-  await hide.uncheck({ force: true });
+  await setSwitch(hide, false);
   await saveBranding(page);
   if (covered) {
     await expect(badge).toHaveText("Acme Corp");
@@ -327,7 +328,7 @@ test("the name shows in capitals when the branding says so", async ({
     "none",
   );
 
-  await caps.check({ force: true });
+  await setSwitch(caps, true);
   await expect(preview.getByText("Acme Corp")).toHaveCSS(
     "text-transform",
     "uppercase",
@@ -519,9 +520,10 @@ test("an uploaded icon and the name take the place of the home button", async ({
   await expect(uploaded).toBeDisabled();
   await expect(uploaded).toHaveValue("logo.png (png, 1 KB)");
 
-  await branding
-    .getByRole("switch", { name: "Use as the home button" })
-    .check({ force: true });
+  await setSwitch(
+    branding.getByRole("switch", { name: "Use as the home button" }),
+    true,
+  );
   // So does the confirm dialog, which never shows the image's bytes.
   await brandingSave(page).first().click();
   await expect(confirmDialog(page)).toContainText("logo.png (png, 1 KB)");
@@ -559,12 +561,12 @@ test("an uploaded icon and the name take the place of the home button", async ({
 
   // An icon which includes the name is the whole home button.
   const hide = branding.getByRole("switch", { name: "Hide the name" });
-  await hide.check({ force: true });
+  await setSwitch(hide, true);
   await saveBranding(page);
   await expect(home).toHaveText("");
   await expect(home).toHaveAttribute("aria-label", "Acme Corp");
   await expect(home.locator("img")).toHaveAttribute("alt", "Acme Corp");
-  await hide.uncheck({ force: true });
+  await setSwitch(hide, false);
   await saveBranding(page);
   await expect(home).toHaveText("Acme Corp");
 

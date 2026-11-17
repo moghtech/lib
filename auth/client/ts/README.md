@@ -95,6 +95,12 @@ const notes = await MoghAuth.fetchJson<Note[]>(`${url}/read/ListNotes`, {
   of a `200`, or the rejection), `responseError(response)` (what a status
   other than `200` rejects with) and `requestFailed(error)` (what a
   request which got no response rejects with).
+- A url with credentials (`https://user:password@...`) is refused by
+  every request of the package before `fetch` (`status: 1`), with an
+  error which doesn't repeat them: `fetch` refuses such a url, and its
+  own error repeats it, password included. Pass a proxy's credentials as
+  an `Authorization: Basic ...` header instead (next to an api key or a
+  signature, the server passes it over).
 
 ### Redirects of requests
 
@@ -172,9 +178,13 @@ const auth = MoghAuthClient(`${url}/auth`, { sign });
   connection took longer than its tolerance, a second by default), the
   request goes out once more, signed anew, over a connection an
   unsigned `HEAD` opened first (`init.signal` stops it too). A request
-  carrying other credentials (`Authorization`, an api key,
-  `user:password@` in the url) is refused (`OTHER_CREDENTIALS`), the
-  server would take them over the signature.
+  carrying a credential the server takes over the signature is refused
+  (`OTHER_CREDENTIALS`): an api key, or an `Authorization` holding a jwt
+  (the `Bearer` scheme, or no scheme). An `Authorization` of another
+  scheme is sent along: behind a proxy doing basic auth, pass its
+  credentials as `Authorization: Basic ...` (a `user:password@` in the
+  url is refused, `fetch` does not send one), and the server passes the
+  header over next to the signature.
   Failures reject with a `RequestError` like `fetchJson`: a key which
   doesn't parse rejects with `status: 1` and the reason as the `trace`,
   never repeating the key.

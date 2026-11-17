@@ -101,6 +101,34 @@ pub const SIGNED_FOR_ANOTHER_HOST: &str =
 pub const SIGNED_AT_ANOTHER_TIME: &str =
   "Signed at a time too far from the clock of this server";
 
+/// The jwt an `Authorization` header value holds, as a server reads
+/// it: what follows the `Bearer` scheme (matched in any case, RFC
+/// 7235), or the whole value when it has no scheme (no whitespace, an
+/// empty value included). `None` for another scheme, eg. the `Basic`
+/// credentials of a proxy in front of the server, which are no
+/// credential of the server.
+///
+/// A server takes a jwt over an api key and a signature, and passes
+/// another scheme over for them: behind a proxy doing basic auth, a
+/// signed request authenticates with its signature. So a client
+/// signing a request (`request::SignedPost`) refuses only an
+/// `Authorization` holding a jwt, and sends the `user:password@` of
+/// its url (reqwest's `Basic` header) along.
+///
+/// The value is read trimmed, as a server receives it. The server's
+/// own reading is this function: the two can't drift apart.
+pub fn authorization_jwt(value: &str) -> Option<&str> {
+  let value = value.trim();
+  match value.split_once(|c: char| c.is_ascii_whitespace()) {
+    Some((scheme, jwt)) if scheme.eq_ignore_ascii_case("bearer") => {
+      Some(jwt.trim_start())
+    }
+    // A jwt has no whitespace: this is another scheme.
+    Some(_) => None,
+    None => Some(value),
+  }
+}
+
 /// The sha256 of a request body as the signature covers it: lowercase
 /// hex. An empty body is the sha256 of empty input.
 pub fn body_sha256(body: &[u8]) -> String {
@@ -222,9 +250,11 @@ impl SignedRequest<'_> {
 /// the url standard, which spells some anew: a name outside of ASCII
 /// in its punycode form, an IPv4 or IPv6 address in its usual one.
 ///
-/// A url with credentials (`https://user:password@example.com`) is
-/// an error, which doesn't repeat them: a client sends those as
-/// `Authorization`, which a server takes over the signature.
+/// Credentials in the url (`https://user:password@example.com`) are
+/// no part of the host: reqwest sends them as an `Authorization:
+/// Basic` header, which a server passes over next to a signature
+/// ([authorization_jwt]), eg. for a proxy in front of it doing basic
+/// auth. No error repeats them.
 pub fn url_host(url: &str) -> anyhow::Result<String> {
   let url = reqwest::Url::parse(url.trim())
     .context("Invalid url, expected eg. https://example.com")?;
@@ -240,11 +270,6 @@ pub(crate) fn url_origin_host(
   if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") {
     anyhow::bail!(
       "The url is not an http(s) url, expected eg. https://example.com"
-    );
-  }
-  if !url.username().is_empty() || url.password().is_some() {
-    anyhow::bail!(
-      "The url carries credentials (user:password@), expected eg. https://example.com"
     );
   }
   let host = url
@@ -704,17 +729,53 @@ mod tests {
     ] {
       assert!(url_host(url).is_err(), "{url}");
     }
-    // Credentials are no part of an address a request is signed for
-    // (a client would send them as Authorization, which a server
-    // takes over the signature), and the error doesn't repeat them.
+    // Credentials are no part of the host a request is signed for:
+    // reqwest sends them as `Authorization: Basic`, which a server
+    // passes over next to a signature.
     for url in [
       "https://user:hunter2@example.com",
       "https://hunter2@example.com",
-      "https://:hunter2@example.com/auth",
+      "https://:hunter2@Example.com/auth",
     ] {
-      let err = format!("{:#}", url_host(url).unwrap_err());
-      assert!(err.contains("carries credentials"), "{url}: {err}");
-      assert!(!err.contains("hunter2"), "{url}: {err}");
+      assert_eq!(url_host(url).unwrap(), "example.com", "{url}");
+    }
+    // Nor does an error repeat them.
+    let err = format!(
+      "{:#}",
+      url_host("ftp://user:hunter2@example.com").unwrap_err()
+    );
+    assert!(!err.contains("hunter2"), "{err}");
+  }
+
+  /// The jwt of an Authorization header, as a server reads it: the
+  /// `Bearer` scheme in any case, or a value without a scheme (an
+  /// empty one, or a scheme name alone, too). Another scheme holds
+  /// none.
+  #[test]
+  fn test_authorization_jwt() {
+    for (value, jwt) in [
+      ("Bearer abc.def.ghi", "abc.def.ghi"),
+      ("bearer abc", "abc"),
+      ("BEARER \t abc", "abc"),
+      ("  Bearer abc  ", "abc"),
+      ("abc.def.ghi", "abc.def.ghi"),
+      (" abc ", "abc"),
+      ("", ""),
+      ("  ", ""),
+      ("Basic", "Basic"),
+      ("Bearer", "Bearer"),
+    ] {
+      assert_eq!(authorization_jwt(value), Some(jwt), "{value:?}");
+    }
+    for value in [
+      "Basic dXNlcjpodW50ZXIy",
+      "basic dXNlcjpodW50ZXIy",
+      "Digest username=\"user\", realm=\"proxy\"",
+      "Negotiate abc",
+      "Basic\tdXNlcjpodW50ZXIy",
+      "Bearers abc",
+    ] {
+      assert_eq!(authorization_jwt(value), None, "{value:?}");
     }
   }
 
@@ -1050,6 +1111,13 @@ mod tests {
       ),
       ("https://example.com:443", "example.com", "/"),
       ("wss://example.com/ws?x=a b", "example.com", "/ws?x=a%20b"),
+      // The credentials of a proxy in front of the server go out as
+      // `Authorization: Basic`, no part of what is signed.
+      (
+        "https://user:hunter2@example.com/read",
+        "example.com",
+        "/read",
+      ),
     ] {
       let url = reqwest::Url::parse(url).unwrap();
       let [
@@ -1085,7 +1153,7 @@ mod tests {
     // No url a signed request is sent to.
     for url in [
       "ftp://example.com/read",
-      "https://user:hunter2@example.com/read",
+      "ftp://user:hunter2@example.com/read",
       "file:///etc/hosts",
     ] {
       let parsed = reqwest::Url::parse(url).unwrap();

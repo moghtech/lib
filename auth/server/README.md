@@ -1061,9 +1061,12 @@ sign the path the server receives: `signed_request_headers` takes the host
 - The host is the lowercase `host[:port]` of the address the client uses,
   without the port when it is the default of the scheme
   (`signature::url_host`): `example.com` for `https://example.com`,
-  `10.0.0.5:9120` for `http://10.0.0.5:9120`. An address with credentials
-  (`https://user:password@example.com`) is refused: a client sends those as
-  `Authorization`, which the server takes over the signature. The server
+  `10.0.0.5:9120` for `http://10.0.0.5:9120`. Credentials in a client's
+  address (`https://user:password@example.com`, for a proxy doing basic auth)
+  are no part of the host: the Rust client sends them as `Authorization:
+  Basic`, which the server passes over next to a signature (the TS client
+  refuses such an address, `fetch` does not send one: it takes the header
+  instead). An origin the server is configured with carries none. The server
   accepts a request signed for `AuthImpl::host` or one of
   `AuthImpl::extra_hosts` (both origins, like `https://example.com`), and no
   other: the same public key can be registered at another server, and a

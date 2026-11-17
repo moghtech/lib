@@ -898,25 +898,103 @@ describe("fetchSignedJson", () => {
     assert.equal(sent.length, 1);
   });
 
+  it("sends the Basic credentials of a proxy along, unsigned", async () => {
+    // Behind a proxy doing basic auth which passes its Authorization on:
+    // the server passes another scheme than Bearer over next to the
+    // signature, which covers neither.
+    const refusal = Response.json(
+      { error: `${SIGNED_AT_ANOTHER_TIME}: 1718000000000`, trace: [] },
+      { status: 401 },
+    );
+    for (const basic of [
+      "Basic dXNlcjpodW50ZXIy",
+      "basic dXNlcjpodW50ZXIy",
+      'Digest username="u"',
+    ]) {
+      mockFetch(
+        refusal.clone(),
+        new Response(null, { status: 200 }),
+        Response.json({ ok: true }),
+      );
+      assert.deepEqual(
+        await fetchSignedJson(
+          "https://example.com/read",
+          { ...init, headers: { ...init.headers, Authorization: basic } },
+          sign,
+        ),
+        { ok: true },
+        basic,
+      );
+      const [first, head, second] = sent;
+      // The warm-up too, so the proxy lets it through to open the
+      // connection.
+      assert.deepEqual(head.init.headers, { authorization: basic });
+      for (const { init: sentInit } of [first, second]) {
+        const { headers } = sentInit;
+        assert.equal(headers.authorization, basic);
+        assert.ok(
+          verifies(
+            VECTOR_PUBLIC,
+            await messageOf(headers, "POST", "/read", VECTOR_BODY),
+            headers[API_SIGNATURE_HEADER],
+          ),
+          basic,
+        );
+      }
+    }
+  });
+
   it("refuses other credentials, a body which isn't bytes, and a key which isn't one, sending nothing", async () => {
     mockFetch();
-    for (const [url, extra] of [
-      ["https://u:p@example.com/read", {}],
-      ["https://example.com/read", { authorization: "jwt" }],
-      ["https://example.com/read", { "X-API-KEY": "k" }],
-      ["https://example.com/read", { "x-api-secret": "s" }],
+    // What the server takes over the signature: an api key, and an
+    // Authorization holding a jwt as it reads it (the Bearer scheme in
+    // any case, or no scheme at all; one which isn't visible ASCII it
+    // refuses first).
+    for (const extra of [
+      { authorization: "jwt" },
+      { Authorization: "Bearer jwt" },
+      { authorization: "bEaReR \t jwt" },
+      { authorization: "" },
+      { authorization: "Basic" },
+      { authorization: "Basic dXNlcjpwä" },
+      { "X-API-KEY": "k" },
+      { "x-api-secret": "s" },
     ]) {
       const e = await rejection(
         fetchSignedJson(
-          url,
+          "https://example.com/read",
           { ...init, headers: { ...init.headers, ...extra } },
           sign,
+        ),
+      );
+      assert.equal(e.status, 1, JSON.stringify(extra));
+      assert.equal(e.result.trace[0], `Error: ${OTHER_CREDENTIALS}`);
+    }
+    // Among the signer's own headers too.
+    for (const headers of [
+      { Authorization: "Bearer jwt" },
+      { "x-api-key": "k" },
+    ]) {
+      const e = await rejection(
+        fetchSignedJson(
+          "https://example.com/read",
+          init,
+          requestSigner(signingKeys(VECTOR_PRIVATE), { headers }),
         ),
       );
       assert.equal(e.status, 1);
       assert.equal(e.result.trace[0], `Error: ${OTHER_CREDENTIALS}`);
     }
+    // `fetch` does not send a url with credentials (its error would
+    // repeat them): the refusal names the header to pass them in.
     let e = await rejection(
+      fetchSignedJson("https://u:hunter2@example.com/read", init, sign),
+    );
+    assert.equal(e.status, 1);
+    assert.match(e.result.trace[0], /carries credentials/);
+    assert.match(e.result.trace[0], /Authorization: Basic/);
+    assert.ok(!e.result.trace[0].includes("hunter2"));
+    e = await rejection(
       fetchSignedJson(
         "https://example.com/read",
         { ...init, body: new FormData() },
