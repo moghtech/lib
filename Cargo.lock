@@ -1464,7 +1464,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strum",
- "typeshare",
+ "typeshare-annotation",
 ]
 
 [[package]]
@@ -1517,7 +1517,7 @@ dependencies = [
  "tokio",
  "totp-rs",
  "tracing",
- "typeshare",
+ "typeshare-annotation",
  "uuid",
 ]
 
@@ -2559,7 +2559,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_client"
-version = "11.1.0"
+version = "11.1.1"
 dependencies = [
  "anyhow",
  "mogh_error",
@@ -2572,7 +2572,7 @@ dependencies = [
  "sha2 0.11.1",
  "strum",
  "tokio",
- "typeshare",
+ "typeshare-annotation",
  "utoipa",
  "webauthn-rs-proto",
  "zeroize",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_auth_server"
-version = "11.1.0"
+version = "11.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2611,7 +2611,7 @@ dependencies = [
  "totp-rs",
  "tower-sessions",
  "tracing",
- "typeshare",
+ "typeshare-annotation",
  "urlencoding",
  "utoipa",
  "uuid",
@@ -2817,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_supporter"
-version = "5.0.0"
+version = "5.0.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2835,7 +2835,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "typeshare",
+ "typeshare-annotation",
  "zeroize",
 ]
 

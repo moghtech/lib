@@ -18,8 +18,8 @@ repository = "https://github.com/moghtech/lib"
 
 [workspace.dependencies]
 # MOGH API
-mogh_auth_client = "11.1.0"
-mogh_auth_server = "11.1.0"
+mogh_auth_client = "11.1.1"
+mogh_auth_server = "11.1.1"
 
 # MOGH
 mogh_cache = "3.0.0"
@@ -35,7 +35,7 @@ mogh_resolver = "2.0.1"
 mogh_resolver_derive = "2.0.1"
 mogh_secret_file = "2.0.0"
 mogh_server = "4.0.0"
-mogh_supporter = "5.0.0"
+mogh_supporter = "5.0.1"
 mogh_validations = "2.0.0"
 
 # CICADA
@@ -132,7 +132,8 @@ syn = "3.0.10"
 # MISC
 clap = { version = "4.6.8", features = ["derive"] }
 uuid = { version = "1.29.2", features = ["v4"] }
-typeshare = "1.0.5"
+# Only 'typeshare-annotation' is needed for `#[typeshare]` attribute.
+typeshare = { package = "typeshare-annotation", version = "1.0.5" }
 libc = "0.2.191"
 wildcard = "0.3.0"
 ipnet = "2.12.2"
