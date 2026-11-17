@@ -131,7 +131,7 @@ proc-macro2 = "1.0.107"
 syn = "3.0.10"
 
 # MISC
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.8", features = ["derive"] }
 uuid = { version = "1.29.2", features = ["v4"] }
 typeshare = "1.0.5"
 libc = "0.2.191"
