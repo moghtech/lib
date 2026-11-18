@@ -676,9 +676,9 @@ dependencies = [
 
 [[package]]
 name = "cicada_client"
-version = "0.27.2"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8750218c16d160a0c72110ef326b04124a8e55e7df96942a1b366897319762d3"
+checksum = "2b269ed52e60ad0a9b051337e224d2cffa7a5b972853d5ba6cd69ed29cd4bc73"
 dependencies = [
  "async_timing_util",
  "chrono",
@@ -702,14 +702,14 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "tracing",
- "typeshare",
+ "typeshare-annotation",
 ]
 
 [[package]]
 name = "cicada_loader"
-version = "0.27.2"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "789e059497c665d4a0e04df7546c28a6dabe8cfe8eb36bb34e741feb929580bb"
+checksum = "ead8a361f66197d75fcb5b86aecdc0442ce8e88d294514fc1153adb7f1e6852b"
 dependencies = [
  "anyhow",
  "cicada_client",
@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_config"
-version = "5.0.2"
+version = "5.0.3"
 dependencies = [
  "cicada_loader",
  "colored",
@@ -5213,18 +5213,6 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
-
-[[package]]
-name = "typeshare"
-version = "1.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da1bf9fe204f358ffea7f8f779b53923a20278b3ab8e8d97962c5e1b3a54edb7"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "typeshare-annotation",
-]
 
 [[package]]
 name = "typeshare-annotation"
