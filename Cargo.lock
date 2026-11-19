@@ -676,9 +676,9 @@ dependencies = [
 
 [[package]]
 name = "cicada_client"
-version = "0.28.0"
+version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b269ed52e60ad0a9b051337e224d2cffa7a5b972853d5ba6cd69ed29cd4bc73"
+checksum = "9ae08722505957590890cad75ed41004873eb481966899cb3a584bedc8dacf61"
 dependencies = [
  "async_timing_util",
  "chrono",
@@ -707,9 +707,9 @@ dependencies = [
 
 [[package]]
 name = "cicada_loader"
-version = "0.28.0"
+version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ead8a361f66197d75fcb5b86aecdc0442ce8e88d294514fc1153adb7f1e6852b"
+checksum = "c91d4867e4fead60ab4b29cc5b6bd98949b26bb8553d54bfd7be7c658f9689e9"
 dependencies = [
  "anyhow",
  "cicada_client",
@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "mogh_config"
-version = "5.0.3"
+version = "5.0.4"
 dependencies = [
  "cicada_loader",
  "colored",
